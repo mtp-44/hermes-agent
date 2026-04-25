@@ -369,3 +369,48 @@ Two memory systems, different scopes, no conflict:
 - All repos clean and pushed: `open_brain` and `hermes-agent` fork both up to date
 - Hermes stack is fully operational: Ollama + Qwen3.6:27b + hosted Open Brain MCP verified
 - Next: Telegram delivery configuration, then first scheduled routine
+
+---
+
+## Session: 2026-04-25 (Telegram gateway setup)
+
+### Context
+
+- open_brain Telegram bot (`run_bot.py`, token `8648221297:...`) was already running as a persistent process since earlier
+- Telegram only allows one poller per bot token — a separate bot was created via @BotFather for Hermes
+- User's Telegram ID: `8406358795` (already known from open_brain)
+
+### Setup steps
+
+1. Created a new Telegram bot via @BotFather → obtained a new bot token
+2. Added three env vars to `~/.hermes/.env`:
+   - `TELEGRAM_BOT_TOKEN=<hermes-bot-token>`
+   - `TELEGRAM_ALLOWED_USERS=8406358795`
+   - `TELEGRAM_HOME_CHANNEL=8406358795`
+3. Ran `hermes gateway start` — it registered as a launchd service (`ai.hermes.gateway`)
+4. Initial startup failed: `python-telegram-bot not installed`
+   - Root cause: Hermes was installed without the `messaging` extra
+   - Fix: `uv pip install --python ~/.hermes/venv/bin/python ".[messaging]"` from the hermes-agent repo
+   - This installed `python-telegram-bot==22.7` (and discord.py, slack-bolt, etc.)
+5. Restarted gateway — started cleanly, stable PID, no errors in log
+6. Smoke test: sent a message to the Hermes bot in Telegram → received a response (slow, ~expected for local Qwen3.6:27b cold start)
+
+### Important notes
+
+- The Hermes gateway runs as a launchd service: `ai.hermes.gateway`
+- Logs: `~/.hermes/logs/gateway.log` and `~/.hermes/logs/gateway.error.log`
+- `hermes gateway start / stop / restart / status` manages the service
+- `OnDemand = true` in the plist — launchd manages restarts on crash
+- First response from Qwen3.6:27b will be slow (cold model load); subsequent turns in the same session are faster
+
+### Architecture note
+
+- Two separate Telegram bots are now running concurrently on this machine:
+  - `open_brain` bot (`8648221297:...`): capture pipeline — user sends → classify → confirm → save
+  - Hermes bot (separate token): reasoning + delivery — pull Q&A and scheduled routines
+- No conflict: each bot has its own token and polling loop
+
+### New status
+
+- Hermes is fully operational end-to-end: Telegram ↔ Hermes gateway ↔ Qwen3.6:27b ↔ open_brain MCP
+- Next: create the first scheduled routine (morning brief at 07:30 daily)
