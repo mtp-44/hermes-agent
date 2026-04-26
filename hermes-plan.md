@@ -414,3 +414,168 @@ Two memory systems, different scopes, no conflict:
 
 - Hermes is fully operational end-to-end: Telegram ↔ Hermes gateway ↔ Qwen3.6:27b ↔ open_brain MCP
 - Next: create the first scheduled routine (morning brief at 07:30 daily)
+
+---
+
+## Session: 2026-04-26 (model recovery + Qwen3.6:35b-a3b migration)
+
+### What broke
+
+- Hermes gateway had been configured to use local Ollama at `http://localhost:11434/v1` with `qwen3.6:27b`
+- Hermes had been working earlier in the day against that model
+- Failure began at `2026-04-26 20:21:22` when Hermes started receiving:
+  - `HTTP 404: model 'qwen3.6:27b' not found`
+- Root cause: the local Ollama model state had been disrupted during an attempted model switch/removal; Hermes config still pointed at `qwen3.6:27b`, but Ollama no longer had that tag registered
+
+### Initial forensics
+
+- Confirmed Hermes config in `~/.hermes/config.yaml` still pointed to:
+  - `model.default: qwen3.6:27b`
+  - `model.provider: custom`
+  - `model.base_url: http://localhost:11434/v1`
+  - `model.context_length: 65536`
+- Confirmed Ollama server was running, but:
+  - `ollama list` returned no registered models
+  - `ollama ps` returned no loaded model
+  - `curl http://127.0.0.1:11434/api/tags` returned `{"models":[]}`
+- Confirmed from `~/.hermes/logs/agent.log` that Hermes had been healthy earlier and only failed after the model disappeared
+
+### Decision
+
+- Switched target model from dense `qwen3.6:27b` to MoE `qwen3.6:35b-a3b`
+- Chosen runtime target:
+  - `context_length: 131072`
+  - `ollama_num_ctx: 131072`
+
+### Model pull and registration
+
+- Pulled the model successfully with:
+  - `ollama pull qwen3.6:35b-a3b`
+- Verified registration:
+  - `ollama list` showed `qwen3.6:35b-a3b`
+  - `curl http://127.0.0.1:11434/api/tags` showed the same tag via the Ollama API
+
+### Hermes config changes
+
+- Updated `~/.hermes/config.yaml` to:
+
+```yaml
+model:
+  default: qwen3.6:35b-a3b
+  provider: custom
+  base_url: http://localhost:11434/v1
+  context_length: 131072
+  ollama_num_ctx: 131072
+```
+
+- Verified `hermes status` reported:
+  - model `qwen3.6:35b-a3b`
+  - provider `Custom endpoint`
+
+### Important runtime mismatch discovered
+
+The config change alone was not enough.
+
+During live tests:
+
+- First successful Hermes CLI run returned `HERMES OK`, but `ollama ps` showed:
+  - `CONTEXT 65536`
+- After one restart path, a later successful Hermes CLI run still returned `HERMES OK`, but `ollama ps` showed:
+  - `CONTEXT 32768`
+
+This proved the model path was healthy, but the effective Ollama runtime context was not following Hermes config.
+
+### Root cause of the context mismatch
+
+Two separate launchd plist realities existed:
+
+1. `~/Library/LaunchAgents/homebrew.mxcl.ollama.plist`
+2. `/opt/homebrew/opt/ollama/homebrew.mxcl.ollama.plist`
+
+Findings:
+
+- The running Ollama process initially had:
+  - `OLLAMA_CONTEXT_LENGTH=65536`
+- After `brew services restart ollama`, the running service came back with:
+  - `OLLAMA_CONTEXT_LENGTH=0`
+- Ollama log then showed:
+  - `vram-based default context ... default_num_ctx=32768`
+
+This happened because Homebrew's source plist did not contain `OLLAMA_CONTEXT_LENGTH`, so `brew services restart ollama` wiped the manual override from the active launch agent.
+
+### Final Ollama fix
+
+- Added `OLLAMA_CONTEXT_LENGTH=131072` to:
+  - `/opt/homebrew/opt/ollama/homebrew.mxcl.ollama.plist`
+  - `~/Library/LaunchAgents/homebrew.mxcl.ollama.plist`
+- Restarted Ollama with:
+  - `brew services restart ollama`
+
+Verified final live process environment:
+
+- `ps eww -p <ollama-pid>` showed:
+  - `OLLAMA_CONTEXT_LENGTH=131072`
+
+Verified final Ollama server log:
+
+- `server config` showed `OLLAMA_CONTEXT_LENGTH:131072`
+
+### End-to-end verification
+
+Ran a real Hermes request through the CLI:
+
+- Command:
+  - `hermes chat -Q --accept-hooks --ignore-rules -q "Reply with exactly: HERMES OK"`
+- Successful final response:
+  - `HERMES OK`
+- Final verified session id:
+  - `20260426_215539_612c1e`
+
+While that request was live:
+
+- `ollama ps` showed:
+  - model `qwen3.6:35b-a3b`
+  - `PROCESSOR 100% GPU`
+  - `CONTEXT 131072`
+
+This is the first fully confirmed state where:
+
+- Hermes config points to `qwen3.6:35b-a3b`
+- Hermes requests succeed end to end
+- Ollama is actually allocating `131072` context at runtime
+
+### Gateway service state
+
+- Restarted Hermes gateway service after the model switch:
+  - `hermes gateway restart`
+- Verified launchd service `ai.hermes.gateway` is running again
+- Verified the long-running gateway PID changed after restart, so the background service is no longer using stale pre-migration process state
+
+### Stable current state
+
+- Hermes default model: `qwen3.6:35b-a3b`
+- Hermes provider: local custom Ollama endpoint
+- Hermes context config: `131072`
+- Hermes Ollama request context: `131072`
+- Ollama service context cap: `131072`
+- Ollama model registered: `qwen3.6:35b-a3b`
+- Hermes gateway service: running
+
+### Operational warning
+
+If Ollama behavior ever regresses to `32768` or `65536` again, check these first:
+
+1. `ps eww -p <ollama-pid>` for live `OLLAMA_CONTEXT_LENGTH`
+2. `/opt/homebrew/opt/ollama/homebrew.mxcl.ollama.plist`
+3. `~/Library/LaunchAgents/homebrew.mxcl.ollama.plist`
+4. `/opt/homebrew/var/log/ollama.log` for:
+   - `server config`
+   - `vram-based default context`
+   - `KvSize`
+
+### New status
+
+- Hermes is now running on `qwen3.6:35b-a3b`
+- The local Ollama runtime is correctly honoring `131072` context
+- End-to-end CLI verification is complete
+- Background gateway service has been restarted onto the new model
