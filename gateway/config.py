@@ -209,11 +209,26 @@ class StreamingConfig:
     def from_dict(cls, data: Dict[str, Any]) -> "StreamingConfig":
         if not data:
             return cls()
+        edit_interval = data.get("edit_interval")
+        if edit_interval is None and data.get("min_interval") is not None:
+            try:
+                edit_interval = float(data.get("min_interval")) / 1000.0
+            except (TypeError, ValueError):
+                edit_interval = 1.0
+        if edit_interval is None:
+            edit_interval = 1.0
+
+        buffer_threshold = data.get("buffer_threshold")
+        if buffer_threshold is None and data.get("chunk_size") is not None:
+            buffer_threshold = data.get("chunk_size")
+        if buffer_threshold is None:
+            buffer_threshold = 40
+
         return cls(
             enabled=data.get("enabled", False),
             transport=data.get("transport", "edit"),
-            edit_interval=float(data.get("edit_interval", 1.0)),
-            buffer_threshold=int(data.get("buffer_threshold", 40)),
+            edit_interval=float(edit_interval),
+            buffer_threshold=int(buffer_threshold),
             cursor=data.get("cursor", " ▉"),
         )
 
@@ -518,7 +533,13 @@ def load_gateway_config() -> GatewayConfig:
             if "thread_sessions_per_user" in yaml_cfg:
                 gw_data["thread_sessions_per_user"] = yaml_cfg["thread_sessions_per_user"]
 
+            gateway_cfg = yaml_cfg.get("gateway")
+            if not isinstance(gateway_cfg, dict):
+                gateway_cfg = {}
+
             streaming_cfg = yaml_cfg.get("streaming")
+            if not isinstance(streaming_cfg, dict):
+                streaming_cfg = gateway_cfg.get("streaming")
             if isinstance(streaming_cfg, dict):
                 gw_data["streaming"] = streaming_cfg
 

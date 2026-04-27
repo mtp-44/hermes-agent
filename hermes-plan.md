@@ -579,3 +579,160 @@ If Ollama behavior ever regresses to `32768` or `65536` again, check these first
 - The local Ollama runtime is correctly honoring `131072` context
 - End-to-end CLI verification is complete
 - Background gateway service has been restarted onto the new model
+
+---
+
+## Session: 2026-04-27 (MLX enablement + comparison-model preparation)
+
+### Goal
+
+- Verify that Ollama's MLX backend works on this Apple Silicon machine
+- Keep Hermes stable on the already-working `qwen3.6:35b-a3b` path
+- Prepare a heavyweight MLX-side comparison model before considering any Hermes model switch
+
+### Local MLX state discovered
+
+- Installed versions:
+  - `ollama 0.21.2`
+  - `mlx-c 0.6.0_2`
+- Problem discovered:
+  - `/opt/homebrew/opt/mlx-c/lib/libmlxc.dylib` existed
+  - `/opt/homebrew/opt/ollama/bin/libmlxc.dylib` did not
+- This matched the known Homebrew/Ollama MLX dynamic-library issue on Apple Silicon: MLX runtime was present, but Ollama did not have the dylib where it expected to load it
+
+### MLX enablement fix
+
+- Added the missing symlink:
+
+```bash
+ln -sf /opt/homebrew/opt/mlx-c/lib/libmlxc.dylib /opt/homebrew/opt/ollama/bin/libmlxc.dylib
+```
+
+- Verified the symlink existed afterward
+- Verified the Ollama API stayed healthy after the change
+
+### MLX backend proof
+
+Used a small official MLX-tagged model as the backend probe:
+
+- Pulled:
+  - `qwen3.5:2b-mlx-bf16`
+- Confirmed registration in `ollama list`
+- Ran a real generation:
+  - prompt requested exact output `MLX OK`
+  - model returned `MLX OK`
+
+### Evidence that MLX actually ran
+
+`/opt/homebrew/var/log/ollama.log` showed:
+
+- `starting mlx runner subprocess`
+- `MLX engine initialized`
+- `mlx runner is ready`
+
+This is the key verification that the MLX path was genuinely used, not just a normal GGUF runner path.
+
+At runtime, `ollama ps` showed:
+
+- model `qwen3.5:2b-mlx-bf16`
+- `PROCESSOR 100% GPU`
+- `CONTEXT 262144`
+
+### Important conclusion
+
+- MLX is working on this machine now
+- Hermes was **not** switched to an MLX model
+- The small 2B model was only a backend verification probe
+
+### Heavyweight comparison-model selection
+
+To compare something closer to the current Hermes model, the nearest practical MLX/NVFP4-side peer chosen was:
+
+- `qwen3.5:35b-a3b-nvfp4`
+
+Reason for selecting it:
+
+- same `35b-a3b` mixture-of-experts family shape as the current `qwen3.6:35b-a3b`
+- official Ollama MLX/NVFP4-style heavyweight model
+- much more apples-to-apples than the small `2b-mlx-bf16` probe
+
+### Heavyweight pull behavior
+
+- Started pull of `qwen3.5:35b-a3b-nvfp4`
+- Pull was interrupted once and later resumed
+- Resume confirmed that Ollama continued from partial data instead of starting over
+- Final result:
+  - `qwen3.5:35b-a3b-nvfp4` finished successfully
+  - model is now registered in `ollama list`
+
+### Current local model inventory
+
+- `qwen3.6:35b-a3b` — current Hermes model
+- `qwen3.5:2b-mlx-bf16` — MLX verification probe
+- `qwen3.5:35b-a3b-nvfp4` — heavyweight MLX comparison candidate
+
+### Stable current state
+
+- Hermes remains on `qwen3.6:35b-a3b`
+- Hermes path is healthy and unchanged from the verified 2026-04-26 state
+- MLX backend is verified and usable on this machine
+- Heavyweight MLX comparison model is now downloaded and available locally
+
+### Next logical step
+
+Run a head-to-head comparison between:
+
+1. `qwen3.6:35b-a3b`
+2. `qwen3.5:35b-a3b-nvfp4`
+
+Compare:
+
+- cold-start behavior
+- first-token latency
+- throughput
+- obedience on short exact-format prompts
+- quality on small Hermes-relevant reasoning/tool-style prompts
+
+---
+
+## Session: 2026-04-27 (model switch to qwen3.5:35b-a3b-nvfp4)
+
+### Comparison results
+
+Head-to-head battery run against both 35b-a3b models with `think: false`, temperature 0.0:
+
+| Metric | qwen3.6:35b-a3b (GGUF) | qwen3.5:35b-a3b-nvfp4 (MLX) |
+|---|---|---|
+| Cold-start load | 6.8s | 5.1s |
+| Throughput (300 tok) | 31.2 tok/s | 68.7 tok/s |
+| Prompt processing (38 tok) | ~200ms | ~900ms |
+
+Quality: identical across all tests — exact-format obedience, JSON output, and tool-selection reasoning all matched. The nvfp4 model is ~2.2x faster on generation with no observable quality regression.
+
+### Decision
+
+Switched Hermes to `qwen3.5:35b-a3b-nvfp4`.
+
+- Updated `~/.hermes/config.yaml`: `model.default: qwen3.5:35b-a3b-nvfp4`
+- Restarted gateway (`ai.hermes.gateway`)
+- Verified `hermes status` reports new model active
+
+### Note on prompt processing
+
+nvfp4 has slower prompt processing (~900ms vs ~200ms for short prompts). For Hermes routines with large context this may compound slightly, but generation speedup far outweighs it in practice.
+
+### Caution
+
+`brew services restart ollama` will drop the `OLLAMA_CONTEXT_LENGTH=131072` override from the LaunchAgent plist (same issue as 2026-04-26). Re-add manually to both plists if Ollama is ever restarted via brew services. See 2026-04-26 entry for the procedure.
+
+### Stable current state
+
+- Hermes default model: `qwen3.5:35b-a3b-nvfp4`
+- Hermes provider: local custom Ollama endpoint
+- Hermes context config: `131072`
+- Ollama service context cap: `131072`
+- Hermes gateway: running
+
+### Next
+
+Create the first scheduled routine: morning brief at 07:30 daily.
