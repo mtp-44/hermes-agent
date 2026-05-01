@@ -736,3 +736,151 @@ nvfp4 has slower prompt processing (~900ms vs ~200ms for short prompts). For Her
 ### Next
 
 Create the first scheduled routine: morning brief at 07:30 daily.
+
+---
+
+## Session: 2026-04-29 (manual model routing plan)
+
+### Goal
+
+Turbo-charge Hermes with optional cloud models while keeping local inference as the default.
+
+### Routing principle
+
+- Manual routing only at first
+- Plain messages always use the local model
+- Scheduled routines default to the local model
+- Cloud models are used only after an explicit user command
+- No automatic model switching until real usage patterns have been audited
+
+### Session-scoped route commands
+
+| Command | Route | Intended model | Meaning |
+|---|---|---|---|
+| `/local` | local | `qwen3.5:35b-a3b-nvfp4` | Return current session to local Ollama |
+| `/fast` | fast | fast OpenAI model, likely `gpt-5.4-mini` | Use fast cloud model for the current session |
+| `/5.5` | 5.5 | `gpt-5.5` | Use highest-capability OpenAI model for the current session |
+
+Important behavior:
+
+- Route changes apply to the current chat/session, not just one prompt
+- New sessions should default back to local
+- The user must intentionally switch away from local
+- The user can always return to local with `/local`
+
+### Reply markers
+
+Every Hermes reply should begin with exactly one route marker so the active model is obvious in Telegram transcripts:
+
+| Marker | Route |
+|---|---|
+| 🏠 | local |
+| 🏃‍♂️ | fast |
+| 💡 | 5.5 |
+
+Examples:
+
+- `🏠 Here is the local summary...`
+- `🏃‍♂️ Switched this session to fast mode.`
+- `💡 Switched this session to GPT-5.5.`
+
+Marker namespace rule:
+
+- These exact three emojis are reserved exclusively for model route identity
+- Hermes must not use `🏠`, `🏃‍♂️`, or `💡` anywhere else as decorative/status/section emojis
+- Similar or adjacent emojis are allowed for other meanings, but these exact markers must always mean model route
+- The marker should appear once at the beginning of each Hermes reply and should not be repeated elsewhere in the same reply unless discussing the routing system itself
+
+### Local timeout escalation prompt
+
+Hermes should not auto-switch away from local, but it should proactively offer escalation if local inference is slow.
+
+Initial threshold idea:
+
+- 45s: internal slow marker only
+- 75s: ask user whether to keep waiting or switch
+- 150s: ask again only if still no reply
+
+Suggested Telegram copy:
+
+```text
+🏠 Local model has been working for 75s without a reply. Reply /fast to switch this session to the fast model, /5.5 to switch to GPT-5.5, or /wait to keep waiting.
+```
+
+### Usage tracking
+
+Track every non-local route use and every local timeout escalation prompt.
+
+Fields to capture:
+
+- timestamp
+- session id
+- route: local, fast, or 5.5
+- command used: `/fast`, `/5.5`, `/local`, `/wait`
+- model used
+- user request summary
+- reason for escalation, if available
+- duration / timeout elapsed
+- rough token and cost estimate, if available
+- outcome: useful, overkill, not enough, or unknown
+
+### Weekly audit loop
+
+Once per week, review usage together and decide whether any recurring categories are safe to automate.
+
+Audit questions:
+
+- Which tasks were escalated to `/fast` or `/5.5`?
+- Which escalations were clearly worth it?
+- Which were overkill and could have stayed local?
+- Which local timeout prompts led to an escalation?
+- Are there repeated task types where automatic routing would be safe?
+
+### Implementation posture
+
+Start deliberately simple:
+
+- no automatic router
+- no silent cloud fallback
+- no cloud usage without an explicit user command
+- transcripts must make route/model obvious through emoji markers
+- grow automatic routing only from observed weekly evidence
+
+### Implementation update
+
+Implemented in the Hermes gateway code on 2026-04-29:
+
+- `/local`, `/fast`, and `/5.5` are session-scoped gateway model routes
+- `/wait` acknowledges local timeout prompts without changing route
+- all gateway responses are prefixed with the active route marker
+- streamed responses and interim assistant commentary also receive route markers
+- local route emits escalation prompts after 75s and 150s without visible streamed output
+- non-local turns and timeout choices are appended to `~/.hermes/logs/model-routing.jsonl`
+- exact emojis `🏠`, `🏃‍♂️`, and `💡` were removed from core non-routing UI/tool usage
+
+Default route config is code-backed but can be overridden from `~/.hermes/config.yaml`:
+
+```yaml
+model_routes:
+  fast:
+    model: gpt-5.4-mini
+    provider: openai-codex
+    base_url: https://chatgpt.com/backend-api/codex
+    api_mode: codex_responses
+  "5.5":
+    model: gpt-5.5
+    provider: openai-codex
+    base_url: https://chatgpt.com/backend-api/codex
+    api_mode: codex_responses
+```
+
+Current credential note:
+
+- Hermes should use the ChatGPT/Codex subscription login path for `/fast` and `/5.5`
+- Run `hermes auth add openai-codex` and complete the browser device-code login at `https://auth.openai.com/codex/device`
+- Tokens are stored in Hermes' own `~/.hermes/auth.json`; this avoids sharing refresh tokens with Codex CLI or VS Code
+- 2026-04-30 status: `openai-codex` login completed and Hermes reports it as logged in
+- Smoke test passed with `gpt-5.4-mini` through `openai-codex`: prompt requested exact `CODEX OK`, response was `CODEX OK`
+- 2026-04-30 follow-up fix: gateway `/fast` dispatch now bypasses the old Hermes Priority Processing command path
+- `/fast <prompt>`, `/5.5 <prompt>`, and `/local <prompt>` now switch the session route first, then answer the prompt on that route
+- 2026-04-30 Telegram follow-up: `/5.5` parsing is now tolerant of Telegram-style command splitting, and `/55` remains the Telegram-safe alias/menu form

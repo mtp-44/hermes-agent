@@ -2540,7 +2540,7 @@ if __name__ == "__main__":
     for schema in BROWSER_TOOL_SCHEMAS:
         print(f"  🔹 {schema['name']}: {schema['description'][:60]}...")
     
-    print("\n💡 Usage:")
+    print("\n📝 Usage:")
     print("  from tools.browser_tool import browser_navigate, browser_snapshot")
     print("  result = browser_navigate('https://example.com', task_id='my_task')")
     print("  snapshot = browser_snapshot(task_id='my_task')")

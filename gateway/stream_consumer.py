@@ -44,6 +44,7 @@ class StreamConsumerConfig:
     buffer_threshold: int = 40
     cursor: str = " ▉"
     buffer_only: bool = False
+    route_marker: str = ""
 
 
 class GatewayStreamConsumer:
@@ -494,12 +495,22 @@ class GatewayStreamConsumer:
         # Strip trailing whitespace/newlines but preserve leading content
         return cleaned.rstrip()
 
+    def _with_route_marker(self, text: str) -> str:
+        """Prefix visible assistant text with the reserved model-route marker."""
+        marker = (self.cfg.route_marker or "").strip()
+        if not marker:
+            return text
+        stripped = text.lstrip()
+        if stripped.startswith(("🏠", "🏃‍♂️", "💡")):
+            return text
+        return f"{marker} {text}"
+
     async def _send_new_chunk(self, text: str, reply_to_id: Optional[str]) -> Optional[str]:
         """Send a new message chunk, optionally threaded to a previous message.
 
         Returns the message_id so callers can thread subsequent chunks.
         """
-        text = self._clean_for_display(text)
+        text = self._with_route_marker(self._clean_for_display(text))
         if not text.strip():
             return reply_to_id
         try:
@@ -558,7 +569,7 @@ class GatewayStreamConsumer:
 
         Retries each chunk once on flood-control failures with a short delay.
         """
-        final_text = self._clean_for_display(text)
+        final_text = self._with_route_marker(self._clean_for_display(text))
         continuation = self._continuation_text(final_text)
         self._fallback_final_send = False
         if not continuation.strip():
@@ -715,7 +726,7 @@ class GatewayStreamConsumer:
 
     async def _send_commentary(self, text: str) -> bool:
         """Send a completed interim assistant commentary message."""
-        text = self._clean_for_display(text)
+        text = self._with_route_marker(self._clean_for_display(text))
         if not text.strip():
             return False
         try:
@@ -747,7 +758,7 @@ class GatewayStreamConsumer:
         # Strip MEDIA: directives so they don't appear as visible text.
         # Media files are delivered as native attachments after the stream
         # finishes (via _deliver_media_from_response in gateway/run.py).
-        text = self._clean_for_display(text)
+        text = self._with_route_marker(self._clean_for_display(text))
         # A bare streaming cursor is not meaningful user-visible content and
         # can render as a stray tofu/white-box message on some clients.
         visible_without_cursor = text

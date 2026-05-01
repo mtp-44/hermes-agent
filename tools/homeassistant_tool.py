@@ -482,7 +482,7 @@ registry.register(
     schema=HA_LIST_ENTITIES_SCHEMA,
     handler=_handle_list_entities,
     check_fn=_check_ha_available,
-    emoji="🏠",
+    emoji="🏡",
 )
 
 registry.register(
@@ -491,7 +491,7 @@ registry.register(
     schema=HA_GET_STATE_SCHEMA,
     handler=_handle_get_state,
     check_fn=_check_ha_available,
-    emoji="🏠",
+    emoji="🏡",
 )
 
 registry.register(
@@ -500,7 +500,7 @@ registry.register(
     schema=HA_LIST_SERVICES_SCHEMA,
     handler=_handle_list_services,
     check_fn=_check_ha_available,
-    emoji="🏠",
+    emoji="🏡",
 )
 
 registry.register(
@@ -509,5 +509,5 @@ registry.register(
     schema=HA_CALL_SERVICE_SCHEMA,
     handler=_handle_call_service,
     check_fn=_check_ha_available,
-    emoji="🏠",
+    emoji="🏡",
 )

@@ -845,6 +845,12 @@ class MessageEvent:
         raw = parts[0][1:].lower() if parts else None
         if raw and "@" in raw:
             raw = raw.split("@", 1)[0]
+        # Some gateways treat `/5.5 ...` like command `/5` with the rest
+        # folded into args. Recover the intended route command.
+        if raw == "5":
+            args = parts[1] if len(parts) > 1 else ""
+            if args.startswith(".5") and (len(args) == 2 or args[2].isspace()):
+                raw = "5.5"
         # Reject file paths: valid command names never contain /
         if raw and "/" in raw:
             return None
@@ -856,6 +862,13 @@ class MessageEvent:
             return self.text
         parts = self.text.split(maxsplit=1)
         args = parts[1] if len(parts) > 1 else ""
+        # Keep args aligned with get_command()'s `/5.5` recovery path.
+        if parts:
+            raw = parts[0][1:].lower()
+            if "@" in raw:
+                raw = raw.split("@", 1)[0]
+            if raw == "5" and args.startswith(".5"):
+                args = args[2:].lstrip()
         # iOS auto-corrects -- to — (em dash) and - to – (en dash)
         args = args.replace("\u2014\u2014", "--").replace("\u2014", "--").replace("\u2013", "-")
         return args
@@ -1979,6 +1992,7 @@ class BasePlatformAdapter(ABC):
 
         try:
             response = await self._message_handler(event)
+            response = self._prefix_gateway_response(event, response)
             # Old adapter task (if any) is cancelled AFTER the runner has
             # fully handled the command — keeps ordering deterministic.
             await self.cancel_session_processing(
@@ -2070,6 +2084,7 @@ class BasePlatformAdapter(ABC):
                 try:
                     _thread_meta = {"thread_id": event.source.thread_id} if event.source.thread_id else None
                     response = await self._message_handler(event)
+                    response = self._prefix_gateway_response(event, response)
                     if response:
                         await self._send_with_retry(
                             chat_id=event.source.chat_id,
@@ -2173,6 +2188,7 @@ class BasePlatformAdapter(ABC):
 
             # Call the handler (this can take a while with tool calls)
             response = await self._message_handler(event)
+            response = self._prefix_gateway_response(event, response)
             
             # Send response if any.  A None/empty response is normal when
             # streaming already delivered the text (already_sent=True) or
@@ -2522,6 +2538,20 @@ class BasePlatformAdapter(ABC):
         self._session_tasks.clear()
         self._pending_messages.clear()
         self._active_sessions.clear()
+
+    def _prefix_gateway_response(self, event: MessageEvent, response: Optional[str]) -> Optional[str]:
+        """Let the gateway runner attach per-session model route markers."""
+        if not response:
+            return response
+        handler_owner = getattr(self._message_handler, "__self__", None)
+        prefixer = getattr(handler_owner, "_prefix_gateway_response", None)
+        if not callable(prefixer):
+            return response
+        try:
+            return prefixer(event, response)
+        except Exception as exc:
+            logger.debug("[%s] route marker prefix failed: %s", self.name, exc)
+            return response
 
     def has_pending_interrupt(self, session_key: str) -> bool:
         """Check if there's a pending interrupt for a session."""

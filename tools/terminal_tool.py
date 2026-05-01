@@ -256,7 +256,7 @@ def _handle_sudo_failure(output: str, env_type: str) -> str:
     for failure in sudo_failures:
         if failure in output:
             from hermes_constants import display_hermes_home as _dhh
-            return output + f"\n\n💡 Tip: To enable sudo over messaging, add SUDO_PASSWORD to {_dhh()}/.env on the agent machine."
+            return output + f"\n\n📝 Tip: To enable sudo over messaging, add SUDO_PASSWORD to {_dhh()}/.env on the agent machine."
     
     return output
 

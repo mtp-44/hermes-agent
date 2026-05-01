@@ -41,6 +41,28 @@ from agent.account_usage import fetch_account_usage, render_account_usage_lines
 _AGENT_CACHE_MAX_SIZE = 128
 _AGENT_CACHE_IDLE_TTL_SECS = 3600.0  # evict agents idle for >1h
 
+_MODEL_ROUTE_MARKERS = {
+    "local": "🏠",
+    "fast": "🏃‍♂️",
+    "5.5": "💡",
+}
+_MODEL_ROUTE_DEFAULTS = {
+    "fast": {
+        "model": "gpt-5.4-mini",
+        "provider": "openai-codex",
+        "base_url": "https://chatgpt.com/backend-api/codex",
+        "api_mode": "codex_responses",
+        "label": "fast model",
+    },
+    "5.5": {
+        "model": "gpt-5.5",
+        "provider": "openai-codex",
+        "base_url": "https://chatgpt.com/backend-api/codex",
+        "api_mode": "codex_responses",
+        "label": "GPT-5.5",
+    },
+}
+
 # ---------------------------------------------------------------------------
 # SSL certificate auto-detection for NixOS and other non-standard systems.
 # Must run BEFORE any HTTP library (discord, aiohttp, etc.) is imported.
@@ -946,6 +968,64 @@ class GatewayRunner:
             group_sessions_per_user=getattr(config, "group_sessions_per_user", True),
             thread_sessions_per_user=getattr(config, "thread_sessions_per_user", False),
         )
+
+    def _route_for_session(self, session_key: Optional[str]) -> str:
+        """Return the active manual model route for a session."""
+        if not session_key:
+            return "local"
+        override = self._session_model_overrides.get(session_key) or {}
+        route = str(override.get("route") or "local").strip().lower()
+        return route if route in _MODEL_ROUTE_MARKERS else "local"
+
+    def _route_marker_for_session(self, session_key: Optional[str]) -> str:
+        return _MODEL_ROUTE_MARKERS.get(self._route_for_session(session_key), _MODEL_ROUTE_MARKERS["local"])
+
+    def _prefix_gateway_response(self, event: MessageEvent, response: Optional[str]) -> Optional[str]:
+        """Prefix user-visible gateway replies with the reserved model route marker."""
+        if not response:
+            return response
+        stripped = response.lstrip()
+        if stripped.startswith(tuple(_MODEL_ROUTE_MARKERS.values())):
+            return response
+        try:
+            session_key = self._session_key_for_source(event.source)
+        except Exception:
+            session_key = None
+        return f"{self._route_marker_for_session(session_key)} {response}"
+
+    def _load_model_route_config(self, route: str) -> dict:
+        """Load route model settings from config.yaml, with conservative defaults."""
+        route = route.strip().lower()
+        cfg = _load_gateway_config()
+        configured = cfg.get("model_routes", {}) if isinstance(cfg, dict) else {}
+        entry = configured.get(route, {}) if isinstance(configured, dict) else {}
+        if not isinstance(entry, dict):
+            entry = {}
+        defaults = _MODEL_ROUTE_DEFAULTS.get(route, {})
+        merged = {**defaults, **entry}
+        merged["route"] = route
+        return merged
+
+    def _log_model_route_event(self, event_type: str, payload: dict) -> None:
+        """Append model-routing telemetry for weekly manual audits."""
+        try:
+            log_dir = _hermes_home / "logs"
+            log_dir.mkdir(parents=True, exist_ok=True)
+            record = {
+                "timestamp": datetime.now().isoformat(),
+                "event": event_type,
+                **payload,
+            }
+            with open(log_dir / "model-routing.jsonl", "a", encoding="utf-8") as fh:
+                fh.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
+        except Exception as exc:
+            logger.debug("model route telemetry write failed: %s", exc)
+
+    def _summarize_route_request(self, text: str, limit: int = 220) -> str:
+        summary = " ".join(str(text or "").split())
+        if len(summary) > limit:
+            summary = summary[:limit - 3] + "..."
+        return summary
 
     def _resolve_session_agent_runtime(
         self,
@@ -3261,6 +3341,17 @@ class GatewayRunner:
                 logger.info("STOP for session %s — agent interrupted, session lock released", _quick_key)
                 return "⚡ Stopped. You can continue this session."
 
+            if _cmd_def_inner and _cmd_def_inner.name == "wait":
+                self._log_model_route_event("timeout_choice", {
+                    "session_key": _quick_key,
+                    "platform": source.platform.value if source.platform else "",
+                    "chat_id": source.chat_id,
+                    "route": self._route_for_session(_quick_key),
+                    "command": "/wait",
+                    "choice": "wait",
+                })
+                return "Still waiting locally."
+
             # /reset and /new must bypass the running-agent guard so they
             # actually dispatch as commands instead of being queued as user
             # text (which would be fed back to the agent with the same
@@ -3343,7 +3434,24 @@ class GatewayRunner:
                     adapter._pending_messages[_quick_key] = queued_event
                 return "No active agent — /steer queued for the next turn."
 
-            # /model must not be used while the agent is running.
+            if _cmd_def_inner and _cmd_def_inner.name in ("fast", "5.5", "local"):
+                await self._interrupt_and_clear_session(
+                    _quick_key,
+                    source,
+                    interrupt_reason=f"manual_route_switch_{_cmd_def_inner.name}",
+                    invalidation_reason="manual_model_route_switch",
+                )
+                self._log_model_route_event("timeout_choice", {
+                    "session_key": _quick_key,
+                    "platform": source.platform.value if source.platform else "",
+                    "chat_id": source.chat_id,
+                    "route": _cmd_def_inner.name,
+                    "command": f"/{_cmd_def_inner.name}",
+                    "choice": _cmd_def_inner.name,
+                })
+                return await self._handle_model_route_command_with_prompt(event, _cmd_def_inner.name)
+
+            # Other model switches must happen between turns.
             if _cmd_def_inner and _cmd_def_inner.name == "model":
                 return "Agent is running — wait or /stop first, then switch models."
 
@@ -3570,12 +3678,21 @@ class GatewayRunner:
         
         if canonical == "stop":
             return await self._handle_stop_command(event)
+
+        if canonical == "wait":
+            return "Nothing is currently waiting. Plain messages will use the local model unless you switch routes."
         
         if canonical == "reasoning":
             return await self._handle_reasoning_command(event)
 
         if canonical == "fast":
-            return await self._handle_fast_command(event)
+            return await self._handle_model_route_command_with_prompt(event, "fast")
+
+        if canonical == "local":
+            return await self._handle_model_route_command_with_prompt(event, "local")
+
+        if canonical == "5.5":
+            return await self._handle_model_route_command_with_prompt(event, "5.5")
 
         if canonical == "verbose":
             return await self._handle_verbose_command(event)
@@ -3765,10 +3882,10 @@ class GatewayRunner:
                     # the user instead of silently forwarding it to the LLM
                     # as free text (which leads to silent-failure behavior
                     # like the model inventing a delegate_task call).
-                    # Normalize to hyphenated form before checking known
-                    # built-ins (command may be an alias target set by the
-                    # quick-command block above, so _cmd_def can be stale).
-                    if command.replace("_", "-") not in GATEWAY_KNOWN_COMMANDS:
+                    # Resolve through the central command registry so aliases
+                    # and punctuation-bearing commands like `/5.5` are treated
+                    # the same way everywhere.
+                    if resolve_command(command) is None and command.replace("_", "-") not in GATEWAY_KNOWN_COMMANDS:
                         logger.warning(
                             "Unrecognized slash command /%s from %s — "
                             "replying with unknown-command notice",
@@ -4503,6 +4620,23 @@ class GatewayRunner:
                 _platform_name, source.chat_id or "unknown",
                 _response_time, _api_calls, _resp_len,
             )
+            _active_route = self._route_for_session(session_key)
+            if _active_route != "local":
+                self._log_model_route_event("turn", {
+                    "session_key": session_key,
+                    "session_id": session_entry.session_id,
+                    "platform": source.platform.value if source.platform else "",
+                    "chat_id": source.chat_id,
+                    "route": _active_route,
+                    "model": agent_result.get("model"),
+                    "duration_seconds": round(_response_time, 2),
+                    "api_calls": _api_calls,
+                    "input_tokens": agent_result.get("input_tokens", 0),
+                    "output_tokens": agent_result.get("output_tokens", 0),
+                    "last_prompt_tokens": agent_result.get("last_prompt_tokens", 0),
+                    "user_request_summary": self._summarize_route_request(message_text),
+                    "outcome": "unknown",
+                })
 
             # Successful turn — clear any stuck-loop counter for this session.
             # This ensures the counter only accumulates across CONSECUTIVE
@@ -5707,6 +5841,136 @@ class GatewayRunner:
             lines.append("_(session only -- add `--global` to persist)_")
 
         return "\n".join(lines)
+
+    async def _handle_model_route_command(self, event: MessageEvent, route: str) -> str:
+        """Switch the current gateway session between local, fast, and 5.5 routes."""
+        route = route.strip().lower()
+        source = event.source
+        session_key = self._session_key_for_source(source)
+
+        if route == "local":
+            previous = self._route_for_session(session_key)
+            self._session_model_overrides.pop(session_key, None)
+            self._evict_cached_agent(session_key)
+            if not hasattr(self, "_pending_model_notes"):
+                self._pending_model_notes = {}
+            self._pending_model_notes[session_key] = (
+                "[Note: this session was switched back to the local model route. "
+                "You are now using the default local model/provider for this session. "
+                f"Use the reserved route marker {_MODEL_ROUTE_MARKERS['local']} at the start of replies. "
+                "Do not identify the current route as fast or 5.5 unless the user is explicitly asking for a comparison.]"
+            )
+            self._log_model_route_event("switch", {
+                "session_key": session_key,
+                "platform": source.platform.value if source.platform else "",
+                "chat_id": source.chat_id,
+                "route": "local",
+                "previous_route": previous,
+                "command": "/local",
+                "model": _resolve_gateway_model(),
+            })
+            return "Back on local."
+
+        if route not in _MODEL_ROUTE_DEFAULTS:
+            return f"Unknown model route `{route}`."
+
+        route_cfg = self._load_model_route_config(route)
+        model = str(route_cfg.get("model") or "").strip()
+        provider = str(route_cfg.get("provider") or "custom").strip().lower()
+        base_url = str(route_cfg.get("base_url") or "").strip().rstrip("/")
+        api_mode = str(route_cfg.get("api_mode") or "").strip() or None
+        api_key = str(route_cfg.get("api_key") or "").strip()
+        key_env = str(route_cfg.get("api_key_env") or "").strip()
+        if not api_key and key_env:
+            api_key = os.getenv(key_env, "").strip()
+
+        if base_url.startswith("https://api.openai.com") and not api_key:
+            return f"Route `{route}` needs `{key_env or 'OPENAI_API_KEY'}`."
+
+        try:
+            from hermes_cli.runtime_provider import resolve_runtime_provider
+            explicit_base_url = base_url or None
+            if provider == "openai-codex" and not api_key:
+                # Let the Codex provider resolve its own auth/base URL. Passing
+                # the default URL explicitly takes a narrower auth path that
+                # can miss OAuth credentials stored in the credential pool.
+                explicit_base_url = None
+            runtime = resolve_runtime_provider(
+                requested=provider,
+                explicit_api_key=api_key or None,
+                explicit_base_url=explicit_base_url,
+                target_model=model or None,
+            )
+        except Exception as exc:
+            return (
+                f"Could not switch to `{route}`: {exc}\n"
+                f"Check `model_routes.{route}` in config.yaml and credentials."
+            )
+
+        if api_mode:
+            runtime["api_mode"] = api_mode
+        if base_url and provider != "openai-codex":
+            runtime["base_url"] = base_url
+
+        if not model:
+            model = str(route_cfg.get("default_model") or runtime.get("model") or "").strip()
+        if not model:
+            return f"Route `{route}` has no model configured."
+
+        self._session_model_overrides[session_key] = {
+            "route": route,
+            "model": model,
+            "provider": runtime.get("provider") or provider,
+            "api_key": runtime.get("api_key") or api_key,
+            "base_url": runtime.get("base_url") or base_url,
+            "api_mode": runtime.get("api_mode") or api_mode or "chat_completions",
+        }
+        self._evict_cached_agent(session_key)
+
+        if not hasattr(self, "_pending_model_notes"):
+            self._pending_model_notes = {}
+        self._pending_model_notes[session_key] = (
+            f"[Note: this session was manually switched to the `{route}` model route. "
+            f"Use the reserved route marker {_MODEL_ROUTE_MARKERS[route]} at the start of replies.]"
+        )
+
+        self._log_model_route_event("switch", {
+            "session_key": session_key,
+            "platform": source.platform.value if source.platform else "",
+            "chat_id": source.chat_id,
+            "route": route,
+            "command": f"/{route}",
+            "model": model,
+            "provider": runtime.get("provider") or provider,
+            "base_url": runtime.get("base_url") or base_url,
+            "reason": self._summarize_route_request(event.get_command_args() or "manual switch"),
+        })
+
+        label = route_cfg.get("label") or route
+        if route == "fast":
+            return f"Switched this session to {label} (`{model}`). Use /local to switch back."
+        return f"Switched this session to {label} (`{model}`). Use /local to switch back."
+
+    async def _handle_model_route_command_with_prompt(self, event: MessageEvent, route: str) -> Optional[str]:
+        """Switch route, and when command args are present, answer them on that route.
+
+        This makes `/fast summarize this` behave like a natural one-line
+        escalation while still keeping the route session-scoped afterward.
+        """
+        prompt = event.get_command_args().strip()
+        switch_response = await self._handle_model_route_command(event, route)
+        if not prompt:
+            return switch_response
+
+        if switch_response.startswith(("Could not switch", "Unknown model route", "Route `")):
+            return switch_response
+
+        prompt_event = dataclasses.replace(
+            event,
+            text=prompt,
+            message_type=MessageType.TEXT,
+        )
+        return await self._handle_message(prompt_event)
 
     async def _handle_personality_command(self, event: MessageEvent) -> str:
         """Handle /personality command - list or set a personality."""
@@ -9631,6 +9895,7 @@ class GatewayRunner:
                             buffer_threshold=_scfg.buffer_threshold,
                             cursor=_effective_cursor,
                             buffer_only=_buffer_only,
+                            route_marker=self._route_marker_for_session(session_key),
                         )
                         _stream_consumer = GatewayStreamConsumer(
                             adapter=_adapter,
@@ -10301,6 +10566,51 @@ class GatewayRunner:
 
             _inactivity_timeout = False
             _POLL_INTERVAL = 5.0
+            _route_at_start = self._route_for_session(session_key)
+            _slow_prompt_thresholds = [75.0, 150.0] if _route_at_start == "local" else []
+            _slow_prompt_index = 0
+
+            async def _maybe_prompt_local_escalation() -> None:
+                nonlocal _slow_prompt_index
+                if not _slow_prompt_thresholds:
+                    return
+                if _slow_prompt_index >= len(_slow_prompt_thresholds):
+                    return
+                elapsed = time.time() - _notify_start
+                threshold = _slow_prompt_thresholds[_slow_prompt_index]
+                if elapsed < threshold:
+                    return
+                _slow_prompt_index += 1
+                # If streaming/interim text already reached the user, this is no
+                # longer a "no reply" situation.
+                _sc = stream_consumer_holder[0]
+                if _sc and getattr(_sc, "already_sent", False):
+                    return
+                _adapter = self.adapters.get(source.platform)
+                if not _adapter:
+                    return
+                prompt = (
+                    f"🏠 Local model has been working for {int(threshold)}s without a reply. "
+                    "Reply /fast to switch this session to the fast model, "
+                    "/5.5 to switch to GPT-5.5, or /wait to keep waiting."
+                )
+                try:
+                    await _adapter.send(
+                        source.chat_id,
+                        prompt,
+                        metadata=_status_thread_metadata,
+                    )
+                    self._log_model_route_event("local_timeout_prompt", {
+                        "session_key": session_key,
+                        "platform": source.platform.value if source.platform else "",
+                        "chat_id": source.chat_id,
+                        "route": "local",
+                        "elapsed_seconds": int(threshold),
+                        "model": _resolve_gateway_model(),
+                        "user_request_summary": self._summarize_route_request(message),
+                    })
+                except Exception as exc:
+                    logger.debug("local escalation prompt send failed: %s", exc)
 
             if _agent_timeout is None:
                 # Unlimited — still poll periodically for backup interrupt
@@ -10313,6 +10623,7 @@ class GatewayRunner:
                     if done:
                         response = _executor_task.result()
                         break
+                    await _maybe_prompt_local_escalation()
                     # Backup interrupt check: if the monitor task died or
                     # missed the interrupt, catch it here.
                     if not _interrupt_detected.is_set() and session_key:
@@ -10343,6 +10654,7 @@ class GatewayRunner:
                     if done:
                         response = _executor_task.result()
                         break
+                    await _maybe_prompt_local_escalation()
                     # Agent still running — check inactivity.
                     _agent_ref = agent_holder[0]
                     _idle_secs = 0.0
