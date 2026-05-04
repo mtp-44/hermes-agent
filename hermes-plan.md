@@ -884,3 +884,243 @@ Current credential note:
 - 2026-04-30 follow-up fix: gateway `/fast` dispatch now bypasses the old Hermes Priority Processing command path
 - `/fast <prompt>`, `/5.5 <prompt>`, and `/local <prompt>` now switch the session route first, then answer the prompt on that route
 - 2026-04-30 Telegram follow-up: `/5.5` parsing is now tolerant of Telegram-style command splitting, and `/55` remains the Telegram-safe alias/menu form
+
+---
+
+## Session: 2026-05-04
+
+### Context
+
+- Reviewed `OB1` as a reference repo, not as a replacement architecture
+- Agreed that Hermes remains the primary interface
+- Agreed that `open_brain` remains the canonical durable memory layer
+- Decided to evaluate any borrowed pattern only by whether it improves Hermes-to-Open-Brain capture and retrieval
+
+### Key architectural decision
+
+Hermes should operate as a two-layer memory system:
+
+| Layer | Role | Primary qualities |
+|---|---|---|
+| Hermes memory | operational/session memory | fast, local, provisional, continuity-oriented |
+| `open_brain` | durable/canonical memory | persistent, structured where useful, cross-session, cross-interface |
+
+This is not a dual-source-of-truth model.
+It is a seamless two-layer model with different responsibilities.
+
+### Canonical role split
+
+**Hermes is responsible for:**
+
+- conversational continuity
+- short-term working memory
+- active task/session state
+- deciding when knowledge should be promoted to durable memory
+- retrieving from both layers
+- explaining answers with provenance and appropriate confidence
+
+**`open_brain` is responsible for:**
+
+- durable long-term storage
+- semantic retrieval across time
+- structured records and entities
+- facts, decisions, summaries, action items, and other cross-session knowledge
+- a memory layer that other interfaces can also rely on
+
+### Source-of-truth rule
+
+When the two layers differ:
+
+1. current-session nuance belongs to Hermes memory
+2. durable facts belong to `open_brain`
+3. if both agree, Hermes may answer confidently
+4. if they conflict, Hermes should prefer:
+   - Hermes memory for clearly newer in-session updates
+   - `open_brain` for stable historical fact
+5. if the conflict is material and cannot be resolved safely, Hermes should say so explicitly
+
+Hermes must not flatten conflicting evidence into one overconfident answer.
+
+### Trust and provenance model
+
+Hermes retrieval should distinguish internally among:
+
+- `session_memory`
+- `open_brain`
+- `synthesized_from_both`
+- `inference`
+
+User-facing answers should reflect this distinction when it matters.
+
+Example behaviors:
+
+- "Earlier in this session, you said..."
+- "Your Open Brain shows..."
+- "Both your current session and Open Brain point to..."
+- "I found partial signals, but they conflict."
+
+Trustworthiness is more important than smoothness.
+
+### Capture model
+
+Not everything from Hermes should be promoted into `open_brain`.
+
+**Keep only in Hermes memory:**
+
+- raw chatter
+- low-signal brainstorming fragments
+- abandoned paths
+- temporary scaffolding
+- speculative interpretations that were never confirmed
+
+**Promote into `open_brain` when one of these is true:**
+
+- the user states a durable fact
+- a preference appears stable and important
+- a decision is made or accepted
+- an action item is real and worth tracking
+- a structured entity should be created or updated
+- a session summary would be useful later
+- the content should survive across interfaces or future sessions
+
+### Preferred durable capture shapes
+
+Hermes should mostly write these forms into `open_brain`:
+
+- single durable facts
+- action items
+- structured entity updates
+- concise decision records
+- concise session summaries
+
+This should avoid dumping raw session text into the durable store.
+
+### Retrieval model
+
+Hermes should not always query both layers the same way.
+
+**Fast path**
+
+Use Hermes memory first when the question is obviously about:
+
+- current session context
+- active task state
+- something just discussed
+
+**Durable path**
+
+Use `open_brain` first when the question is about:
+
+- history
+- known facts
+- structured records
+- previously made decisions
+- information that should survive across sessions
+
+**Blended path**
+
+Use both when the question needs both short-term and long-term context.
+
+Examples:
+
+- "What are we doing next on this project?"
+- "What do you know about Marcus and what changed today?"
+- "Summarize this plan using what we discussed and what is already in my brain."
+
+### Retrieval arbitration sequence
+
+When both layers are queried, Hermes should:
+
+1. retrieve session-local evidence
+2. retrieve durable `open_brain` evidence
+3. compare overlap, novelty, and conflict
+4. synthesize an answer with source awareness
+5. explicitly flag contradictions instead of hiding them
+
+### Hermes compatibility constraint
+
+This is now a core constraint for future work:
+
+Hermes is the interface used most often, so any memory-related change must preserve or improve seamless Hermes-to-Open-Brain operation.
+
+That means:
+
+- no second primary interface
+- no second canonical memory store
+- no borrowed `OB1` pattern that bypasses Hermes
+- no architectural drift that makes `open_brain` harder for Hermes to reason about
+
+Every proposed change should be tested against this question:
+
+> Does this make Hermes better at capturing to, retrieving from, and explaining `open_brain`?
+
+If not, it is probably not worth doing.
+
+### `OB1` reuse filter
+
+Agreed filter for ideas borrowed from `OB1`:
+
+**Worth reusing soon**
+
+- content fingerprint dedup
+- auto-capture protocol
+- contribution packaging pattern
+
+**Worth reusing later**
+
+- Slack capture, if Hermes actually benefits from another capture surface
+- dashboard ideas, if they help inspect or audit `open_brain`
+
+**Not a priority right now**
+
+- multi-user RLS patterns
+- extension curriculum unrelated to Hermes/Open-Brain flow
+- any product surface that creates a second main interface
+
+### Priority order
+
+The current recommended order is:
+
+1. auto-capture convention
+2. content fingerprint dedup
+3. contribution packaging pattern
+4. Slack capture only if a real capture need appears
+
+### Immediate implementation guidance
+
+**Auto-capture convention**
+
+- easiest and quickest win
+- should define a Hermes behavior where session close writes:
+  - one concise session summary
+  - separate durable action items
+  - only high-signal outputs
+
+**Content fingerprint dedup**
+
+- highest leverage infrastructure improvement
+- should protect against:
+  - duplicate imports
+  - retry-based duplicate capture
+  - overlapping write surfaces
+  - repeated summaries or action-item writes
+
+**Contribution packaging pattern**
+
+- worth adopting lightly as organization, not as a replatforming exercise
+- useful conceptual folders:
+  - `recipes/`
+  - `skills/`
+  - `integrations/`
+  - `primitives/`
+
+### Final position from this session
+
+The correct model is not "Hermes or `open_brain`."
+It is:
+
+- Hermes for interaction and short-term intelligence
+- `open_brain` for durable memory and retrieval
+- one seamless experience across both
+
+This should be treated as the design standard future work must preserve.
