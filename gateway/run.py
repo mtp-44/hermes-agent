@@ -2453,9 +2453,14 @@ class GatewayRunner:
                 # (``shutdown_memory_provider(messages=None)``).
                 session_messages = getattr(agent, "_session_messages", None)
                 if isinstance(session_messages, list):
-                    agent.shutdown_memory_provider(session_messages)
+                    agent.shutdown_memory_provider(
+                        session_messages,
+                        boundary_reason="gateway_shutdown",
+                    )
                 else:
-                    agent.shutdown_memory_provider()
+                    agent.shutdown_memory_provider(
+                        boundary_reason="gateway_shutdown",
+                    )
         except Exception:
             pass
         # Close tool resources (terminal sandboxes, browser daemons,
@@ -4937,6 +4942,12 @@ class GatewayRunner:
                 # doesn't think an agent is still active.
                 return await self._handle_reset_command(event)
 
+            if _cmd_def_inner and _cmd_def_inner.name == "ob":
+                return (
+                    "⏳ Hermes is still responding. Send /ob after this reply finishes "
+                    "to capture the latest conversation without resetting."
+                )
+
             # /queue <prompt> — queue without interrupting.
             # Semantics: each /queue invocation produces its own full agent
             # turn, processed in FIFO order after the current run (and any
@@ -5275,6 +5286,9 @@ class GatewayRunner:
 
         if canonical == "new":
             return await self._handle_reset_command(event)
+
+        if canonical == "ob":
+            return await self._handle_open_brain_capture_command(event)
         
         if canonical == "help":
             return await self._handle_help_command(event)
@@ -6917,6 +6931,30 @@ class GatewayRunner:
                 _cached = self._agent_cache.get(session_key)
                 _old_agent = _cached[0] if isinstance(_cached, tuple) else _cached if _cached else None
             if _old_agent is not None:
+                try:
+                    _session_messages = getattr(_old_agent, "_session_messages", None)
+                    if (
+                        hasattr(_old_agent, "commit_memory_session")
+                        and isinstance(_session_messages, list)
+                        and _session_messages
+                    ):
+                        _old_agent.commit_memory_session(
+                            list(_session_messages),
+                            boundary_reason="session_reset",
+                        )
+                    elif hasattr(_old_agent, "commit_memory_session") and old_entry is not None:
+                        _transcript = self.session_store.load_transcript(old_entry.session_id)
+                        if _transcript:
+                            _old_agent.commit_memory_session(
+                                list(_transcript),
+                                boundary_reason="session_reset",
+                            )
+                except Exception:
+                    logger.debug(
+                        "pre-reset memory commit failed for %s",
+                        session_key,
+                        exc_info=True,
+                    )
                 self._cleanup_agent_resources(_old_agent)
         self._evict_cached_agent(session_key)
 
@@ -7032,6 +7070,58 @@ class GatewayRunner:
         if session_info:
             return EphemeralReply(f"{header}\n\n{session_info}{_tip_line}")
         return EphemeralReply(f"{header}{_tip_line}")
+
+    async def _handle_open_brain_capture_command(self, event: MessageEvent) -> Union[str, EphemeralReply]:
+        """Handle /ob command without resetting the live conversation."""
+        source = event.source
+        session_entry = self.session_store.get_or_create_session(source)
+        history = self.session_store.load_transcript(session_entry.session_id)
+        start = max(0, int(getattr(session_entry, "manual_capture_index", 0) or 0))
+        start = min(start, len(history))
+
+        if start >= len(history):
+            return EphemeralReply("No new conversation content since the last /ob.")
+
+        capture_messages = history[start:]
+        committed = False
+        cached = None
+        cache_lock = getattr(self, "_agent_cache_lock", None)
+        agent_cache = getattr(self, "_agent_cache", {})
+        if cache_lock is not None:
+            with cache_lock:
+                cached = agent_cache.get(session_entry.session_key)
+        else:
+            cached = agent_cache.get(session_entry.session_key)
+        agent = cached[0] if isinstance(cached, tuple) else cached if cached else None
+
+        if agent is not None and hasattr(agent, "commit_memory_session"):
+            try:
+                agent.commit_memory_session(
+                    list(capture_messages),
+                    boundary_reason="manual_capture",
+                    message_index_offset=start,
+                )
+                committed = True
+            except Exception:
+                logger.debug(
+                    "manual /ob capture failed for %s",
+                    session_entry.session_key,
+                    exc_info=True,
+                )
+
+        if not committed:
+            return EphemeralReply(
+                "I couldn't reach the active memory provider for /ob. Try again after the next reply."
+            )
+
+        self.session_store.update_session(
+            session_entry.session_key,
+            manual_capture_index=len(history),
+        )
+        return EphemeralReply(
+            f"Captured {len(capture_messages)} message(s) to durable memory. "
+            "Conversation context stays active."
+        )
 
     async def _handle_profile_command(self, event: MessageEvent) -> str:
         """Handle /profile — show active profile name and home directory."""

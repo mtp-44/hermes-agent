@@ -467,6 +467,9 @@ class SessionEntry:
     # context-note prepend — both wrong for an explicit manual reset.
     # See issue #6508.
     is_fresh_reset: bool = False
+
+    # Rolling cursor for manual durable-memory capture commands like /ob.
+    manual_capture_index: int = 0
     
     # Set by the background expiry watcher after it finalizes an expired
     # session (invoking on_session_finalize hooks and evicting the cached
@@ -518,6 +521,7 @@ class SessionEntry:
                 else None
             ),
             "is_fresh_reset": self.is_fresh_reset,
+            "manual_capture_index": self.manual_capture_index,
         }
         if self.origin:
             result["origin"] = self.origin.to_dict()
@@ -567,6 +571,7 @@ class SessionEntry:
             resume_reason=data.get("resume_reason"),
             last_resume_marked_at=last_resume_marked_at,
             is_fresh_reset=data.get("is_fresh_reset", False),
+            manual_capture_index=data.get("manual_capture_index", 0),
         )
 
 
@@ -952,6 +957,7 @@ class SessionStore:
         self,
         session_key: str,
         last_prompt_tokens: int = None,
+        manual_capture_index: int = None,
     ) -> None:
         """Update lightweight session metadata after an interaction."""
         with self._lock:
@@ -962,6 +968,8 @@ class SessionStore:
                 entry.updated_at = _now()
                 if last_prompt_tokens is not None:
                     entry.last_prompt_tokens = last_prompt_tokens
+                if manual_capture_index is not None:
+                    entry.manual_capture_index = manual_capture_index
                 self._save()
 
     def suspend_session(self, session_key: str) -> bool:

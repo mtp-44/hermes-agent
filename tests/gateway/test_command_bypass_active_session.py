@@ -300,6 +300,7 @@ class TestAllResolvableCommandsBypassGuard:
             ("/usage", "usage"),
             ("/reload-mcp", "reload-mcp"),
             ("/sethome", "sethome"),
+            ("/ob", "ob"),
         ],
     )
     @pytest.mark.asyncio
@@ -326,7 +327,7 @@ class TestAllResolvableCommandsBypassGuard:
         for cmd in (
             "model", "reasoning", "personality", "voice", "insights", "title",
             "resume", "retry", "undo", "compress", "usage",
-            "reload-mcp", "sethome", "reset",
+            "reload-mcp", "sethome", "reset", "ob",
         ):
             assert should_bypass_active_session(cmd) is True, (
                 f"/{cmd} must bypass the active-session guard"

@@ -24,7 +24,7 @@ Lifecycle (called by MemoryManager, wired in run_agent.py):
 
 Optional hooks (override to opt in):
   on_turn_start(turn, message, **kwargs) — per-turn tick with runtime context
-  on_session_end(messages)               — end-of-session extraction
+  on_session_end(messages, capture_context=...) — end-of-session extraction
   on_session_switch(new_session_id, **kwargs) — mid-process session_id rotation
   on_pre_compress(messages) -> str       — extract before context compression
   on_memory_write(action, target, content, metadata=None) — mirror built-in memory writes
@@ -151,11 +151,18 @@ class MemoryProvider(ABC):
         Providers use what they need; extras are ignored.
         """
 
-    def on_session_end(self, messages: List[Dict[str, Any]]) -> None:
+    def on_session_end(
+        self,
+        messages: List[Dict[str, Any]],
+        *,
+        capture_context: Optional[Dict[str, Any]] = None,
+    ) -> None:
         """Called when a session ends (explicit exit or timeout).
 
         Use for end-of-session fact extraction, summarization, etc.
         messages is the full conversation history.
+        capture_context carries boundary metadata like boundary_reason,
+        platform, session_id, provenance refs, and user identity when known.
 
         NOT called after every turn — only at actual session boundaries
         (CLI exit, /reset, gateway session expiry).

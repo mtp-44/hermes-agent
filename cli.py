@@ -709,9 +709,14 @@ def _run_cleanup():
             # partially-initialised agents where the attribute is missing.
             _session_msgs = getattr(_active_agent_ref, '_session_messages', None)
             if isinstance(_session_msgs, list):
-                _active_agent_ref.shutdown_memory_provider(_session_msgs)
+                _active_agent_ref.shutdown_memory_provider(
+                    _session_msgs,
+                    boundary_reason="cli_close",
+                )
             else:
-                _active_agent_ref.shutdown_memory_provider()
+                _active_agent_ref.shutdown_memory_provider(
+                    boundary_reason="cli_close",
+                )
     except Exception:
         pass
 
@@ -4959,7 +4964,10 @@ class HermesCLI:
         """Start a fresh session with a new session ID and cleared agent state."""
         if self.agent and self.conversation_history:
             # Trigger memory extraction on the old session before session_id rotates.
-            self.agent.commit_memory_session(self.conversation_history)
+            self.agent.commit_memory_session(
+                self.conversation_history,
+                boundary_reason="new_session",
+            )
             self._notify_session_boundary("on_session_finalize")
         elif self.agent:
             # First session or empty history — still finalize the old session
@@ -4977,6 +4985,7 @@ class HermesCLI:
         short_uuid = uuid.uuid4().hex[:6]
         self.session_id = f"{timestamp_str}_{short_uuid}"
         self.conversation_history = []
+        self._last_manual_capture_index = 0
         self._pending_title = None
         self._resumed = False
 
@@ -5056,6 +5065,29 @@ class HermesCLI:
             else:
                 print("(^_^)v New session started!")
 
+    def _capture_open_brain_snapshot(self) -> None:
+        """Capture the uncaptured suffix of the current conversation."""
+        if not self.agent:
+            _cprint("  No active agent session to capture yet.")
+            return
+
+        history = list(self.conversation_history or [])
+        start = max(0, int(getattr(self, "_last_manual_capture_index", 0) or 0))
+        start = min(start, len(history))
+        self._last_manual_capture_index = start
+        if start >= len(history):
+            _cprint("  No new conversation content since the last /ob.")
+            return
+
+        capture_messages = history[start:]
+        self.agent.commit_memory_session(
+            capture_messages,
+            boundary_reason="manual_capture",
+            message_index_offset=start,
+        )
+        self._last_manual_capture_index = len(history)
+        _cprint(f"  Captured {len(capture_messages)} message(s) to durable memory.")
+
     def _handle_resume_command(self, cmd_original: str) -> None:
         """Handle /resume <session_id_or_title> — switch to a previous session mid-conversation."""
         parts = cmd_original.split(None, 1)
@@ -5114,6 +5146,7 @@ class HermesCLI:
         self.session_id = target_id
         self._resumed = True
         self._pending_title = None
+        self._last_manual_capture_index = 0
 
         # Load conversation history (strip transcript-only metadata entries)
         restored = self._session_db.get_messages_as_conversation(target_id)
@@ -5252,6 +5285,7 @@ class HermesCLI:
         # Switch to the new session
         self.session_id = new_session_id
         self.session_start = now
+        self._last_manual_capture_index = 0
         self._pending_title = None
         self._resumed = True  # Prevents auto-title generation
 
@@ -6469,6 +6503,8 @@ class HermesCLI:
             parts = cmd_original.split(maxsplit=1)
             title = parts[1].strip() if len(parts) > 1 else None
             self.new_session(title=title)
+        elif canonical == "ob":
+            self._capture_open_brain_snapshot()
         elif canonical == "resume":
             self._handle_resume_command(cmd_original)
         elif canonical == "model":

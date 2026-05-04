@@ -84,6 +84,23 @@ class MetadataMemoryProvider(FakeMemoryProvider):
         self.memory_writes.append((action, target, content, metadata or {}))
 
 
+class CaptureContextMemoryProvider(FakeMemoryProvider):
+    """Provider that opts into structured session-end capture context."""
+
+    def __init__(self, name="fake", available=True, tools=None):
+        super().__init__(name=name, available=available, tools=tools)
+        self.session_end_calls = []
+
+    def on_session_end(self, messages, *, capture_context=None):
+        self.session_end_called = True
+        self.session_end_calls.append(
+            {
+                "messages": list(messages or []),
+                "capture_context": dict(capture_context or {}),
+            }
+        )
+
+
 # ---------------------------------------------------------------------------
 # MemoryProvider ABC tests
 # ---------------------------------------------------------------------------
@@ -318,6 +335,32 @@ class TestMemoryManager:
         mgr.add_provider(p)
         mgr.on_session_end([{"role": "user", "content": "hi"}])
         assert p.session_end_called
+
+    def test_on_session_end_passes_capture_context_to_opt_in_provider(self):
+        mgr = MemoryManager()
+        p = CaptureContextMemoryProvider("p")
+        mgr.add_provider(p)
+        msgs = [{"role": "user", "content": "hi"}]
+
+        mgr.on_session_end(
+            msgs,
+            capture_context={
+                "boundary_reason": "compression",
+                "session_id": "sess-1",
+                "platform": "cli",
+            },
+        )
+
+        assert p.session_end_calls == [
+            {
+                "messages": msgs,
+                "capture_context": {
+                    "boundary_reason": "compression",
+                    "session_id": "sess-1",
+                    "platform": "cli",
+                },
+            }
+        ]
 
     def test_on_pre_compress(self):
         mgr = MemoryManager()
@@ -845,6 +888,30 @@ class TestCommitMemorySessionRouting:
         mgr.add_provider(bad)
 
         mgr.on_session_end([])  # must not raise
+
+    def test_on_session_end_keeps_legacy_provider_compatible_with_context(self):
+        mgr = MemoryManager()
+        legacy = _CommitRecorder("builtin")
+        modern = CaptureContextMemoryProvider("openviking")
+        mgr.add_provider(legacy)
+        mgr.add_provider(modern)
+
+        msgs = [{"role": "user", "content": "hi"}]
+        mgr.on_session_end(
+            msgs,
+            capture_context={"boundary_reason": "new_session", "session_id": "sess-9"},
+        )
+
+        assert legacy.end_calls == [msgs]
+        assert modern.session_end_calls == [
+            {
+                "messages": msgs,
+                "capture_context": {
+                    "boundary_reason": "new_session",
+                    "session_id": "sess-9",
+                },
+            }
+        ]
 
 
 # ---------------------------------------------------------------------------

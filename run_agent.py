@@ -128,6 +128,7 @@ from tools.browser_tool import cleanup_browser
 
 # Agent internals extracted to agent/ package for modularity
 from agent.memory_manager import StreamingContextScrubber, build_memory_context_block, sanitize_context
+from agent.session_capture import build_capture_context, persist_capture_artifact
 from agent.retry_utils import jittered_backoff
 from agent.error_classifier import classify_api_error, FailoverReason
 from agent.prompt_builder import (
@@ -4629,7 +4630,55 @@ class AIAgent:
             "budget_max": self.iteration_budget.max_total,
         }
 
-    def shutdown_memory_provider(self, messages: list = None) -> None:
+    def _build_session_capture_context(
+        self,
+        messages: list | None = None,
+        *,
+        boundary_reason: str = "",
+        parent_session_id: str = "",
+        message_index_offset: int = 0,
+    ) -> dict:
+        """Build normalized capture metadata for provider session-end hooks."""
+        context = build_capture_context(
+            session_id=self.session_id or "",
+            boundary_reason=boundary_reason or "",
+            platform=self.platform or os.environ.get("HERMES_SESSION_SOURCE", "cli"),
+            messages=messages or [],
+            parent_session_id=parent_session_id or "",
+            user_id=getattr(self, "_user_id", "") or "",
+            chat_id=getattr(self, "_chat_id", "") or "",
+            message_index_offset=message_index_offset,
+        )
+        try:
+            artifact_path = persist_capture_artifact(str(get_hermes_home()), context)
+            if artifact_path:
+                context["artifact_path"] = artifact_path
+        except Exception as exc:
+            logger.debug("session capture artifact persist failed: %s", exc)
+
+        if context.get("eligible"):
+            logger.info(
+                "session auto-capture prepared: boundary=%s reason=%s records=%s",
+                context.get("boundary_id", ""),
+                context.get("boundary_reason", ""),
+                context.get("capture_record_counts", {}),
+            )
+        else:
+            logger.info(
+                "session auto-capture skipped: boundary=%s reason=%s skip=%s",
+                context.get("boundary_id", ""),
+                context.get("boundary_reason", ""),
+                context.get("capture_skip_reason", ""),
+            )
+        return context
+
+    def shutdown_memory_provider(
+        self,
+        messages: list = None,
+        *,
+        boundary_reason: str = "",
+        parent_session_id: str = "",
+    ) -> None:
         """Shut down the memory provider and context engine — call at actual session boundaries.
 
         This calls on_session_end() then shutdown_all() on the memory
@@ -4639,7 +4688,14 @@ class AIAgent:
         """
         if self._memory_manager:
             try:
-                self._memory_manager.on_session_end(messages or [])
+                self._memory_manager.on_session_end(
+                    messages or [],
+                    capture_context=self._build_session_capture_context(
+                        messages,
+                        boundary_reason=boundary_reason,
+                        parent_session_id=parent_session_id,
+                    ),
+                )
             except Exception:
                 pass
             try:
@@ -4656,7 +4712,14 @@ class AIAgent:
             except Exception:
                 pass
 
-    def commit_memory_session(self, messages: list = None) -> None:
+    def commit_memory_session(
+        self,
+        messages: list = None,
+        *,
+        boundary_reason: str = "",
+        parent_session_id: str = "",
+        message_index_offset: int = 0,
+    ) -> None:
         """Trigger end-of-session extraction without tearing providers down.
         Called when session_id rotates (e.g. /new, context compression);
         providers keep their state and continue running under the old
@@ -4664,7 +4727,15 @@ class AIAgent:
         if not self._memory_manager:
             return
         try:
-            self._memory_manager.on_session_end(messages or [])
+            self._memory_manager.on_session_end(
+                messages or [],
+                capture_context=self._build_session_capture_context(
+                    messages,
+                    boundary_reason=boundary_reason,
+                    parent_session_id=parent_session_id,
+                    message_index_offset=message_index_offset,
+                ),
+            )
         except Exception:
             pass
 
@@ -9148,7 +9219,11 @@ class AIAgent:
                 # Propagate title to the new session with auto-numbering
                 old_title = self._session_db.get_session_title(self.session_id)
                 # Trigger memory extraction on the old session before it rotates.
-                self.commit_memory_session(messages)
+                self.commit_memory_session(
+                    messages,
+                    boundary_reason="compression",
+                    parent_session_id=self.session_id or "",
+                )
                 self._session_db.end_session(self.session_id, "compression")
                 old_session_id = self.session_id
                 self.session_id = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"

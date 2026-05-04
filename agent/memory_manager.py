@@ -391,11 +391,25 @@ class MemoryManager:
                     provider.name, e,
                 )
 
-    def on_session_end(self, messages: List[Dict[str, Any]]) -> None:
+    def on_session_end(
+        self,
+        messages: List[Dict[str, Any]],
+        *,
+        capture_context: Optional[Dict[str, Any]] = None,
+    ) -> None:
         """Notify all providers of session end."""
         for provider in self._providers:
             try:
-                provider.on_session_end(messages)
+                context_mode = self._provider_session_end_context_mode(provider)
+                if context_mode == "keyword":
+                    provider.on_session_end(
+                        messages,
+                        capture_context=dict(capture_context or {}),
+                    )
+                elif context_mode == "positional":
+                    provider.on_session_end(messages, dict(capture_context or {}))
+                else:
+                    provider.on_session_end(messages)
             except Exception as e:
                 logger.debug(
                     "Memory provider '%s' on_session_end failed: %s",
@@ -479,6 +493,32 @@ class MemoryManager:
             )
         ]
         if len(accepted) >= 4:
+            return "positional"
+        return "legacy"
+
+    @staticmethod
+    def _provider_session_end_context_mode(provider: MemoryProvider) -> str:
+        """Return how to pass capture context to a provider's session-end hook."""
+        try:
+            signature = inspect.signature(provider.on_session_end)
+        except (TypeError, ValueError):
+            return "keyword"
+
+        params = list(signature.parameters.values())
+        if any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params):
+            return "keyword"
+        if "capture_context" in signature.parameters:
+            return "keyword"
+
+        accepted = [
+            p for p in params
+            if p.kind in (
+                inspect.Parameter.POSITIONAL_ONLY,
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                inspect.Parameter.KEYWORD_ONLY,
+            )
+        ]
+        if len(accepted) >= 2:
             return "positional"
         return "legacy"
 

@@ -295,7 +295,7 @@ def _finalize_session(session: dict | None, end_reason: str = "tui_close") -> No
         history = list(session.get("history", []))
     if agent is not None and history and hasattr(agent, "commit_memory_session"):
         try:
-            agent.commit_memory_session(history)
+            agent.commit_memory_session(history, boundary_reason=end_reason)
         except Exception:
             pass
 

@@ -220,7 +220,6 @@ def test_new_session_resets_token_counters(tmp_path):
     assert comp.compression_count == 0
     assert comp._context_probed is False
 
-
 def test_new_session_with_title(capsys):
     """new_session(title=...) creates a session and sets the title."""
     cli = _make_cli()
@@ -275,3 +274,23 @@ def test_new_session_with_duplicate_title_surfaces_error(capsys):
     captured = capsys.readouterr()
     assert "New session started: Dup" not in captured.out
     assert "New session started!" in captured.out
+
+
+def test_ob_captures_only_new_suffix_without_resetting(tmp_path):
+    cli = _prepare_cli_with_active_session(tmp_path)
+    cli.conversation_history = [
+        {"role": "user", "content": "first"},
+        {"role": "assistant", "content": "reply one"},
+        {"role": "user", "content": "second"},
+        {"role": "assistant", "content": "reply two"},
+    ]
+
+    cli.process_command("/ob")
+    cli.process_command("/ob")
+
+    cli.agent.commit_memory_session.assert_called_once_with(
+        cli.conversation_history,
+        boundary_reason="manual_capture",
+        message_index_offset=0,
+    )
+    assert cli.session_id == cli.agent.session_id

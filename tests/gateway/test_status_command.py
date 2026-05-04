@@ -1,6 +1,7 @@
 """Tests for gateway /status behavior and token persistence."""
 
 from datetime import datetime
+import threading
 import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -172,6 +173,63 @@ async def test_status_command_tokens_zero_when_session_db_row_missing():
     result = await runner._handle_message(_make_event("/status"))
 
     assert "**Tokens:** 0" in result
+
+
+@pytest.mark.asyncio
+async def test_ob_command_captures_uncaptured_suffix_without_reset():
+    session_entry = SessionEntry(
+        session_key=build_session_key(_make_source()),
+        session_id="sess-1",
+        created_at=datetime.now(),
+        updated_at=datetime.now(),
+        platform=Platform.TELEGRAM,
+        chat_type="dm",
+        manual_capture_index=2,
+    )
+    runner = _make_runner(session_entry)
+    transcript = [
+        {"role": "user", "content": "a"},
+        {"role": "assistant", "content": "b"},
+        {"role": "user", "content": "c"},
+        {"role": "assistant", "content": "d"},
+    ]
+    runner.session_store.load_transcript.return_value = transcript
+    runner._agent_cache_lock = threading.RLock()
+    cached_agent = MagicMock()
+    runner._agent_cache = {session_entry.session_key: cached_agent}
+
+    result = await runner._handle_message(_make_event("/ob"))
+
+    cached_agent.commit_memory_session.assert_called_once_with(
+        transcript[2:],
+        boundary_reason="manual_capture",
+        message_index_offset=2,
+    )
+    runner.session_store.update_session.assert_called_once_with(
+        session_entry.session_key,
+        manual_capture_index=4,
+    )
+    assert "Conversation context stays active" in result
+
+
+@pytest.mark.asyncio
+async def test_ob_command_bypasses_running_agent_guard_without_interrupt():
+    session_entry = SessionEntry(
+        session_key=build_session_key(_make_source()),
+        session_id="sess-1",
+        created_at=datetime.now(),
+        updated_at=datetime.now(),
+        platform=Platform.TELEGRAM,
+        chat_type="dm",
+    )
+    runner = _make_runner(session_entry)
+    running_agent = MagicMock()
+    runner._running_agents[build_session_key(_make_source())] = running_agent
+
+    result = await runner._handle_message(_make_event("/ob"))
+
+    assert "Send /ob after this reply finishes" in result
+    running_agent.interrupt.assert_not_called()
 
 
 @pytest.mark.asyncio
