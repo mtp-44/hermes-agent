@@ -1124,3 +1124,260 @@ It is:
 - one seamless experience across both
 
 This should be treated as the design standard future work must preserve.
+
+---
+
+## Session: 2026-05-04 (ASAP execution plan for unified retrieval)
+
+### Goal
+
+Get unified cross-table retrieval working end-to-end as fast as possible so:
+
+- Hermes can answer conversational memory questions with one Open Brain retrieval call
+- the Open Brain bot can retrieve Strava and other structured records without relying on thought-only search
+- future memory work builds on one shared retrieval layer instead of two diverging ones
+
+### What "done" means
+
+This is considered up and running when all of the following are true:
+
+1. the hosted `open-brain-mcp` exposes `query_brain`
+2. Hermes can answer mixed memory questions by using `query_brain`
+3. the Open Brain bot's retrieval path uses `query_brain` instead of local `search_thoughts`-only context building
+4. Strava-backed `life_items` are retrievable from both Hermes and the Open Brain bot
+5. shadow thoughts are still allowed during initial rollout, but no longer required for successful retrieval
+
+### Scope cut for speed
+
+To ship fast, Phase 1 should be intentionally narrow.
+
+**Do now**
+
+- add `query_brain`
+- search all current durable tables
+- merge and rank results simply and predictably
+- return explicit provenance
+- wire both clients to use it
+- verify against a fixed evaluation set
+
+**Do not block initial launch on**
+
+- perfect ranking
+- semantic embeddings for every structured table
+- dedup polish beyond obvious cross-table duplicates
+- shadow-thought removal
+- new capture flows
+- auto-capture, fingerprints, or dashboard work
+
+### Critical path
+
+There is one real blocker and three implementation steps.
+
+1. **Confirm editable source for the hosted `open-brain-mcp` function**
+2. **Add and deploy `query_brain`**
+3. **Update Hermes retrieval behavior**
+4. **Update Open Brain bot retrieval path**
+
+Everything else is secondary until those are complete.
+
+### Immediate blocker to clear first
+
+The live hosted MCP contract is verified, but the actual checked-in source for `open-brain-mcp`
+is not visible in the current repo snapshot.
+
+Fastest path:
+
+- locate the real deployed function source if it exists outside this snapshot
+- if found, implement `query_brain` there directly
+- if not found quickly, create a new visible source-of-truth folder for the hosted MCP in `open_brain` and deploy from that
+
+Do not start by rewriting Open Brain bot retrieval locally. That would recreate the split architecture we are trying to remove.
+
+### Fastest implementation order
+
+#### Step 0 — Source and deployment sanity check
+
+Deliverable:
+- known editable source path for `open-brain-mcp`
+- known deploy command
+- one successful no-op or low-risk deploy path confirmed
+
+Checks:
+- source path is documented in `open_brain`
+- deployment target is the same hosted endpoint already used by Hermes
+
+If this step is blocked, stop and resolve it before touching client code.
+
+#### Step 1 — Add `query_brain` to hosted MCP
+
+Deliverable:
+- new MCP tool: `query_brain(query: string, tables?: string[])`
+
+Phase-1 behavior:
+- embed the query using the same embedding model already used for `thoughts`
+- query `thoughts` via existing `match_thoughts`
+- query `life_items`, `records`, `contacts`, `finance_records`, and `home_items` with simple text/field matching
+- score each table's candidates into a shared `0..1` range
+- merge, cap, and return results with `table`, `id`, `score`, `content_summary`, `created_at`, and `metadata`
+- include warnings for partial failures instead of failing the whole request
+
+Implementation rule:
+- keep ranking policy explicit and simple
+- optimize for inspectability and good-enough mixed retrieval, not elegance
+
+#### Step 2 — Validate hosted retrieval directly before any client changes
+
+Deliverable:
+- direct MCP tests against the hosted endpoint showing `query_brain` works
+
+Required evaluation questions:
+- "How far did I ride last month?"
+- "What did I say about retrieval architecture last week?"
+- "When did I last mention Sam?"
+- "What subscriptions did I pay for recently?"
+- "Show me anything about the garage bike trainer"
+
+Pass condition:
+- each query returns sensible cross-table results
+- Strava-backed `life_items` appear without needing handcrafted table choice
+- failure in one table still returns partial results
+
+#### Step 3 — Update Hermes to prefer `query_brain`
+
+Deliverable:
+- Hermes uses `query_brain` for conversational memory questions
+
+Minimum change:
+- add retrieval guidance so Hermes prefers `query_brain` for conversational recall
+- keep individual `search_*` tools for explicit filtered or structured operations
+
+Verification:
+- Hermes answers a ride-history question with `query_brain`
+- Hermes answers a mixed personal-memory question with `query_brain`
+- Hermes still uses table-specific tools when explicitly asked for filtered records
+
+#### Step 4 — Update Open Brain bot to call `query_brain`
+
+Deliverable:
+- `core/engine.py` no longer builds retrieval context from local `search_thoughts` alone
+
+Minimum implementation:
+- replace `_build_retrieval_context` with a hosted MCP call
+- keep the current downstream answer-generation model flow
+- map `query_brain` results into a compact retrieval context block for the answering LLM
+
+Important constraint:
+- do not rewrite the bot into a second retrieval orchestrator
+- the bot should be a thin caller of the shared hosted retrieval layer
+
+Verification:
+- the bot answers a Strava question successfully
+- the bot still answers thought-only questions at least as well as before
+
+#### Step 5 — Stabilization window
+
+Deliverable:
+- one short period of real use before removing any bridge logic
+
+Keep during this window:
+- shadow thought writes on structured saves
+
+Watch for:
+- missing structured hits
+- noisy ranking
+- contradictions between Hermes and bot answers
+
+#### Step 6 — Retire shadow-thought dependency
+
+Deliverable:
+- structured retrieval no longer depends on `ref_table` / `ref_id` bridge thoughts
+
+Safe rollout rule:
+- first confirm unified retrieval answers the evaluation set reliably
+- then remove the shadow-thought write from structured save paths
+- if provenance records are still useful, replace them deliberately rather than keeping the old hidden workaround
+
+### Code touchpoints already confirmed
+
+These are the main places the implementation will hit:
+
+- `open_brain/core/engine.py`
+  - `_build_retrieval_context` is still local `thoughts`-only retrieval
+  - structured saves still write shadow thoughts via `ref_table` / `ref_id`
+- `open_brain/core/storage.py`
+  - current local retrieval helper is `search_thoughts` only
+- hosted MCP function source
+  - exact path still needs to be confirmed before implementation starts
+
+### Test strategy
+
+Keep the test plan small and ruthless.
+
+**Hosted MCP**
+
+- add focused tests for:
+  - thoughts-only retrieval
+  - structured-table retrieval
+  - mixed-result ranking
+  - partial failure handling
+  - `tables` filter behavior
+
+**Open Brain bot**
+
+- update retrieval-path tests so they no longer assume `thoughts` is the only source of truth
+- do not remove existing routing tests until shadow thoughts are intentionally retired
+
+**End-to-end**
+
+- one Hermes smoke test
+- one Open Brain bot smoke test
+- both must answer at least one Strava query correctly
+
+### Recommended calendar
+
+If execution stays focused, this should fit into a short sequence:
+
+**Day 0**
+- confirm hosted MCP source path and deploy path
+
+**Day 1**
+- implement and deploy `query_brain`
+- run direct MCP evaluation set
+
+**Day 2**
+- wire Hermes to prefer `query_brain`
+- wire Open Brain bot to call `query_brain`
+- run end-to-end smoke tests
+
+**Day 3**
+- use it in the real loop
+- inspect misses
+- decide whether shadow-thought retirement is safe yet
+
+### Priority if time gets tight
+
+If we need to cut further to get something live fast, cut in this order:
+
+1. keep `tables` filter but allow it to be minimal
+2. keep score normalisation simple
+3. defer shadow-thought removal
+4. defer any ranking refinement
+5. defer any broader memory cleanup work
+
+Do not cut:
+
+- hosted shared retrieval as the single source of retrieval truth
+- provenance in results
+- Strava / structured-table coverage
+- direct evaluation before client rollout
+
+### Execution posture
+
+The shortest path is:
+
+1. make the hosted MCP smarter once
+2. make Hermes and the bot thinner
+3. keep the bridge logic until real retrieval proves itself
+4. remove workarounds only after success is visible
+
+That is the fastest route to "working now" without creating another architecture we have to undo a week later.
