@@ -106,6 +106,79 @@ The optional `tables` parameter lets callers narrow the search when context make
 relevant table obvious (e.g. a Strava-specific query could pass `tables: ["life_items"]`).
 Default behaviour searches all tables.
 
+### Result contract
+
+The tool should return a stable, explicit schema rather than table-specific payloads.
+That keeps Hermes and the Open Brain bot decoupled from storage details.
+
+```json
+{
+  "results": [
+    {
+      "table": "life_items",
+      "id": "uuid-or-row-id",
+      "score": 0.88,
+      "score_reason": "fts:name, recency_boost",
+      "content_summary": "Outdoor ride: 42.1 km on 2026-05-02",
+      "created_at": "2026-05-02T07:14:00Z",
+      "metadata": {
+        "title": "Morning ride",
+        "item_type": "strava_activity",
+        "source": "strava_sync",
+        "ref_table": "life_items",
+        "ref_id": "12345"
+      }
+    }
+  ]
+}
+```
+
+Required fields:
+- `table` and `id` so callers can refer back to the source record
+- `score` normalised to `0..1` across all result types
+- `content_summary` as the main model-facing snippet
+- `created_at` for temporal reasoning and recency-aware answers
+- `metadata` for table-specific details that may help synthesis without forcing callers to know the schema
+
+Optional but useful fields:
+- `score_reason` for debugging and prompt iteration
+- `matched_fields` if we want better observability into why a result ranked well
+
+### Ranking and score normalisation
+
+This is the part most likely to become messy if left implicit, so the initial policy
+should be simple and explicit:
+
+- Retrieve a capped candidate set per table first, then merge globally
+- Normalise each table's raw score into a `0..1` range before merging
+- Apply a small recency boost only when the query is plausibly time-sensitive
+- Prefer exact/fuzzy entity matches over broad text matches for tables like `contacts`
+- Deduplicate obvious cross-table references before returning final results
+
+Initial scoring approach:
+
+- `thoughts`: use cosine similarity from `match_thoughts`, min-max normalised across retrieved candidates
+- `life_items` / `records` / `finance_records` / `home_items`: combine Postgres full-text rank with a bounded recency boost
+- `contacts`: exact name match > prefix match > fuzzy match
+- Mixed queries: merge on normalised score, then prefer diversity in the top results so one table does not crowd out everything else
+
+The goal is not "perfect ranking" in Phase 1. The goal is a ranking policy that is
+predictable, inspectable, and easy to improve in one place later.
+
+### Failure behaviour
+
+`query_brain` should degrade gracefully instead of behaving like an all-or-nothing search.
+
+- If one table search fails or times out, return partial results from the other tables
+- Include a top-level warning field when a table was skipped, timed out, or unavailable
+- If embedding generation fails, still run structured-table retrieval and return partial results
+- If no results are found, return an empty `results` array rather than fabricating a fallback answer
+- Apply a per-table timeout so a slow source does not block the whole response path
+
+This matters because the retrieval layer becomes shared infrastructure. Once both Hermes
+and the Open Brain bot depend on it, predictable partial failure semantics are more
+important than squeezing out every last edge-case hit.
+
 ---
 
 ## Impact per surface
@@ -191,6 +264,10 @@ Steps:
 - Implement score normalisation and result merging
 - Add `tables` filter parameter
 - Return unified result schema with provenance fields
+- Add partial-failure handling and per-table timeouts
+
+Phase 1 deliverable:
+- One hosted MCP tool with a stable result contract, predictable ranking, and graceful degradation
 
 This is the only phase that requires significant new code.
 
@@ -213,6 +290,39 @@ This is the only phase that requires significant new code.
 - Optionally replace with a slimmer provenance record (no embedding, no retrieval weight)
 - Validate that retrieval quality is unchanged (it should improve — no more shadow
   thought noise in results)
+
+---
+
+## Success criteria
+
+This architecture is successful if it improves correctness and simplifies callers at the
+same time.
+
+- Hermes answers cross-table memory questions with one retrieval tool call
+- The Open Brain bot can retrieve Strava-backed `life_items` without relying on shadow thoughts
+- Adding a new table requires one retrieval-layer change, not coordinated client updates
+- Partial backend failures still return useful results instead of failing the whole query
+- Result quality is at least as good as today's thought-only retrieval on existing thought queries
+
+Suggested evaluation set before retiring shadow thoughts:
+
+- "How far did I ride last month?"
+- "What did I say about retrieval architecture last week?"
+- "When did I last mention Sam?"
+- "What subscriptions did I pay for recently?"
+- "Show me anything about the garage bike trainer"
+
+If `query_brain` can answer those reliably across mixed sources, the design has proven the
+main thing it needs to prove.
+
+---
+
+## Risks and tradeoffs
+
+- Cross-table score normalisation may produce surprising rankings at first; that is acceptable if the policy is observable and easy to tune
+- Full-text-only retrieval on structured tables may miss some semantic matches; this is a conscious Phase 1 tradeoff to avoid premature embedding sprawl
+- A single shared retrieval tool becomes a central dependency; that is why partial-failure handling and a stable contract are important
+- Removing shadow thoughts too early could hide regressions, so retirement should happen only after the evaluation set is consistently green
 
 ---
 
