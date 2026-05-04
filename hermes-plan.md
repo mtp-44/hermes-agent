@@ -1256,6 +1256,16 @@ Verification:
 - Hermes answers a mixed personal-memory question with `query_brain`
 - Hermes still uses table-specific tools when explicitly asked for filtered records
 
+Status on 2026-05-04:
+- done for the first stable slice
+- Hermes now routes conversational memory questions to hosted `mcp_open_brain_query_brain` first
+- ride-history verification passed end to end:
+  - `How far did I ride last month?` returned `27` rides totaling `1903.24 km`
+- empty-result verification passed after retrieval hardening:
+  - `When did I last mention Sam?` now returns a clean no-result answer instead of a weak semantic false positive
+- important implementation note:
+  - Hermes should not pass `tables` to `query_brain` for normal conversational recall unless the user explicitly asks for source-limited retrieval
+
 #### Step 4 — Update Open Brain bot to call `query_brain`
 
 Deliverable:
