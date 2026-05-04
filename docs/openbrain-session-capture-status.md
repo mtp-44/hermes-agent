@@ -1,6 +1,6 @@
 # Hermes ↔ Open Brain Session Capture Status
 
-Last updated: 2026-05-04
+Last updated: 2026-05-04 (code quality pass)
 
 This note documents the current implementation state of Hermes session-boundary
 and manual capture into Open Brain, what was verified live, and what still
@@ -279,6 +279,69 @@ is still pending.
    - latest file in `$HERMES_HOME/session_captures/`
    - [openbrain_sync.json](/Users/mh/.hermes/openbrain_sync.json:1)
 5. Optionally query Open Brain for the phrase you used
+
+## Code Quality Pass (2026-05-04)
+
+The following improvements were made to the first-pass implementation:
+
+### openbrain provider
+
+- Added 3-attempt exponential backoff (1s → 2s) to `_call_mcp_tool`:
+  - retries on network errors and 5xx responses
+  - fails immediately on 4xx (permanent errors)
+  - logs retry attempts at debug level
+  - previously any transient network error caused silent record loss at session close
+- Moved `hashlib.sha256` and `time` imports to module top
+- Added module-level constants `_RETRY_ATTEMPTS` and `_RETRY_BACKOFF_BASE`
+
+### session_capture
+
+- Extracted all magic numbers into named constants at module top:
+  - text truncation limits (`_TEXT_LIMIT_SHORT`, `_TEXT_LIMIT_OUTCOME`, `_TEXT_LIMIT_DECISION`)
+  - topic extraction limit (`_TOPIC_LIMIT`)
+  - canonical confidence threshold (`_CANONICAL_CONFIDENCE_THRESHOLD`)
+  - per-shape confidence values for actions, decisions, and durable facts
+  - pending decay window (`_PENDING_DECAY_DAYS`)
+  - action item minimum length (`_ACTION_ITEM_MIN_LENGTH`)
+- Added `logging` with a `logger = logging.getLogger(__name__)`:
+  - `DEBUG` when a boundary is skipped (with reason and message count)
+  - `DEBUG` when eligible (with per-shape record counts)
+  - `INFO` in `build_capture_context` — one line per boundary event
+
+### tests
+
+- `test_openbrain_provider.py`: fixed hardcoded absolute path in `_load_openbrain_module`
+  to use `Path(__file__).parent` — now portable across machines
+- Added 13 new tests to `test_session_capture.py`:
+  - empty, `None`, trivial-only, assistant-only message edge cases
+  - `None` content and list-typed message content
+  - very long message truncation
+  - `boundary_id` stability and uniqueness
+  - roleless message handling in `build_message_refs`
+  - `_shorten` word-boundary behaviour
+  - `persist_artifact` with no `boundary_id`
+  - parametrized test across all 6 boundary reasons
+- Added 9 new tests to `test_openbrain_provider.py`:
+  - `is_available` without key
+  - `_parse_mcp_response` error and blank cases
+  - `on_session_end` skip paths (ineligible context, non-primary agent)
+  - retry fires correct number of times on network error
+  - no retry on 4xx
+  - succeeds on second attempt after transient 5xx
+  - concurrent sync ledger writes do not corrupt state
+
+### Architecture clarification (no code change)
+
+Reviewed both Open Brain write paths:
+
+- **Path 1 (session provider)**: session-close and `/ob` capture — confidence-gated,
+  provenance-tagged, dedup-protected via sync ledger. Handles conversation summaries,
+  action items, decisions, durable facts.
+- **Path 2 (MCP tools)**: model-initiated mid-conversation writes — used for structured
+  records like life items and bike maintenance. Not gated by capture policy.
+- Strava sync is now fully owned by the dedicated agent at `/Users/mh/ai/open_brain`.
+  Hermes reads Strava data from Open Brain via `search_life_items` but does not write
+  or sync Strava data itself.
 
 ## Recommended Next Work
 

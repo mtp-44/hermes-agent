@@ -19,9 +19,11 @@ import json
 import logging
 import os
 import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from hashlib import sha256
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -32,6 +34,8 @@ logger = logging.getLogger(__name__)
 _DEFAULT_MCP_URL = "https://icxyfzzbsrsiyaqnynum.supabase.co/functions/v1/open-brain-mcp"
 _DEFAULT_TIMEOUT = 15.0
 _SYNC_LEDGER_FILENAME = "openbrain_sync.json"
+_RETRY_ATTEMPTS = 3
+_RETRY_BACKOFF_BASE = 1.0
 
 
 def _read_env_file(path: Path) -> Dict[str, str]:
@@ -246,8 +250,6 @@ class OpenBrainMemoryProvider(MemoryProvider):
             self._save_sync_ledger()
 
     def _record_sync_id(self, record: Dict[str, Any], context: Dict[str, Any]) -> str:
-        from hashlib import sha256
-
         stable = {
             "boundary_id": context.get("boundary_id", ""),
             "type": record.get("type", ""),
@@ -293,14 +295,27 @@ class OpenBrainMemoryProvider(MemoryProvider):
             },
             method="POST",
         )
-        try:
-            with urllib.request.urlopen(req, timeout=self._timeout) as response:
-                body = response.read().decode("utf-8", errors="replace")
-        except urllib.error.HTTPError as exc:
-            body = exc.read().decode("utf-8", errors="replace")
-            raise RuntimeError(f"HTTP {exc.code}: {body[:300]}") from exc
-        except urllib.error.URLError as exc:
-            raise RuntimeError(f"network error: {exc}") from exc
+        body = ""
+        last_exc: Optional[Exception] = None
+        for attempt in range(_RETRY_ATTEMPTS):
+            try:
+                with urllib.request.urlopen(req, timeout=self._timeout) as response:
+                    body = response.read().decode("utf-8", errors="replace")
+                last_exc = None
+                break
+            except urllib.error.HTTPError as exc:
+                body = exc.read().decode("utf-8", errors="replace")
+                if exc.code < 500:
+                    raise RuntimeError(f"HTTP {exc.code}: {body[:300]}") from exc
+                last_exc = RuntimeError(f"HTTP {exc.code}: {body[:300]}")
+            except urllib.error.URLError as exc:
+                last_exc = RuntimeError(f"network error: {exc}")
+            if attempt < _RETRY_ATTEMPTS - 1:
+                delay = _RETRY_BACKOFF_BASE * (2 ** attempt)
+                logger.debug("OpenBrain MCP call failed, retrying in %.1fs (attempt %d/%d)", delay, attempt + 1, _RETRY_ATTEMPTS)
+                time.sleep(delay)
+        if last_exc is not None:
+            raise last_exc
 
         parsed = _parse_mcp_response(body)
         if parsed.get("error"):

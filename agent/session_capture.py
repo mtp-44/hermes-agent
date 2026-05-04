@@ -10,11 +10,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+logger = logging.getLogger(__name__)
 
 
 _TRIVIAL_RE = re.compile(
@@ -27,6 +30,40 @@ _STOPWORDS = {
     "when", "where", "which", "with", "would", "your", "we", "you", "into",
     "onto", "than", "there", "their", "will", "shall", "should", "could",
 }
+
+# Text truncation limits (chars)
+_TEXT_LIMIT_SHORT = 180     # action items, durable facts, default shorten
+_TEXT_LIMIT_OUTCOME = 220   # session outcome field
+_TEXT_LIMIT_DECISION = 200  # decision record text
+
+# Max topics extracted per session
+_TOPIC_LIMIT = 5
+
+# At or above this threshold a record routes to canonical; below goes to pending
+_CANONICAL_CONFIDENCE_THRESHOLD = 0.8
+
+# Per-shape confidence values
+_CONFIDENCE_SESSION_SUMMARY = 0.95
+
+_CONFIDENCE_ACTION_EXPLICIT_USER = 0.88   # "I need to / I should / I will"
+_CONFIDENCE_ACTION_SUGGESTED = 0.82       # "you should / next step / follow up"
+_CONFIDENCE_ACTION_COLLABORATIVE = 0.78   # "we need to / let's"
+_CONFIDENCE_ACTION_HERMES = 0.76          # Hermes-voiced commitment
+
+_CONFIDENCE_DECISION_USER = 0.84
+_CONFIDENCE_DECISION_ASSISTANT = 0.76
+
+_CONFIDENCE_FACT_PREFER = 0.9
+_CONFIDENCE_FACT_DEFAULT_PREF = 0.85
+_CONFIDENCE_FACT_LIKE = 0.83
+_CONFIDENCE_FACT_USUALLY = 0.78
+_CONFIDENCE_FACT_USE = 0.78
+
+# How long a pending record survives before automatic decay
+_PENDING_DECAY_DAYS = 14
+
+# Minimum sentence length to be considered an action item candidate
+_ACTION_ITEM_MIN_LENGTH = 12
 
 
 @dataclass
@@ -80,7 +117,7 @@ def _is_trivial(text: str) -> bool:
     return not text or bool(_TRIVIAL_RE.match(text.strip()))
 
 
-def _shorten(text: str, limit: int = 180) -> str:
+def _shorten(text: str, limit: int = _TEXT_LIMIT_SHORT) -> str:
     text = _normalize_text(text)
     if len(text) <= limit:
         return text
@@ -137,7 +174,7 @@ def _meaningful_messages(
     return kept
 
 
-def _extract_topics(messages: List[Dict[str, Any]], limit: int = 5) -> List[str]:
+def _extract_topics(messages: List[Dict[str, Any]], limit: int = _TOPIC_LIMIT) -> List[str]:
     counts: Dict[str, int] = {}
     for msg in messages:
         for token in re.findall(r"[a-zA-Z][a-zA-Z0-9_-]{2,}", msg.get("text", "").lower()):
@@ -174,9 +211,9 @@ def _build_session_summary(base: Dict[str, Any], meaningful: List[Dict[str, Any]
     if not users:
         return None
 
-    objective = _shorten(users[0]["text"], 180)
+    objective = _shorten(users[0]["text"], _TEXT_LIMIT_SHORT)
     outcome_source = assistants[-1]["text"] if assistants else users[-1]["text"]
-    outcome = _shorten(outcome_source, 220)
+    outcome = _shorten(outcome_source, _TEXT_LIMIT_OUTCOME)
     summary_text = f"Objective: {objective}"
     if outcome and outcome != objective:
         summary_text += f" Outcome: {outcome}"
@@ -193,7 +230,7 @@ def _build_session_summary(base: Dict[str, Any], meaningful: List[Dict[str, Any]
         "topics": _extract_topics(meaningful),
         "source_count": len(meaningful),
         "captured_at": base.get("captured_at", ""),
-        "confidence": 0.95,
+        "confidence": _CONFIDENCE_SESSION_SUMMARY,
         "routing": "canonical",
         "provenance": _record_provenance(base, indexes),
     }
@@ -203,17 +240,17 @@ def _extract_action_items(base: Dict[str, Any], meaningful: List[Dict[str, Any]]
     action_items: List[Dict[str, Any]] = []
     seen: set[str] = set()
     patterns = [
-        (re.compile(r"\b(i need to|i should|i will|i'll)\b", re.IGNORECASE), "user", 0.88),
-        (re.compile(r"\b(you need to|you should|next step|follow up|action item)\b", re.IGNORECASE), "user", 0.82),
-        (re.compile(r"\b(we need to|we should|let's)\b", re.IGNORECASE), "user", 0.78),
-        (re.compile(r"\b(i can|i will|i'll)\b", re.IGNORECASE), "hermes", 0.76),
+        (re.compile(r"\b(i need to|i should|i will|i'll)\b", re.IGNORECASE), "user", _CONFIDENCE_ACTION_EXPLICIT_USER),
+        (re.compile(r"\b(you need to|you should|next step|follow up|action item)\b", re.IGNORECASE), "user", _CONFIDENCE_ACTION_SUGGESTED),
+        (re.compile(r"\b(we need to|we should|let's)\b", re.IGNORECASE), "user", _CONFIDENCE_ACTION_COLLABORATIVE),
+        (re.compile(r"\b(i can|i will|i'll)\b", re.IGNORECASE), "hermes", _CONFIDENCE_ACTION_HERMES),
     ]
     for msg in meaningful:
         text = msg["text"]
         sentences = re.split(r"(?<=[.!?])\s+", text)
         for sentence in sentences:
-            cleaned = _shorten(sentence, 180)
-            if len(cleaned) < 12:
+            cleaned = _shorten(sentence, _TEXT_LIMIT_SHORT)
+            if len(cleaned) < _ACTION_ITEM_MIN_LENGTH:
                 continue
             owner = ""
             confidence = 0.0
@@ -228,7 +265,7 @@ def _extract_action_items(base: Dict[str, Any], meaningful: List[Dict[str, Any]]
             if key in seen:
                 continue
             seen.add(key)
-            routing = "canonical" if confidence >= 0.8 else "pending"
+            routing = "canonical" if confidence >= _CANONICAL_CONFIDENCE_THRESHOLD else "pending"
             record = {
                 "type": "action_item",
                 "session_id": base.get("session_id", ""),
@@ -244,7 +281,7 @@ def _extract_action_items(base: Dict[str, Any], meaningful: List[Dict[str, Any]]
             }
             if routing == "pending":
                 record["decay_at"] = (
-                    datetime.fromisoformat(base["captured_at"]) + timedelta(days=14)
+                    datetime.fromisoformat(base["captured_at"]) + timedelta(days=_PENDING_DECAY_DAYS)
                 ).isoformat()
             action_items.append(record)
     return action_items
@@ -261,13 +298,13 @@ def _extract_decisions(base: Dict[str, Any], meaningful: List[Dict[str, Any]]) -
         text = msg["text"]
         if not pattern.search(text):
             continue
-        cleaned = _shorten(text, 200)
+        cleaned = _shorten(text, _TEXT_LIMIT_DECISION)
         key = cleaned.lower()
         if key in seen:
             continue
         seen.add(key)
-        confidence = 0.84 if msg["role"] == "user" else 0.76
-        routing = "canonical" if confidence >= 0.8 else "pending"
+        confidence = _CONFIDENCE_DECISION_USER if msg["role"] == "user" else _CONFIDENCE_DECISION_ASSISTANT
+        routing = "canonical" if confidence >= _CANONICAL_CONFIDENCE_THRESHOLD else "pending"
         record = {
             "type": "decision_record",
             "session_id": base.get("session_id", ""),
@@ -281,7 +318,7 @@ def _extract_decisions(base: Dict[str, Any], meaningful: List[Dict[str, Any]]) -
         }
         if routing == "pending":
             record["decay_at"] = (
-                datetime.fromisoformat(base["captured_at"]) + timedelta(days=14)
+                datetime.fromisoformat(base["captured_at"]) + timedelta(days=_PENDING_DECAY_DAYS)
             ).isoformat()
         decisions.append(record)
     return decisions
@@ -291,11 +328,11 @@ def _extract_durable_facts(base: Dict[str, Any], meaningful: List[Dict[str, Any]
     facts: List[Dict[str, Any]] = []
     seen: set[str] = set()
     explicit_patterns = [
-        (re.compile(r"\bi prefer (?P<value>.+)", re.IGNORECASE), "prefers", 0.9),
-        (re.compile(r"\bi like (?P<value>.+)", re.IGNORECASE), "likes", 0.83),
-        (re.compile(r"\bi usually (?P<value>.+)", re.IGNORECASE), "usually", 0.78),
-        (re.compile(r"\bi use (?P<value>.+)", re.IGNORECASE), "uses", 0.78),
-        (re.compile(r"\bmy default (?P<value>.+)", re.IGNORECASE), "default", 0.85),
+        (re.compile(r"\bi prefer (?P<value>.+)", re.IGNORECASE), "prefers", _CONFIDENCE_FACT_PREFER),
+        (re.compile(r"\bi like (?P<value>.+)", re.IGNORECASE), "likes", _CONFIDENCE_FACT_LIKE),
+        (re.compile(r"\bi usually (?P<value>.+)", re.IGNORECASE), "usually", _CONFIDENCE_FACT_USUALLY),
+        (re.compile(r"\bi use (?P<value>.+)", re.IGNORECASE), "uses", _CONFIDENCE_FACT_USE),
+        (re.compile(r"\bmy default (?P<value>.+)", re.IGNORECASE), "default", _CONFIDENCE_FACT_DEFAULT_PREF),
     ]
     for msg in meaningful:
         if msg["role"] != "user":
@@ -305,14 +342,14 @@ def _extract_durable_facts(base: Dict[str, Any], meaningful: List[Dict[str, Any]
             match = pattern.search(text)
             if not match:
                 continue
-            value = _shorten(match.group("value"), 180).rstrip(".")
+            value = _shorten(match.group("value"), _TEXT_LIMIT_SHORT).rstrip(".")
             if not value:
                 continue
             key = f"{predicate}:{value.lower()}"
             if key in seen:
                 continue
             seen.add(key)
-            routing = "canonical" if confidence >= 0.8 else "pending"
+            routing = "canonical" if confidence >= _CANONICAL_CONFIDENCE_THRESHOLD else "pending"
             record = {
                 "type": "durable_fact",
                 "subject": "user",
@@ -325,7 +362,7 @@ def _extract_durable_facts(base: Dict[str, Any], meaningful: List[Dict[str, Any]
             }
             if routing == "pending":
                 record["decay_at"] = (
-                    datetime.fromisoformat(base["captured_at"]) + timedelta(days=14)
+                    datetime.fromisoformat(base["captured_at"]) + timedelta(days=_PENDING_DECAY_DAYS)
                 ).isoformat()
             facts.append(record)
             break
@@ -362,6 +399,11 @@ def _build_capture_policy(
     assistants = [m for m in meaningful if m["role"] == "assistant"]
 
     if not meaningful or not users:
+        logger.debug(
+            "session_capture: skipping boundary=%s reason=no_meaningful_conversation messages=%d",
+            base.get("boundary_id", ""),
+            len(messages),
+        )
         return {
             "eligible": False,
             "skip_reason": "no_meaningful_conversation",
@@ -378,6 +420,11 @@ def _build_capture_policy(
     records.extend(_extract_durable_facts(base, meaningful))
 
     if not summary and not records:
+        logger.debug(
+            "session_capture: skipping boundary=%s reason=no_high_signal_candidates meaningful=%d",
+            base.get("boundary_id", ""),
+            len(meaningful),
+        )
         return {
             "eligible": False,
             "skip_reason": "no_high_signal_candidates",
@@ -389,6 +436,12 @@ def _build_capture_policy(
     for record in records:
         counts[record["type"]] = counts.get(record["type"], 0) + 1
 
+    logger.debug(
+        "session_capture: eligible boundary=%s counts=%s meaningful=%d",
+        base.get("boundary_id", ""),
+        counts,
+        len(meaningful),
+    )
     return {
         "eligible": True,
         "skip_reason": "",
@@ -457,6 +510,15 @@ def build_capture_context(
     )
     context["eligible"] = policy["eligible"]
     context["capture_skip_reason"] = policy.get("skip_reason", "")
+    logger.info(
+        "session_capture: boundary=%s reason=%s platform=%s eligible=%s skip=%s records=%s",
+        context.get("boundary_id", "")[:12],
+        boundary_reason,
+        platform,
+        policy["eligible"],
+        policy.get("skip_reason", ""),
+        policy.get("record_counts", {}),
+    )
     context["capture_records"] = policy.get("records", [])
     context["capture_record_counts"] = policy.get("record_counts", {})
     if "meaningful_message_count" in policy:
