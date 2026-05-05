@@ -1266,6 +1266,17 @@ Status on 2026-05-04:
 - important implementation note:
   - Hermes should not pass `tables` to `query_brain` for normal conversational recall unless the user explicitly asks for source-limited retrieval
 
+Update on 2026-05-05:
+- Hermes now also has Open Brain-specific result formatting for `query_brain` aggregate, empty, and warning-limited cases
+- live sanity check confirmed direct aggregate wording for:
+  - `How far did I ride last month?`
+- however, a manual Hermes Telegram check exposed one remaining orchestration gap for empty results:
+  - Hermes still may continue with fallback Open Brain searches after an empty `mcp_open_brain_query_brain` result
+  - Hermes may also ask a follow-up question instead of stopping with the same plain no-result answer used by the Open Brain bot
+- decision for now:
+  - leave this gap in place
+  - treat it as a known behavior difference still to be tightened later if full stop-on-empty parity becomes important
+
 #### Step 4 — Update Open Brain bot to call `query_brain`
 
 Deliverable:
