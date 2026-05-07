@@ -77,6 +77,14 @@ Add a first-class `gemini` provider authenticated via Google OAuth (standard Gem
 
 ## Backlog — Performance & Stability
 
+### Git Hygiene — Stop Tracking Build Artifacts _(2026-05-07)_
+
+**Problem:** Generated copies under `build/lib/` are tracked in git. They inflate diffs, create review noise, and make upstream syncs harder than they need to be.
+
+**Solution:** Remove tracked build outputs from version control, regenerate only during packaging/release steps, and add a CI check that prevents accidental recommit of generated artifacts.
+
+---
+
 ### SQLite Write Contention _(2026-05-07)_
 
 **Problem:** Multiple concurrent writers to `~/.hermes/state.db` (gateway handling several Telegram messages simultaneously, or CLI + gateway both active). Current mitigation is application-level retries with 20–150ms jitter. Under >10 concurrent writes, risk of TUI freezes.
@@ -147,6 +155,14 @@ Add a first-class `gemini` provider authenticated via Google OAuth (standard Gem
 
 ---
 
+### Tooling Guardrails — Real Lint / Type Gates _(2026-05-07)_
+
+**Problem:** Quality tooling exists but is not enforcing much. `ruff` is effectively disabled in `pyproject.toml`, and type checks are permissive enough that structural problems can slip through.
+
+**Solution:** Re-enable `ruff` incrementally, start with fork-owned code and touched files, then ratchet upward. Add CI enforcement for "no new lint debt" and gradually tighten type checking in locally owned modules first.
+
+---
+
 ## Backlog — Architecture (Refactoring)
 
 These are from the internal architecture review (`docs/architecture-opportunities.md`, 2026-05-07). None block current use — these are depth/maintainability improvements.
@@ -190,6 +206,54 @@ Memory lifecycle split across `memory_manager.py`, `memory_provider.py`, `contex
 ### CLI Monolith — `hermes_cli/main.py` + `cli.py` (20K combined lines) _(2026-05-07)_
 
 60+ command handlers inline with no router. TUI rendering and command logic interleaved. Extract a `CommandRouter` — each command is a handler behind a uniform interface.
+
+---
+
+### Fork Customization Layer _(2026-05-07)_
+
+**Problem:** Personal modifications are currently spread across upstream-owned core files and a few isolated plugins/scripts. That makes future upstream merges more expensive than necessary.
+
+**Solution:** Formalize a local customization boundary: plugins, adapters, wrappers, and helper modules that behave like "upstream Hermes plus my layer." Patch upstream hotspots only through narrow seams when possible.
+
+---
+
+### Manual Model Routing Extraction _(2026-05-07)_
+
+**Problem:** Manual route switching and route-marker behavior currently span `gateway/run.py`, `gateway/platforms/base.py`, `gateway/stream_consumer.py`, and command registration. The feature is useful, but the implementation is more cross-cutting than a long-lived fork wants.
+
+**Solution:** Extract routing state, route selection, and reply decoration into a dedicated local module with a narrow gateway integration seam. Keep upstream file edits thin and mechanical.
+
+---
+
+### Gateway Extension Seams / Reduced Cross-Cutting Behavior _(2026-05-07)_
+
+**Problem:** Features such as reply decoration, transcript previews, and command normalization can require edits in several gateway layers at once. This raises merge friction and makes behavior harder to reason about.
+
+**Solution:** Define clearer extension points in the gateway lifecycle so one feature can plug in at one seam instead of touching multiple layers.
+
+---
+
+### Safe Extension Points Documentation _(2026-05-07)_
+
+**Problem:** The repo has broad documentation, but not enough short, practical guidance on where local customizations should hook in without increasing merge pain.
+
+**Solution:** Add concise architecture notes for gateway message flow, agent execution flow, plugin/hook lifecycle, and recommended fork-safe extension points.
+
+---
+
+### Fork-Owned Regression Coverage _(2026-05-07)_
+
+**Problem:** Local custom behavior is safest where it has dedicated tests, but coverage is uneven. Hotspot patches without direct regression tests are easy to break during upstream syncs.
+
+**Solution:** Add targeted tests around fork-owned behavior, especially any customization that touches upstream hotspots such as gateway routing, memory formatting, or provider-specific glue.
+
+---
+
+### Upstream Sync Automation / Merge Hygiene _(2026-05-07)_
+
+**Problem:** Long-lived fork maintenance becomes brittle when upstream sync is a remembered ritual rather than a codified workflow. Even with `reference` and `origin` set up correctly, repeated merges still rely too much on human memory.
+
+**Solution:** Keep the sync workflow repo-local and operationalized: use `scripts/sync_reference.sh`, preserve short-lived `sync/reference-*` branches, enable `rerere`, and extend the helper over time with post-sync checks and hotspot-conflict reporting.
 
 ---
 
