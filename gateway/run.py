@@ -330,6 +330,15 @@ from gateway.whatsapp_identity import (
 logger = logging.getLogger(__name__)
 
 
+@dataclasses.dataclass
+class _TranscriptionEnrichmentResult:
+    """Internal STT enrichment payload used for message prep and voice UX."""
+
+    enriched_text: str
+    transcripts: List[str] = dataclasses.field(default_factory=list)
+    missing_provider: bool = False
+
+
 # Sentinel placed into _running_agents immediately when a session starts
 # processing, *before* any await.  Prevents a second message for the same
 # session from bypassing the "already running" guard during the async gap
@@ -3973,10 +3982,17 @@ class GatewayRunner:
                 )
 
             if audio_paths:
-                message_text = await self._enrich_message_with_transcription(
+                transcription = await self._build_transcription_enrichment(
                     message_text,
                     audio_paths,
                 )
+                message_text = transcription.enriched_text
+                if transcription.transcripts:
+                    await self._maybe_send_voice_transcript_preview(
+                        event=event,
+                        source=source,
+                        transcripts=transcription.transcripts,
+                    )
                 _stt_fail_markers = (
                     "No STT provider",
                     "STT is disabled",
@@ -8430,22 +8446,59 @@ class GatewayRunner:
             return prefix
         return user_text
 
-    async def _enrich_message_with_transcription(
+    async def _maybe_send_voice_transcript_preview(
+        self,
+        *,
+        event: MessageEvent,
+        source: SessionSource,
+        transcripts: List[str],
+    ) -> None:
+        """Reply to Telegram voice notes with a short transcript preview."""
+        if source.platform != Platform.TELEGRAM or not transcripts:
+            return
+
+        adapter = self.adapters.get(source.platform)
+        if not adapter:
+            return
+
+        preview_lines = ["🎤 Heard:"]
+        for transcript in transcripts[:2]:
+            clean = " ".join((transcript or "").split()).strip()
+            if not clean:
+                continue
+            if len(clean) > 280:
+                clean = clean[:277].rstrip() + "..."
+            preview_lines.append(f'“{clean}”')
+        if len(preview_lines) == 1:
+            return
+
+        preview_lines.append("")
+        preview_lines.append("Reply in text if I misheard anything.")
+        metadata = {"thread_id": source.thread_id} if source.thread_id else None
+
+        try:
+            await adapter.send(
+                source.chat_id,
+                "\n".join(preview_lines),
+                reply_to=event.message_id,
+                metadata=metadata,
+            )
+        except Exception:
+            logger.debug(
+                "Failed to send Telegram voice transcript preview to %s",
+                source.chat_id,
+                exc_info=True,
+            )
+
+    async def _build_transcription_enrichment(
         self,
         user_text: str,
         audio_paths: List[str],
-    ) -> str:
-        """
-        Auto-transcribe user voice/audio messages using the configured STT provider
-        and prepend the transcript to the message text.
+    ) -> _TranscriptionEnrichmentResult:
+        """Transcribe inbound audio and build the enrichment text once."""
+        transcripts: List[str] = []
+        missing_provider = False
 
-        Args:
-            user_text:   The user's original caption / message text.
-            audio_paths: List of local file paths to cached audio files.
-
-        Returns:
-            The enriched message string with transcriptions prepended.
-        """
         if not getattr(self.config, "stt_enabled", True):
             disabled_note = "[The user sent voice message(s), but transcription is disabled in config."
             if self._has_setup_skill():
@@ -8455,8 +8508,8 @@ class GatewayRunner:
                 )
             disabled_note += "]"
             if user_text:
-                return f"{disabled_note}\n\n{user_text}"
-            return disabled_note
+                disabled_note = f"{disabled_note}\n\n{user_text}"
+            return _TranscriptionEnrichmentResult(enriched_text=disabled_note)
 
         from tools.transcription_tools import transcribe_audio
 
@@ -8466,7 +8519,9 @@ class GatewayRunner:
                 logger.debug("Transcribing user voice: %s", path)
                 result = await asyncio.to_thread(transcribe_audio, path)
                 if result["success"]:
-                    transcript = result["transcript"]
+                    transcript = (result.get("transcript") or "").strip()
+                    if transcript:
+                        transcripts.append(transcript)
                     enriched_parts.append(
                         f'[The user sent a voice message~ '
                         f'Here\'s what they said: "{transcript}"]'
@@ -8477,6 +8532,7 @@ class GatewayRunner:
                         "No STT provider" in error
                         or error.startswith("Neither VOICE_TOOLS_OPENAI_KEY nor OPENAI_API_KEY is set")
                     ):
+                        missing_provider = True
                         _no_stt_note = (
                             "[The user sent a voice message but I can't listen "
                             "to it right now — no STT provider is configured. "
@@ -8509,11 +8565,41 @@ class GatewayRunner:
             # when we successfully transcribed the audio — it's redundant.
             _placeholder = "(The user sent a message with no text content)"
             if user_text and user_text.strip() == _placeholder:
-                return prefix
-            if user_text:
-                return f"{prefix}\n\n{user_text}"
-            return prefix
-        return user_text
+                enriched_text = prefix
+            elif user_text:
+                enriched_text = f"{prefix}\n\n{user_text}"
+            else:
+                enriched_text = prefix
+            return _TranscriptionEnrichmentResult(
+                enriched_text=enriched_text,
+                transcripts=transcripts,
+                missing_provider=missing_provider,
+            )
+
+        return _TranscriptionEnrichmentResult(
+            enriched_text=user_text,
+            transcripts=transcripts,
+            missing_provider=missing_provider,
+        )
+
+    async def _enrich_message_with_transcription(
+        self,
+        user_text: str,
+        audio_paths: List[str],
+    ) -> str:
+        """
+        Auto-transcribe user voice/audio messages using the configured STT provider
+        and prepend the transcript to the message text.
+
+        Args:
+            user_text:   The user's original caption / message text.
+            audio_paths: List of local file paths to cached audio files.
+
+        Returns:
+            The enriched message string with transcriptions prepended.
+        """
+        result = await self._build_transcription_enrichment(user_text, audio_paths)
+        return result.enriched_text
 
     def _build_process_event_source(self, evt: dict):
         """Resolve the canonical source for a synthetic background-process event.

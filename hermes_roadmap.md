@@ -29,6 +29,52 @@ Branch: `unified-retrieval-start`
 
 ---
 
+## Backlog — Features
+
+### OpenAI-Compatible API Server _(2026-05-07)_
+
+Expose Hermes as an OpenAI-compatible endpoint so any chat frontend (Open WebUI, LobeChat, LibreChat, AnythingLLM, etc.) can use it as a backend with no custom adapters.
+
+**Endpoints:** `POST /v1/chat/completions`, `POST /v1/responses`, `GET /v1/models`, `GET /health`
+
+**Architecture:** New `gateway/platforms/api_server.py` adapter — fits the existing platform pattern, reuses session management, auth, context building. aiohttp.web server (already a dep).
+
+**Key design decisions:**
+- Stateless by default (messages array is the conversation); opt-in persistent sessions via `X-Session-ID` header
+- Phase 1: non-streaming (run agent, return full result as single SSE chunk) — compatible with all frontends
+- Phase 2: real token-by-token SSE via `stream_callback` injected into AIAgent
+- Bearer token auth via `Authorization: Bearer <key>` / `API_SERVER_KEY` env var
+- Model passthrough optional — frontend can request a specific model or use whatever's configured
+
+**Config:**
+```yaml
+api_server:
+  enabled: true
+  port: 8642
+  host: "127.0.0.1"
+  key: "your-secret-key"
+  allow_model_override: false
+  max_concurrent: 5
+```
+
+**Files:** `gateway/platforms/api_server.py` (new), `gateway/config.py` (+Platform.API_SERVER), `gateway/run.py` (+adapter registration), `cli-config.yaml.example`
+
+---
+
+### Gemini OAuth Provider _(2026-05-07)_
+
+Add a first-class `gemini` provider authenticated via Google OAuth (standard Gemini API at `generativelanguage.googleapis.com/v1beta`, not Cloud Code Assist). Browser-based auth, no manual API key copy.
+
+**Flow:** Authorization Code + PKCE (S256), localhost callback server on port 8085, fallback manual URL paste for headless/WSL.
+**Scopes:** `cloud-platform`, `userinfo.email`
+**Token storage:** `~/.hermes/gemini_oauth.json` (0o600), auto-refresh 5 min before expiry, file-locked for concurrent sessions.
+
+**Key files:** `agent/google_oauth.py` (new, ~200 lines), updates to `hermes_cli/auth.py`, `hermes_cli/models.py`, `hermes_cli/runtime_provider.py`, `hermes_cli/main.py`, `run_agent.py`, `agent/auxiliary_client.py`.
+
+**Prerequisite:** Nous Research GCP project with Desktop OAuth client registered (or `HERMES_GEMINI_CLIENT_ID` env var override).
+
+---
+
 ## Backlog — Performance & Stability
 
 ### SQLite Write Contention _(2026-05-07)_

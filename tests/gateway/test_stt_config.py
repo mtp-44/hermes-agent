@@ -114,3 +114,93 @@ async def test_prepare_inbound_message_text_transcribes_queued_voice_event():
     assert result is not None
     assert "queued voice transcript" in result
     assert "voice message" in result.lower()
+
+
+@pytest.mark.asyncio
+async def test_prepare_inbound_message_text_sends_telegram_transcript_preview():
+    from gateway.run import GatewayRunner
+
+    runner = GatewayRunner.__new__(GatewayRunner)
+    runner.config = GatewayConfig(stt_enabled=True)
+    adapter = AsyncMock()
+    runner.adapters = {Platform.TELEGRAM: adapter}
+    runner._model = "test-model"
+    runner._base_url = ""
+    runner._has_setup_skill = lambda: False
+
+    source = SessionSource(
+        platform=Platform.TELEGRAM,
+        chat_id="123",
+        chat_type="dm",
+    )
+    event = MessageEvent(
+        text="",
+        message_type=MessageType.VOICE,
+        source=source,
+        message_id="msg-42",
+        media_urls=["/tmp/queued-voice.ogg"],
+        media_types=["audio/ogg"],
+    )
+
+    with patch(
+        "tools.transcription_tools.transcribe_audio",
+        return_value={
+            "success": True,
+            "transcript": "please remind me about the dentist tomorrow",
+            "provider": "local_command",
+        },
+    ):
+        result = await runner._prepare_inbound_message_text(
+            event=event,
+            source=source,
+            history=[],
+        )
+
+    assert result is not None
+    adapter.send.assert_awaited_once()
+    call = adapter.send.await_args
+    assert call.args[0] == "123"
+    assert "Heard:" in call.args[1]
+    assert "dentist tomorrow" in call.args[1]
+    assert call.kwargs["reply_to"] == "msg-42"
+
+
+@pytest.mark.asyncio
+async def test_prepare_inbound_message_text_skips_telegram_preview_on_stt_failure():
+    from gateway.run import GatewayRunner
+
+    runner = GatewayRunner.__new__(GatewayRunner)
+    runner.config = GatewayConfig(stt_enabled=True)
+    adapter = AsyncMock()
+    runner.adapters = {Platform.TELEGRAM: adapter}
+    runner._model = "test-model"
+    runner._base_url = ""
+    runner._has_setup_skill = lambda: False
+
+    source = SessionSource(
+        platform=Platform.TELEGRAM,
+        chat_id="123",
+        chat_type="dm",
+    )
+    event = MessageEvent(
+        text="",
+        message_type=MessageType.VOICE,
+        source=source,
+        message_id="msg-42",
+        media_urls=["/tmp/queued-voice.ogg"],
+        media_types=["audio/ogg"],
+    )
+
+    with patch(
+        "tools.transcription_tools.transcribe_audio",
+        return_value={"success": False, "error": "API error"},
+    ):
+        result = await runner._prepare_inbound_message_text(
+            event=event,
+            source=source,
+            history=[],
+        )
+
+    assert result is not None
+    assert "trouble transcribing" in result
+    adapter.send.assert_not_awaited()
