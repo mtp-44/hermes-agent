@@ -1961,6 +1961,17 @@ class AIAgent:
                 self._ollama_num_ctx,
             )
 
+        # keep_alive: how long Ollama holds the model in memory between requests.
+        # Set model.ollama_keep_alive: -1 in config.yaml to keep it loaded forever.
+        self._ollama_keep_alive: int | str | None = None
+        if isinstance(_model_cfg, dict):
+            _ka = _model_cfg.get("ollama_keep_alive")
+            if _ka is not None:
+                try:
+                    self._ollama_keep_alive = int(_ka)
+                except (TypeError, ValueError):
+                    self._ollama_keep_alive = str(_ka)  # allow "5m", "1h", etc.
+
         if not self.quiet_mode:
             if compression_enabled:
                 print(f"📊 Context limit: {self.context_compressor.context_length:,} tokens (compress at {int(compression_threshold*100)}% = {self.context_compressor.threshold_tokens:,})")
@@ -7490,6 +7501,7 @@ class AIAgent:
             is_kimi=_is_kimi,
             is_custom_provider=self.provider == "custom",
             ollama_num_ctx=self._ollama_num_ctx,
+            ollama_keep_alive=self._ollama_keep_alive,
             provider_preferences=_prefs or None,
             qwen_prepare_fn=self._qwen_prepare_chat_messages if _is_qwen else None,
             qwen_prepare_inplace_fn=self._qwen_prepare_chat_messages_inplace if _is_qwen else None,

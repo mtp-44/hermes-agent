@@ -258,12 +258,15 @@ class ChatCompletionsTransport(ProviderTransport):
         if is_nous:
             extra_body["tags"] = ["product=hermes-agent"]
 
-        # Ollama num_ctx
+        # Ollama num_ctx + keep_alive
         ollama_ctx = params.get("ollama_num_ctx")
         if ollama_ctx:
             options = extra_body.get("options", {})
             options["num_ctx"] = ollama_ctx
             extra_body["options"] = options
+        ollama_keep_alive = params.get("ollama_keep_alive")
+        if ollama_keep_alive is not None:
+            extra_body["keep_alive"] = ollama_keep_alive
 
         # Ollama/custom think=false
         if params.get("is_custom_provider", False):
