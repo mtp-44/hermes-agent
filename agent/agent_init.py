@@ -1679,6 +1679,17 @@ def init_agent(
             agent._ollama_num_ctx,
         )
 
+    # keep_alive: how long Ollama holds the model in memory between requests.
+    # Set model.ollama_keep_alive: -1 in config.yaml to keep it loaded forever.
+    agent._ollama_keep_alive: int | str | None = None
+    if isinstance(_model_cfg, dict):
+        _ollama_keep_alive = _model_cfg.get("ollama_keep_alive")
+        if _ollama_keep_alive is not None:
+            try:
+                agent._ollama_keep_alive = int(_ollama_keep_alive)
+            except (TypeError, ValueError):
+                agent._ollama_keep_alive = str(_ollama_keep_alive)
+
     if not agent.quiet_mode:
         if compression_enabled:
             print(f"📊 Context limit: {agent.context_compressor.context_length:,} tokens (compress at {int(compression_threshold*100)}% = {agent.context_compressor.threshold_tokens:,})")
