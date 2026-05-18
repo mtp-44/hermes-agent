@@ -462,6 +462,10 @@ class SessionEntry:
     resume_reason: Optional[str] = None  # e.g. "restart_timeout"
     last_resume_marked_at: Optional[datetime] = None
 
+    # Automatic capture controls for the current session only.
+    capture_nosave: bool = False
+    capture_private: bool = False
+
     def to_dict(self) -> Dict[str, Any]:
         result = {
             "session_key": self.session_key,
@@ -488,6 +492,8 @@ class SessionEntry:
                 if self.last_resume_marked_at
                 else None
             ),
+            "capture_nosave": self.capture_nosave,
+            "capture_private": self.capture_private,
         }
         if self.origin:
             result["origin"] = self.origin.to_dict()
@@ -536,6 +542,8 @@ class SessionEntry:
             resume_pending=data.get("resume_pending", False),
             resume_reason=data.get("resume_reason"),
             last_resume_marked_at=last_resume_marked_at,
+            capture_nosave=data.get("capture_nosave", False),
+            capture_private=data.get("capture_private", False),
         )
 
 
@@ -996,6 +1004,27 @@ class SessionStore:
             entry.last_resume_marked_at = None
             self._save()
             return True
+
+    def set_capture_controls(
+        self,
+        session_key: str,
+        *,
+        nosave: Optional[bool] = None,
+        private: Optional[bool] = None,
+    ) -> Optional[SessionEntry]:
+        """Update automatic-capture flags for a session and persist them."""
+        with self._lock:
+            self._ensure_loaded_locked()
+            entry = self._entries.get(session_key)
+            if entry is None:
+                return None
+            if nosave is not None:
+                entry.capture_nosave = bool(nosave)
+            if private is not None:
+                entry.capture_private = bool(private)
+            entry.updated_at = _now()
+            self._save()
+            return entry
 
     def prune_old_entries(self, max_age_days: int) -> int:
         """Drop SessionEntry records older than max_age_days.

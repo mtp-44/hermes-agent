@@ -98,6 +98,20 @@ To restart Ollama: `launchctl kickstart -k gui/$(id -u)/homebrew.mxcl.ollama`
 
 ---
 
+## Mode Shortcuts
+
+Use these phrases as shorthand for Ollama residency behavior:
+
+| Phrase | Meaning |
+|---|---|
+| `always-on` | Keep the local Ollama model loaded indefinitely. Set `model.ollama_keep_alive: -1` in `~/.hermes/config.yaml` and `OLLAMA_KEEP_ALIVE=-1` in `~/Library/LaunchAgents/homebrew.mxcl.ollama.plist`. Expected `ollama ps` result: `UNTIL: Forever`. |
+| `not always on` | Allow the local Ollama model to unload after 5 minutes idle. Remove `model.ollama_keep_alive` from `~/.hermes/config.yaml` or set it to `300`, and remove `OLLAMA_KEEP_ALIVE` from `~/Library/LaunchAgents/homebrew.mxcl.ollama.plist` or set it to `300`. Expected `ollama ps` result after idle: no loaded model, or a non-forever expiry while active. |
+
+When asked to "switch to always on mode", apply the `always-on` settings above.
+When asked to "switch to not always on mode", apply the `not always on` settings above.
+
+---
+
 ## Gateway
 
 Hermes gateway runs as a launchd service and handles all Telegram traffic.
