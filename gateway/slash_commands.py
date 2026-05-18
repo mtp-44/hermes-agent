@@ -137,6 +137,8 @@ class GatewaySlashCommandsMixin:
         except Exception:
             pass
 
+        await self._capture_session_summary_if_eligible(old_entry, reason="reset")
+
         # Reset the session
         new_entry = self.session_store.reset_session(session_key)
 
@@ -157,13 +159,21 @@ class GatewaySlashCommandsMixin:
         # Fire plugin on_session_finalize hook (session boundary)
         try:
             from hermes_cli.plugins import invoke_hook as _invoke_hook
-            _invoke_hook(
-                "on_session_finalize",
-                session_id=_old_sid,
+            finalize_kwargs = self._build_session_finalize_hook_kwargs(
+                old_entry,
                 platform=source.platform.value if source.platform else "",
+            ) if old_entry is not None else {
+                "session_id": _old_sid,
+                "platform": source.platform.value if source.platform else "",
+            }
+            finalize_kwargs.update(
                 reason="new_session",
                 old_session_id=_old_sid,
                 new_session_id=new_entry.session_id if new_entry else None,
+            )
+            _invoke_hook(
+                "on_session_finalize",
+                **finalize_kwargs,
             )
         except Exception:
             pass
