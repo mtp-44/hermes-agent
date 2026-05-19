@@ -263,6 +263,51 @@ async def test_digest_command_reports_query_empty_state(mock_fetch_digest):
 
 
 @pytest.mark.asyncio
+@patch("gateway.jira_mcp.fetch_current_sprint_issues", new_callable=AsyncMock)
+async def test_jira_command_lists_current_sprint_issues(mock_fetch_issues):
+    runner = _make_runner()
+    mock_fetch_issues.return_value = [
+        {
+            "key": "PROJ-101",
+            "summary": "Ship Jira MCP readback",
+            "status": "In Progress",
+            "priority": "High",
+            "assignee": "Mark",
+        },
+        {
+            "key": "PROJ-102",
+            "summary": "Review follow-up tests",
+            "status": "To Do",
+            "priority": "",
+            "assignee": "",
+        },
+    ]
+
+    result = await runner._handle_jira_command(_make_event("/jira"))
+
+    assert "jira" in result.lower()
+    assert "source: jira" in result.lower()
+    assert "PROJ-101" in result
+    assert "Ship Jira MCP readback" in result
+    assert "/fast" in result
+    assert "/claude" in result
+    mock_fetch_issues.assert_awaited_once_with(query=None, limit=8)
+
+
+@pytest.mark.asyncio
+@patch("gateway.jira_mcp.fetch_current_sprint_issues", new_callable=AsyncMock)
+async def test_jira_command_passes_filter(mock_fetch_issues):
+    runner = _make_runner()
+    mock_fetch_issues.return_value = []
+
+    result = await runner._handle_jira_command(_make_event("/jira auth"))
+
+    assert "matched" in result.lower()
+    assert "auth" in result
+    mock_fetch_issues.assert_awaited_once_with(query="auth", limit=8)
+
+
+@pytest.mark.asyncio
 @patch("gateway.run._load_gateway_config", return_value={})
 @patch("hermes_cli.runtime_provider.resolve_runtime_provider")
 async def test_claude_route_switches_session_override(mock_resolve_runtime, mock_load_gateway_config):
@@ -300,6 +345,23 @@ async def test_opus_route_switches_session_override(mock_resolve_runtime, mock_l
     session_key = build_session_key(_make_source())
     assert runner._session_model_overrides[session_key]["route"] == "opus"
     assert runner._session_model_overrides[session_key]["model"] == "anthropic/claude-opus-4.6"
+
+
+@pytest.mark.asyncio
+async def test_local_route_clears_override_but_only_suggests_paid_routes():
+    runner = _make_runner()
+    session_key = build_session_key(_make_source())
+    runner._session_model_overrides[session_key] = {
+        "route": "claude",
+        "model": "anthropic/claude-sonnet-4.6",
+    }
+
+    result = await runner._handle_model_route_command(_make_event("/local"), "local")
+
+    assert "back on local" in result.lower()
+    assert "/fast" in result
+    assert "/claude" in result
+    assert session_key not in runner._session_model_overrides
 
 
 @pytest.mark.asyncio

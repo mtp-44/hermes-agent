@@ -37,8 +37,67 @@ Self-improving AI agent built by Nous Research. Runs 24/7 on the Mac mini, reach
 | `~/.hermes/MEMORY.md` | Shared memory |
 | `~/.hermes/USER.md` | User profile |
 | `~/.hermes/skills/` | User-created skills |
-| `~/Library/LaunchAgents/homebrew.mxcl.ollama.plist` | Ollama launchd config |
-| `/opt/homebrew/var/log/ollama.log` | Ollama logs |
+| `~/Library/LaunchAgents/com.mh.ollama.plist` | Owned Ollama launchd config |
+| `~/.hermes/logs/ollama.log` | Ollama logs |
+| `~/Library/LaunchAgents/com.mh.hermes-health-monitor.plist` | Health monitor launchd config |
+| `~/.hermes/logs/health-monitor.jsonl` | Structured health monitor logs |
+
+---
+
+## Feature Status
+
+| Feature | Status | Still needed to use it |
+|---|---|---|
+| Local Hermes chat via Ollama | live | owned Ollama LaunchAgent installed and running |
+| Telegram gateway | live | `TELEGRAM_BOT_TOKEN` and gateway service running |
+| OpenBrain-backed memory retrieval | live | `mcp_servers.open_brain` in `~/.hermes/config.yaml` and `MCP_ACCESS_KEY` in `~/.hermes/.env` |
+| Explicit memory capture: `/note`, `/m` | live | same OpenBrain config as above |
+| Session capture controls: `/nosave`, `/private`, `/capture-status` | live | nothing extra once gateway is running |
+| Automatic Hermes session-end capture | live | same OpenBrain config as above |
+| Claude Code Stop-hook capture | live | hook registered in Claude Code settings and Hermes/OpenBrain config available in the hook environment |
+| Pull surfaces: `/brief`, `/digest`, `/stale`, `/finance-check` | live | same OpenBrain config as above and enough captured data to query |
+| Route switching: `/claude`, `/opus` | live | valid OpenRouter credentials unless `model_routes` overrides them |
+| Route switching: `/fast`, `/5.5` | live | valid `openai-codex` runtime auth |
+| Jira pull surface: `/jira` | implemented | add a Jira MCP server entry with `url`, `cloudId`, and auth headers |
+| Health monitor | live | LaunchAgent installed, Telegram home channel configured if you want alerts |
+| Open Brain standalone Telegram bot | separate service, live if launched | its own `.env`, bot token, and allowed Telegram ID |
+| Read-only calendar integration | not implemented yet | Phase `3.1` still open |
+| Scheduled proactive brief/digest delivery | not implemented yet | Phase `5` still open |
+| Provenance/conflict-aware answer synthesis | not implemented yet | Phase `6` still open |
+| Web monitoring and pattern detection | not implemented yet | Phase `7` still open |
+
+---
+
+## Enable Everything Implemented
+
+Minimum checklist for the full currently-implemented stack:
+
+1. Install and run Ollama via [com.mh.ollama.plist](/Users/mh/ai/agents/hermes-agent/launchd/com.mh.ollama.plist).
+2. Keep Hermes config in `~/.hermes/config.yaml` with the local model and `mcp_servers.open_brain`.
+3. Put required secrets in `~/.hermes/.env`.
+4. Run the Hermes gateway service with Telegram enabled.
+5. Install the health monitor LaunchAgent.
+6. Register the Claude Code Stop hook if you want automatic coding-session capture.
+7. Add a Jira MCP server entry if you want `/jira`.
+
+Recommended `~/.hermes/.env` keys:
+
+```bash
+TELEGRAM_BOT_TOKEN=...
+TELEGRAM_HOME_CHANNEL=...
+MCP_ACCESS_KEY=...
+OPENROUTER_API_KEY=...          # needed for /claude and /opus unless route config overrides auth
+# plus whatever auth your openai-codex runtime uses for /fast and /5.5
+# optional for Jira:
+ATLASSIAN_MCP_TOKEN=...
+```
+
+If a feature appears in the command list but replies with "isn't configured", the missing piece is almost always one of:
+
+- a missing `mcp_servers.*` config entry
+- a missing secret in `~/.hermes/.env`
+- a LaunchAgent that was not installed into `~/Library/LaunchAgents/`
+- a service that is installed but not currently loaded with `launchctl`
 
 ---
 
@@ -84,7 +143,7 @@ stt:
 
 | Setting | Value | Where |
 |---|---|---|
-| `OLLAMA_KEEP_ALIVE` | `-1` (forever) | `~/Library/LaunchAgents/homebrew.mxcl.ollama.plist` |
+| `OLLAMA_KEEP_ALIVE` | `-1` (forever) | `~/Library/LaunchAgents/com.mh.ollama.plist` |
 | `OLLAMA_CONTEXT_LENGTH` | `131072` | same plist |
 | `OLLAMA_FLASH_ATTENTION` | `1` | same plist |
 | `OLLAMA_KV_CACHE_TYPE` | `q8_0` | same plist |
@@ -94,7 +153,21 @@ The model loads into GPU on the first request after a restart and stays resident
 
 To verify: `ollama ps` — expect `qwen3.5:35b-a3b-nvfp4 ... 100% GPU ... Forever`
 
-To restart Ollama: `launchctl kickstart -k gui/$(id -u)/homebrew.mxcl.ollama`
+To restart Ollama: `launchctl kickstart -k gui/$(id -u)/com.mh.ollama`
+
+Install/update the owned LaunchAgent:
+```bash
+mkdir -p ~/.hermes/logs ~/Library/LaunchAgents
+cp ~/ai/agents/hermes-agent/launchd/com.mh.ollama.plist ~/Library/LaunchAgents/com.mh.ollama.plist
+launchctl bootout gui/$(id -u)/com.mh.ollama 2>/dev/null || true
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.mh.ollama.plist
+launchctl kickstart -k gui/$(id -u)/com.mh.ollama
+```
+
+If migrating from Homebrew, disable the old plist so it cannot reclaim port `11434` on the next login:
+```bash
+mv ~/Library/LaunchAgents/homebrew.mxcl.ollama.plist ~/Library/LaunchAgents/homebrew.mxcl.ollama.plist.disabled-YYYY-MM-DD
+```
 
 ---
 
@@ -104,8 +177,8 @@ Use these phrases as shorthand for Ollama residency behavior:
 
 | Phrase | Meaning |
 |---|---|
-| `always-on` | Keep the local Ollama model loaded indefinitely. Set `model.ollama_keep_alive: -1` in `~/.hermes/config.yaml` and `OLLAMA_KEEP_ALIVE=-1` in `~/Library/LaunchAgents/homebrew.mxcl.ollama.plist`. Expected `ollama ps` result: `UNTIL: Forever`. |
-| `not always on` | Allow the local Ollama model to unload after 5 minutes idle. Remove `model.ollama_keep_alive` from `~/.hermes/config.yaml` or set it to `300`, and remove `OLLAMA_KEEP_ALIVE` from `~/Library/LaunchAgents/homebrew.mxcl.ollama.plist` or set it to `300`. Expected `ollama ps` result after idle: no loaded model, or a non-forever expiry while active. |
+| `always-on` | Keep the local Ollama model loaded indefinitely. Set `model.ollama_keep_alive: -1` in `~/.hermes/config.yaml` and `OLLAMA_KEEP_ALIVE=-1` in `~/Library/LaunchAgents/com.mh.ollama.plist`. Expected `ollama ps` result: `UNTIL: Forever`. |
+| `not always on` | Allow the local Ollama model to unload after 5 minutes idle. Remove `model.ollama_keep_alive` from `~/.hermes/config.yaml` or set it to `300`, and remove `OLLAMA_KEEP_ALIVE` from `~/Library/LaunchAgents/com.mh.ollama.plist` or set it to `300`. Expected `ollama ps` result after idle: no loaded model, or a non-forever expiry while active. |
 
 When asked to "switch to always on mode", apply the `always-on` settings above.
 When asked to "switch to not always on mode", apply the `not always on` settings above.
@@ -127,6 +200,66 @@ launchctl list | grep hermes
 tail -f /opt/homebrew/var/log/hermes-gateway.log  # or wherever configured
 ```
 
+What the gateway needs in practice:
+
+- `TELEGRAM_BOT_TOKEN` for Telegram access
+- `~/.hermes/config.yaml` present and readable
+- `~/.hermes/.env` present if you rely on secrets there
+- OpenBrain MCP config if you want memory-backed commands
+- route-provider credentials if you want `/claude`, `/opus`, `/fast`, or `/5.5`
+
+Useful health checks:
+```bash
+HERMES_HOME=~/.hermes hermes gateway status
+launchctl print gui/$(id -u)/ai.hermes.gateway | sed -n '1,80p'
+tail -n 80 ~/.hermes/logs/health-monitor.log
+```
+
+## Health Monitor
+
+Hermes health monitoring runs as a separate launchd job and checks:
+
+- Ollama local API
+- Hermes gateway runtime state
+- Telegram bot reachability
+- Openbrain MCP authenticated and unauthenticated probes
+- disk space and available memory thresholds
+
+Install/update it:
+```bash
+mkdir -p ~/.hermes/logs ~/Library/LaunchAgents
+cp ~/ai/agents/hermes-agent/launchd/com.mh.hermes-health-monitor.plist ~/Library/LaunchAgents/com.mh.hermes-health-monitor.plist
+launchctl bootout gui/$(id -u)/com.mh.hermes-health-monitor 2>/dev/null || true
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.mh.hermes-health-monitor.plist
+```
+
+Run it manually:
+```bash
+uv run python ~/ai/agents/hermes-agent/scripts/hermes_health_monitor.py
+```
+
+Behavior:
+
+- short HTTP timeouts by default
+- one restart request on first local service failure, then backoff
+- one Telegram alert on persistent failure instead of repeated spam
+- JSONL logs with timestamp, service, status, action, detail, and correlation ID
+
+What it uses:
+
+- `~/.hermes/.env` is loaded before checks
+- OpenBrain URL is resolved from `OPEN_BRAIN_MCP_URL`, `SUPABASE_URL`, or `mcp_servers.open_brain.url`
+- Telegram alerts go to `TELEGRAM_HOME_CHANNEL`
+
+Current check set:
+
+- `ollama`
+- `gateway`
+- `telegram`
+- `openbrain`
+- `disk`
+- `memory`
+
 ---
 
 ## Slash Commands (Telegram)
@@ -134,7 +267,21 @@ tail -f /opt/homebrew/var/log/hermes-gateway.log  # or wherever configured
 | Command | What it does |
 |---|---|
 | `/new` or `/reset` | Start fresh conversation |
+| `/note <text>` or `/m <text>` | Save an explicit note to OpenBrain immediately |
+| `/nosave [on|off|status]` | Disable automatic session-end capture for this session |
+| `/private [on|off|status]` | Keep automatic session capture off until re-enabled |
+| `/capture-status` | Show whether automatic capture is currently eligible |
+| `/brief [query]` | Show recent Hermes captures from OpenBrain |
+| `/digest [query]` | Show a synthesized weekly digest from recent Hermes captures |
+| `/stale` | Show stale action items and dormant contacts from OpenBrain |
+| `/finance-check` | Compare recent finance records against the prior period |
+| `/jira [filter]` | Show current sprint Jira issues from the configured Jira MCP server |
 | `/model [provider:model]` | Switch model |
+| `/local` | Return this session to the local route |
+| `/claude` | Switch this session to the Claude Sonnet route |
+| `/opus` | Switch this session to the Claude Opus route |
+| `/fast` | Switch this session to the fast paid route |
+| `/5.5` | Switch this session to GPT-5.5 route |
 | `/stop` | Interrupt current work |
 | `/retry` | Redo last turn |
 | `/undo` | Remove last turn |
@@ -158,6 +305,39 @@ Switch back to local:
 /model qwen3.5:35b-a3b-nvfp4
 ```
 Or just ask Hermes to use a cloud model for a specific request — it can switch mid-session.
+
+Gateway route shortcuts:
+
+```text
+/local
+/claude
+/opus
+/fast
+/5.5
+```
+
+Route credentials:
+
+- `/claude` and `/opus` default to `openrouter` and therefore need working OpenRouter auth unless overridden in `model_routes`
+- `/fast` and `/5.5` default to `openai-codex` runtime auth
+- `/local` never spends money by itself; it only suggests `/fast` or `/claude` when richer synthesis might help
+
+Optional config override shape:
+```yaml
+model_routes:
+  claude:
+    model: anthropic/claude-sonnet-4.6
+    provider: openrouter
+  opus:
+    model: anthropic/claude-opus-4.6
+    provider: openrouter
+  fast:
+    model: gpt-5.4-mini
+    provider: openai-codex
+  "5.5":
+    model: gpt-5.5
+    provider: openai-codex
+```
 
 Available local models (installed):
 - `qwen3.5:35b-a3b-nvfp4` — 21 GB, primary, MoE sparse (fast)
@@ -183,6 +363,83 @@ mcp_servers:
     headers:
       x-brain-key: ${MCP_ACCESS_KEY}
 ```
+
+Optional Jira readback via MCP:
+```yaml
+mcp_servers:
+  jira:
+    url: https://mcp.atlassian.com/v1/mcp
+    cloudId: your-atlassian-cloud-id
+    headers:
+      Authorization: Bearer ${ATLASSIAN_MCP_TOKEN}
+```
+
+Hermes uses this for the read-only `/jira` command. It reads the current sprint on demand, cites Jira as the source, and does not mirror issue dumps into OpenBrain.
+
+What depends on OpenBrain:
+
+- automatic session-end summary capture from Hermes
+- explicit note capture via `/note` and `/m`
+- `/brief`
+- `/digest`
+- `/stale`
+- `/finance-check`
+- Claude Code Stop-hook capture
+
+If OpenBrain is unavailable, normal chat still works, but the memory-backed features above will return a clear config or runtime error instead of silently writing elsewhere.
+
+### Claude Code Stop Hook
+
+The capture hook lives at [claude_code_stop_hook.py](/Users/mh/ai/agents/hermes-agent/scripts/claude_code_stop_hook.py).
+
+What it expects:
+
+- Claude Code passes a JSON payload on stdin with `session_id`, `transcript_path`, and `cwd`
+- Hermes repo is still present at `/Users/mh/ai/agents/hermes-agent`
+- OpenBrain is reachable through `~/.hermes/config.yaml` and `MCP_ACCESS_KEY`
+
+What it logs:
+
+- `~/.hermes/logs/claude_code_capture.log`
+
+How to disable capture temporarily without unregistering the hook:
+
+```bash
+export HERMES_NO_CAPTURE=1
+```
+
+What to verify after a real Claude Code session ends:
+
+```bash
+tail -n 40 ~/.hermes/logs/claude_code_capture.log
+```
+
+You want to see `SAVED` or `DEDUP`, not repeated `ERROR`.
+
+### Jira MCP
+
+`/jira` is implemented but not usable until a Jira MCP server is configured in `~/.hermes/config.yaml`.
+
+Minimum shape:
+```yaml
+mcp_servers:
+  jira:
+    url: https://mcp.atlassian.com/v1/mcp
+    cloudId: your-atlassian-cloud-id
+    headers:
+      Authorization: Bearer ${ATLASSIAN_MCP_TOKEN}
+```
+
+Notes:
+
+- the server name does not have to be exactly `jira`, but that is the expected default
+- Hermes currently calls a read-only Jira search tool and filters results locally for `/jira <filter>`
+- no Jira issue dump is written into OpenBrain by this feature
+- if `cloudId` is missing, `/jira` will fail fast with a config error
+
+### Calendar
+
+Calendar is still not implemented in Hermes. There is no working calendar-backed command yet, and `/brief` does not currently use calendar context.
 
 ---
 
@@ -281,6 +538,48 @@ hermes webhook subscribe pr-review --events "pull_request" --prompt "Review PR #
 - Stale contact scan — Monday 08:00 — contacts with no activity in 60+ days
 - Overnight distillation — 02:00 nightly — cluster recent thoughts, write summaries back via MCP
 
+Current status:
+
+- Hermes scheduling exists
+- the stack now has the pull surfaces those jobs would rely on
+- proactive delivery jobs themselves are still intentionally not wired as default recurring automations
+- the right time to enable them is after production validation of `/brief`, `/digest`, `/stale`, `/finance-check`, and later calendar
+
+---
+
+## Verification Checklist
+
+Use this after machine restart or config changes:
+
+```bash
+launchctl print gui/$(id -u)/com.mh.ollama | sed -n '1,40p'
+launchctl print gui/$(id -u)/ai.hermes.gateway | sed -n '1,60p'
+launchctl print gui/$(id -u)/com.mh.hermes-health-monitor | sed -n '1,40p'
+curl -sS http://127.0.0.1:11434/api/version
+curl -sS http://127.0.0.1:11434/api/tags
+uv run python ~/ai/open_brain/scripts/hosted_mcp_smoke.py --key "$MCP_ACCESS_KEY"
+```
+
+Manual feature smoke tests:
+
+```text
+/note remember this deployment detail
+/brief
+/digest
+/stale
+/finance-check
+/claude explain this briefly
+/local
+/jira               # only after Jira MCP is configured
+```
+
+Expected current limitations:
+
+- `/jira` is not usable until Jira MCP config is added
+- calendar-backed context is not built yet
+- proactive scheduled delivery is not enabled by default
+- Phase `6` provenance/conflict handling is still future work, so normal answers are not yet doing the final upgraded conflict-resolution pass
+
 ---
 
 ## Performance Notes _(2026-05-07)_
@@ -308,21 +607,20 @@ launchctl kickstart -k gui/$(id -u)/ai.hermes.gateway
 
 **Restart both**
 ```bash
-launchctl kickstart -k gui/$(id -u)/homebrew.mxcl.ollama
+launchctl kickstart -k gui/$(id -u)/com.mh.ollama
 launchctl kickstart -k gui/$(id -u)/ai.hermes.gateway
 ```
 
-**Ollama context regresses to 32768 or 65536** _(seen 2026-04-26)_
+**Ollama context regresses or service restarts with wrong env**
 
-Two plist files exist and Homebrew's source plist wins on `brew services restart`:
+The owned LaunchAgent should be the only service definition in play:
+```bash
+launchctl print gui/$(id -u)/com.mh.ollama | sed -n '1,60p'
 ```
-~/Library/LaunchAgents/homebrew.mxcl.ollama.plist   ← the one that matters
-/opt/homebrew/opt/ollama/homebrew.mxcl.ollama.plist  ← Homebrew source, overwrites on update
-```
-If context reverts, check both plists have `OLLAMA_CONTEXT_LENGTH` set. Also verify:
+If the live process still looks wrong, verify the running environment and recent log output:
 ```bash
 ps eww -p $(pgrep ollama) | tr ' ' '\n' | grep OLLAMA  # live env
-grep "server config\|vram-based\|KvSize" /opt/homebrew/var/log/ollama.log | tail -5
+grep "server config\|vram-based\|KvSize" ~/.hermes/logs/ollama.log | tail -5
 ```
 
 **MLX not running (symptoms: slower generation, log shows GGUF runner instead of MLX)**
@@ -331,4 +629,4 @@ The MLX dylib symlink may be missing:
 ```bash
 ln -sf /opt/homebrew/opt/mlx-c/lib/libmlxc.dylib /opt/homebrew/opt/ollama/bin/libmlxc.dylib
 ```
-Verify MLX is active: `grep "mlx runner is ready" /opt/homebrew/var/log/ollama.log`
+Verify MLX is active: `grep "mlx runner is ready" ~/.hermes/logs/ollama.log`

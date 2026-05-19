@@ -65,10 +65,15 @@ def _read_transcript(transcript_path: str) -> list[dict]:
                 if not isinstance(record, dict):
                     continue
 
-                # Claude Code transcript entries use "role" and "content"
-                # Some entries may have nested message structures
-                raw_role = record.get("role") or record.get("type") or ""
-                raw_content = record.get("content") or record.get("text") or record.get("message") or ""
+                # Real Claude Code JSONL: { "type": "user"|"assistant", "message": { "role": ..., "content": ... } }
+                # Fall back to flat { "role": ..., "content": ... } for any other format.
+                msg = record.get("message")
+                if isinstance(msg, dict):
+                    raw_role = msg.get("role") or record.get("type") or ""
+                    raw_content = msg.get("content") or ""
+                else:
+                    raw_role = record.get("role") or record.get("type") or ""
+                    raw_content = record.get("content") or record.get("text") or ""
 
                 if isinstance(raw_content, list):
                     # Flatten list content blocks (tool use, text, etc.)

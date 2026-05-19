@@ -265,7 +265,7 @@ Items below were discussed in roadmap and have since been implemented. Full deta
 
 **Was:** Ollama evicted model from memory after 5-minute default idle timeout. Every cold start added 10–30s to first response.
 
-**Implemented:** `OLLAMA_KEEP_ALIVE=-1` in launchd plist (`~/Library/LaunchAgents/homebrew.mxcl.ollama.plist`). `ollama_keep_alive: -1` in `~/.hermes/config.yaml`. `ollama_keep_alive` config key added to hermes codebase (passes as top-level `keep_alive` field on every Ollama request). Documented in `cli-config.yaml.example`.
+**Implemented:** `OLLAMA_KEEP_ALIVE=-1` in the owned launchd plist (`~/Library/LaunchAgents/com.mh.ollama.plist`). `ollama_keep_alive: -1` in `~/.hermes/config.yaml`. `ollama_keep_alive` config key added to hermes codebase (passes as top-level `keep_alive` field on every Ollama request). Documented in `cli-config.yaml.example`.
 
 ---
 
