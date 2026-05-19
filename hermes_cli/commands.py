@@ -131,6 +131,8 @@ COMMAND_REGISTRY: list[CommandDef] = [
                gateway_only=True, args_hint="[query]"),
     CommandDef("digest", "Show a synthesized weekly digest from Hermes captures", "Session",
                gateway_only=True, args_hint="[query]"),
+    CommandDef("jira", "Show current sprint issues from Jira MCP", "Session",
+               gateway_only=True, args_hint="[filter]"),
     CommandDef("stale", "Show stale action items and contacts from Openbrain", "Session",
                gateway_only=True),
     CommandDef("finance-check", "Check for finance anomalies against the prior period", "Session",

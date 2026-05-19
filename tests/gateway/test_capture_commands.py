@@ -263,6 +263,51 @@ async def test_digest_command_reports_query_empty_state(mock_fetch_digest):
 
 
 @pytest.mark.asyncio
+@patch("gateway.jira_mcp.fetch_current_sprint_issues", new_callable=AsyncMock)
+async def test_jira_command_lists_current_sprint_issues(mock_fetch_issues):
+    runner = _make_runner()
+    mock_fetch_issues.return_value = [
+        {
+            "key": "PROJ-101",
+            "summary": "Ship Jira MCP readback",
+            "status": "In Progress",
+            "priority": "High",
+            "assignee": "Mark",
+        },
+        {
+            "key": "PROJ-102",
+            "summary": "Review follow-up tests",
+            "status": "To Do",
+            "priority": "",
+            "assignee": "",
+        },
+    ]
+
+    result = await runner._handle_jira_command(_make_event("/jira"))
+
+    assert "jira" in result.lower()
+    assert "source: jira" in result.lower()
+    assert "PROJ-101" in result
+    assert "Ship Jira MCP readback" in result
+    assert "/fast" in result
+    assert "/claude" in result
+    mock_fetch_issues.assert_awaited_once_with(query=None, limit=8)
+
+
+@pytest.mark.asyncio
+@patch("gateway.jira_mcp.fetch_current_sprint_issues", new_callable=AsyncMock)
+async def test_jira_command_passes_filter(mock_fetch_issues):
+    runner = _make_runner()
+    mock_fetch_issues.return_value = []
+
+    result = await runner._handle_jira_command(_make_event("/jira auth"))
+
+    assert "matched" in result.lower()
+    assert "auth" in result
+    mock_fetch_issues.assert_awaited_once_with(query="auth", limit=8)
+
+
+@pytest.mark.asyncio
 @patch("gateway.open_brain.save_session_summary", new_callable=AsyncMock)
 @patch("hermes_cli.plugins.invoke_hook")
 async def test_reset_captures_session_summary_when_eligible(mock_invoke_hook, mock_save_summary):

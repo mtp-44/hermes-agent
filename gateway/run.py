@@ -3343,6 +3343,58 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         route["request_overrides"] = overrides or {}
         return route
 
+    def _startup_route_snapshot(self) -> str:
+        """Return a compact startup summary of configured model routes."""
+        route_bits = [f"local={_resolve_gateway_model() or '<unset>'}"]
+        for route_name in ("claude", "opus", "fast", "5.5"):
+            try:
+                route_cfg = self._load_model_route_config(route_name)
+            except Exception:
+                continue
+            model = str(route_cfg.get("model") or route_cfg.get("default_model") or "").strip()
+            if model:
+                route_bits.append(f"{route_name}={model}")
+        return ", ".join(route_bits)
+
+    def _startup_mcp_snapshot(self) -> str:
+        """Return a compact startup summary of configured MCP servers."""
+        try:
+            from tools.mcp_tool import get_mcp_status
+
+            status_rows = get_mcp_status()
+        except Exception as exc:
+            return f"unavailable ({exc})"
+
+        if not status_rows:
+            return "none configured"
+
+        parts = []
+        for row in status_rows:
+            if not isinstance(row, dict):
+                continue
+            name = str(row.get("name") or "unknown")
+            transport = str(row.get("transport") or "unknown")
+            connected = "connected" if row.get("connected") else "configured"
+            tools = int(row.get("tools") or 0)
+            parts.append(f"{name}({transport}, {connected}, tools={tools})")
+        return ", ".join(parts) if parts else "none configured"
+
+    def _log_startup_snapshot(self) -> None:
+        """Log the startup config summary expected for long-lived service ops."""
+        enabled_platforms = sorted(
+            platform.value
+            for platform, platform_config in self.config.platforms.items()
+            if getattr(platform_config, "enabled", False)
+        )
+        logger.info("Gateway config path: %s", _config_path)
+        logger.info("Gateway env path: %s", _env_path)
+        logger.info(
+            "Gateway enabled platforms: %s",
+            ", ".join(enabled_platforms) if enabled_platforms else "none",
+        )
+        logger.info("Gateway model routes: %s", self._startup_route_snapshot())
+        logger.info("Gateway MCP servers: %s", self._startup_mcp_snapshot())
+
     async def _handle_adapter_fatal_error(self, adapter: BasePlatformAdapter) -> None:
         """React to an adapter failure after startup.
 
@@ -5132,7 +5184,6 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         except RuntimeError:
             self._gateway_loop = None
         logger.info("Session storage: %s", self.config.sessions_dir)
-
         # Sanity-check that systemd's TimeoutStopSec covers our drain
         # window.  When the user upgraded hermes-agent without re-running
         # ``hermes setup``, their unit file may still encode the old
@@ -5189,6 +5240,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 )
         except Exception:
             pass
+
+        self._log_startup_snapshot()
         try:
             from hermes_cli.profiles import get_active_profile_name
             _profile = get_active_profile_name()
@@ -7686,6 +7739,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             if _cmd_def_inner and _cmd_def_inner.name == "digest":
                 return await self._handle_digest_command(event)
 
+            if _cmd_def_inner and _cmd_def_inner.name == "jira":
+                return await self._handle_jira_command(event)
+
             if _cmd_def_inner and _cmd_def_inner.name == "stale":
                 return await self._handle_stale_command(event)
 
@@ -8043,6 +8099,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         if canonical == "digest":
             return await self._handle_digest_command(event)
+
+        if canonical == "jira":
+            return await self._handle_jira_command(event)
 
         if canonical == "stale":
             return await self._handle_stale_command(event)
@@ -10479,6 +10538,44 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         return "\n".join(lines)
 
+    async def _handle_jira_command(self, event: MessageEvent) -> str:
+        query = event.get_command_args().strip()
+
+        try:
+            from gateway.jira_mcp import JiraConfigError, fetch_current_sprint_issues
+
+            issues = await fetch_current_sprint_issues(query=query or None, limit=8)
+        except JiraConfigError as exc:
+            return f"Jira isn't configured for `/jira`: {exc}"
+        except Exception as exc:
+            logger.warning("Jira readback failed: %s", exc)
+            return f"⚠️ Jira readback failed: {exc}"
+
+        if not issues:
+            if query:
+                return f"📋 No current sprint Jira issues matched `{query}`."
+            return "📋 No current sprint Jira issues found."
+
+        lines = ["📋 **Jira**", "", "Source: Jira current sprint"]
+        if query:
+            lines.append(f"Filter: `{query}`")
+        for issue in issues:
+            parts = [issue["key"]]
+            if issue.get("status"):
+                parts.append(issue["status"])
+            if issue.get("priority"):
+                parts.append(issue["priority"])
+            prefix = " · ".join(parts)
+            suffix = f" — {issue['assignee']}" if issue.get("assignee") else ""
+            lines.append(f"- {prefix}: {issue['summary']}{suffix}")
+        lines.extend(
+            [
+                "",
+                "Stay on `/local` by default. Use `/fast` or `/claude` explicitly if you want a richer work synthesis.",
+            ]
+        )
+        return "\n".join(lines)
+
     async def _handle_finance_check_command(self, event: MessageEvent) -> str:
         try:
             from gateway.open_brain import OpenBrainConfigError, fetch_finance_anomalies
@@ -10791,6 +10888,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 }
         except Exception:
             origin = None
+
         try:
             from hermes_cli.suggestions_cmd import handle_suggestions_command
 

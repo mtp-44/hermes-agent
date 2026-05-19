@@ -45,6 +45,23 @@ def test_read_transcript_extracts_role_and_content(hook, tmp_path):
     assert messages[1]["role"] == "assistant"
 
 
+def test_read_transcript_handles_real_claude_code_format(hook, tmp_path):
+    """Real Claude Code JSONL wraps messages under a 'message' key."""
+    transcript = tmp_path / "session.jsonl"
+    _write_transcript(transcript, [
+        {"type": "queue-operation", "operation": "start", "sessionId": "s1"},
+        {"type": "user", "message": {"role": "user", "content": "What is the rollout plan?"}, "uuid": "u1", "sessionId": "s1"},
+        {"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "We deploy on Thursday."}]}, "uuid": "u2", "sessionId": "s1"},
+        {"type": "system", "subtype": "result", "sessionId": "s1"},
+    ])
+    messages = hook._read_transcript(str(transcript))
+    assert len(messages) == 2
+    assert messages[0]["role"] == "user"
+    assert "rollout" in messages[0]["content"]
+    assert messages[1]["role"] == "assistant"
+    assert "Thursday" in messages[1]["content"]
+
+
 def test_read_transcript_normalises_human_to_user(hook, tmp_path):
     transcript = tmp_path / "session.jsonl"
     _write_transcript(transcript, [
