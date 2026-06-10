@@ -885,6 +885,7 @@ class GatewayStreamConsumer:
                         result = await self._edit_message(
                             message_id=self._message_id,
                             content=clean_text,
+                            metadata=self.metadata,
                         )
                         if result.success:
                             self._last_sent_text = clean_text
@@ -1125,6 +1126,7 @@ class GatewayStreamConsumer:
             await self._edit_message(
                 message_id=self._message_id,
                 content=prefix,
+                metadata=self.metadata,
             )
             self._last_sent_text = prefix
         except Exception:
@@ -1434,6 +1436,7 @@ class GatewayStreamConsumer:
                         message_id=self._message_id,
                         content=text,
                         finalize=finalize,
+                        metadata=self.metadata,
                     )
                     if result.success:
                         self._already_sent = True

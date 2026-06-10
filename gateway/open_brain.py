@@ -167,6 +167,33 @@ async def call_open_brain_tool(
         raise RuntimeError(f"Openbrain MCP returned non-JSON text: {payload_text[:500]!r}") from exc
 
 
+async def record_query_feedback(
+    *,
+    query_id: str,
+    query_text: str,
+    verdict: str,
+    source: str,
+    result_kind: str | None = None,
+    result_id: str | None = None,
+    response_verdict: str | None = None,
+    resolution: str | None = None,
+) -> dict[str, Any]:
+    """Persist explicit query_brain feedback through the hosted Open Brain MCP."""
+    return await call_open_brain_tool(
+        "record_query_feedback",
+        {
+            "query_id": query_id,
+            "query_text": query_text,
+            "verdict": verdict,
+            "source": source,
+            **({"result_kind": result_kind} if result_kind else {}),
+            **({"result_id": result_id} if result_id else {}),
+            **({"response_verdict": response_verdict} if response_verdict else {}),
+            **({"resolution": resolution} if resolution else {}),
+        },
+    )
+
+
 async def capture_meeting_note(
     note_text: str,
     *,

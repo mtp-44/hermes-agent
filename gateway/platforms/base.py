@@ -2373,6 +2373,7 @@ class BasePlatformAdapter(ABC):
         content: str,
         *,
         finalize: bool = False,
+        metadata: dict | None = None,
     ) -> SendResult:
         """
         Edit a previously sent message. Optional — platforms that don't
@@ -4232,6 +4233,17 @@ class BasePlatformAdapter(ABC):
                 # Pre-extract snapshot for the #29346 recovery/invariant below.
                 _response_pre_extract = response
 
+                _feedback_context = None
+                _feedback_pop = getattr(self, "pop_staged_open_brain_feedback", None)
+                if callable(_feedback_pop):
+                    try:
+                        _feedback_context = _feedback_pop(session_key)
+                    except Exception:
+                        _feedback_context = None
+                if _feedback_context:
+                    if _thread_metadata is None:
+                        _thread_metadata = {}
+                    _thread_metadata["open_brain_feedback"] = _feedback_context
                 # Extract MEDIA:<path> tags (from TTS tool) before other processing
                 media_files, response = self.extract_media(response)
                 media_files = self.filter_media_delivery_paths(media_files)

@@ -15559,6 +15559,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         result_holder = [None]  # Mutable container for the result
         tools_holder = [None]   # Mutable container for the tool definitions
         stream_consumer_holder = [None]  # Mutable container for stream consumer
+        _turn_started_at = time.time()
+        _feedback_context: dict[str, Any] | None = None
         
         # Bridge sync step_callback → async hooks.emit for agent:step events
         _loop_for_step = asyncio.get_running_loop()
@@ -17030,6 +17032,31 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # Check if we were interrupted OR have a queued message (/queue).
             result = result_holder[0]
             adapter = self.adapters.get(source.platform)
+            if source.platform == Platform.TELEGRAM and session_id and result and result.get("final_response"):
+                try:
+                    from gateway.open_brain_feedback import pop_feedback_candidate
+                    _feedback_context = pop_feedback_candidate(
+                        session_id,
+                        since=_turn_started_at,
+                    )
+                except Exception as _feedback_err:
+                    logger.debug("Open Brain feedback capture lookup failed: %s", _feedback_err)
+                    _feedback_context = None
+                if _feedback_context and adapter and hasattr(adapter, "stage_open_brain_feedback"):
+                    try:
+                        adapter.stage_open_brain_feedback(
+                            session_key or session_id,
+                            _feedback_context,
+                            generation=run_generation,
+                        )
+                        if _status_thread_metadata is None:
+                            _status_thread_metadata = {}
+                        _status_thread_metadata["open_brain_feedback"] = _feedback_context
+                        _sc = stream_consumer_holder[0]
+                        if _sc is not None:
+                            _sc.metadata = _status_thread_metadata
+                    except Exception as _feedback_stage_err:
+                        logger.debug("Open Brain feedback staging failed: %s", _feedback_stage_err)
             
             # Get pending message from adapter.
             # Use session_key (not source.chat_id) to match adapter's storage keys.
@@ -17321,6 +17348,29 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             await stream_task
                         except asyncio.CancelledError:
                             pass
+                if (
+                    _feedback_context
+                    and source.platform == Platform.TELEGRAM
+                    and _status_adapter
+                    and hasattr(_status_adapter, "attach_open_brain_feedback")
+                ):
+                    _sc = stream_consumer_holder[0]
+                    _streamed_message_id = getattr(_sc, "_message_id", None) if _sc else None
+                    _streamed_sent = bool(_sc and getattr(_sc, "final_response_sent", False))
+                    if _streamed_sent and _streamed_message_id:
+                        try:
+                            if hasattr(_status_adapter, "pop_staged_open_brain_feedback"):
+                                _status_adapter.pop_staged_open_brain_feedback(
+                                    session_key or session_id,
+                                    generation=run_generation,
+                                )
+                            await _status_adapter.attach_open_brain_feedback(
+                                source.chat_id,
+                                _streamed_message_id,
+                                _feedback_context,
+                            )
+                        except Exception as _feedback_attach_err:
+                            logger.debug("Open Brain feedback attach failed: %s", _feedback_attach_err)
             
             # Clean up tracking
             tracking_task.cancel()
