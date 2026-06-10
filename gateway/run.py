@@ -10385,6 +10385,8 @@ class GatewayRunner:
         result_holder = [None]  # Mutable container for the result
         tools_holder = [None]   # Mutable container for the tool definitions
         stream_consumer_holder = [None]  # Mutable container for stream consumer
+        _turn_started_at = time.time()
+        _feedback_context: dict[str, Any] | None = None
         
         # Bridge sync step_callback → async hooks.emit for agent:step events
         _loop_for_step = asyncio.get_running_loop()
@@ -10420,7 +10422,7 @@ class GatewayRunner:
         # Bridge sync status_callback → async adapter.send for context pressure
         _status_adapter = self.adapters.get(source.platform)
         _status_chat_id = source.chat_id
-        _status_thread_metadata = {"thread_id": _progress_thread_id} if _progress_thread_id else None
+        _status_thread_metadata = {"thread_id": _progress_thread_id} if _progress_thread_id else {}
 
         def _status_callback_sync(event_type: str, message: str) -> None:
             if not _status_adapter or not _run_still_current():
@@ -10552,7 +10554,7 @@ class GatewayRunner:
                             adapter=_adapter,
                             chat_id=source.chat_id,
                             config=_consumer_cfg,
-                            metadata={"thread_id": _progress_thread_id} if _progress_thread_id else None,
+                            metadata=_status_thread_metadata,
                         )
                         if _want_stream_deltas:
                             def _stream_delta_cb(text: str) -> None:
@@ -11439,6 +11441,29 @@ class GatewayRunner:
             # Check if we were interrupted OR have a queued message (/queue).
             result = result_holder[0]
             adapter = self.adapters.get(source.platform)
+            if source.platform == Platform.TELEGRAM and session_id and result and result.get("final_response"):
+                try:
+                    from gateway.open_brain_feedback import pop_feedback_candidate
+                    _feedback_context = pop_feedback_candidate(
+                        session_id,
+                        since=_turn_started_at,
+                    )
+                except Exception as _feedback_err:
+                    logger.debug("Open Brain feedback capture lookup failed: %s", _feedback_err)
+                    _feedback_context = None
+                if _feedback_context and adapter and hasattr(adapter, "stage_open_brain_feedback"):
+                    try:
+                        adapter.stage_open_brain_feedback(
+                            session_key or session_id,
+                            _feedback_context,
+                            generation=run_generation,
+                        )
+                        _status_thread_metadata["open_brain_feedback"] = _feedback_context
+                        _sc = stream_consumer_holder[0]
+                        if _sc is not None:
+                            _sc.metadata = _status_thread_metadata
+                    except Exception as _feedback_stage_err:
+                        logger.debug("Open Brain feedback staging failed: %s", _feedback_stage_err)
             
             # Get pending message from adapter.
             # Use session_key (not source.chat_id) to match adapter's storage keys.
@@ -11650,6 +11675,29 @@ class GatewayRunner:
                         await stream_task
                     except asyncio.CancelledError:
                         pass
+            if (
+                _feedback_context
+                and source.platform == Platform.TELEGRAM
+                and _status_adapter
+                and hasattr(_status_adapter, "attach_open_brain_feedback")
+            ):
+                _sc = stream_consumer_holder[0]
+                _streamed_message_id = getattr(_sc, "_message_id", None) if _sc else None
+                _streamed_sent = bool(_sc and getattr(_sc, "final_response_sent", False))
+                if _streamed_sent and _streamed_message_id:
+                    try:
+                        if hasattr(_status_adapter, "pop_staged_open_brain_feedback"):
+                            _status_adapter.pop_staged_open_brain_feedback(
+                                session_key or session_id,
+                                generation=run_generation,
+                            )
+                        await _status_adapter.attach_open_brain_feedback(
+                            source.chat_id,
+                            _streamed_message_id,
+                            _feedback_context,
+                        )
+                    except Exception as _feedback_attach_err:
+                        logger.debug("Open Brain feedback attach failed: %s", _feedback_attach_err)
             
             # Clean up tracking
             tracking_task.cancel()

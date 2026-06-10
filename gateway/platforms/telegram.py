@@ -8,6 +8,7 @@ Uses python-telegram-bot library for:
 """
 
 import asyncio
+from collections import OrderedDict
 import json
 import logging
 import os
@@ -15,6 +16,7 @@ import tempfile
 import html as _html
 import re
 from typing import Dict, List, Optional, Any
+from uuid import uuid4
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +86,7 @@ from gateway.platforms.telegram_network import (
     discover_fallback_ips,
     parse_fallback_ip_env,
 )
+from gateway.open_brain import record_query_feedback
 
 
 def check_telegram_requirements() -> bool:
@@ -251,6 +254,10 @@ class TelegramAdapter(BasePlatformAdapter):
         self._model_picker_state: Dict[str, dict] = {}
         # Approval button state: message_id → session_key
         self._approval_state: Dict[int, str] = {}
+        # Query feedback callback contexts keyed by short token
+        self._feedback_entries: OrderedDict[str, dict] = OrderedDict()
+        self._feedback_max_entries = 200
+        self._staged_feedback: Dict[str, Any] = {}
 
     @staticmethod
     def _is_callback_user_authorized(user_id: str) -> bool:
@@ -260,6 +267,92 @@ class TelegramAdapter(BasePlatformAdapter):
             return True
         allowed_ids = {uid.strip() for uid in allowed_csv.split(",") if uid.strip()}
         return "*" in allowed_ids or user_id in allowed_ids
+
+    def _register_feedback_context(self, context: dict[str, Any]) -> str:
+        token = uuid4().hex[:12]
+        self._feedback_entries[token] = context
+        while len(self._feedback_entries) > self._feedback_max_entries:
+            self._feedback_entries.popitem(last=False)
+        return token
+
+    def _feedback_context(self, token: str) -> dict[str, Any] | None:
+        return self._feedback_entries.get(token)
+
+    def _build_feedback_keyboard(self, token: str) -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup([[
+            InlineKeyboardButton("👍 Good", callback_data=f"obf:g:{token}"),
+            InlineKeyboardButton("👎 Bad", callback_data=f"obf:b:{token}"),
+        ]])
+
+    def _feedback_markup_from_metadata(
+        self,
+        metadata: Optional[Dict[str, Any]],
+        *,
+        enabled: bool = True,
+    ) -> Any:
+        if not enabled or not metadata:
+            return None
+        context = metadata.get("open_brain_feedback")
+        if not isinstance(context, dict):
+            return None
+        token = self._register_feedback_context(context)
+        return self._build_feedback_keyboard(token)
+
+    def stage_open_brain_feedback(
+        self,
+        session_key: str,
+        context: dict[str, Any],
+        *,
+        generation: int | None = None,
+    ) -> None:
+        if not session_key or not isinstance(context, dict):
+            return
+        if generation is None:
+            self._staged_feedback[session_key] = context
+        else:
+            self._staged_feedback[session_key] = (int(generation), context)
+
+    def pop_staged_open_brain_feedback(
+        self,
+        session_key: str,
+        *,
+        generation: int | None = None,
+    ) -> dict[str, Any] | None:
+        if not session_key:
+            return None
+        entry = self._staged_feedback.get(session_key)
+        if entry is None:
+            return None
+        if isinstance(entry, tuple) and len(entry) == 2:
+            entry_generation, context = entry
+            if generation is not None and int(entry_generation) != int(generation):
+                return None
+            self._staged_feedback.pop(session_key, None)
+            return context if isinstance(context, dict) else None
+        if generation is not None:
+            return None
+        self._staged_feedback.pop(session_key, None)
+        return entry if isinstance(entry, dict) else None
+
+    async def attach_open_brain_feedback(
+        self,
+        chat_id: str,
+        message_id: str,
+        context: dict[str, Any],
+    ) -> bool:
+        if not self._bot or not chat_id or not message_id or not isinstance(context, dict):
+            return False
+        try:
+            token = self._register_feedback_context(context)
+            await self._bot.edit_message_reply_markup(
+                chat_id=int(chat_id),
+                message_id=int(message_id),
+                reply_markup=self._build_feedback_keyboard(token),
+            )
+            return True
+        except Exception as exc:
+            logger.debug("[%s] Failed to attach Open Brain feedback buttons: %s", self.name, exc)
+            return False
 
     @classmethod
     def _metadata_thread_id(cls, metadata: Optional[Dict[str, Any]]) -> Optional[str]:
@@ -1019,6 +1112,10 @@ class TelegramAdapter(BasePlatformAdapter):
                 should_thread = self._should_thread_reply(reply_to, i)
                 reply_to_id = int(reply_to) if should_thread else None
                 effective_thread_id = self._message_thread_id_for_send(thread_id)
+                reply_markup = self._feedback_markup_from_metadata(
+                    metadata,
+                    enabled=i == len(chunks) - 1,
+                )
 
                 msg = None
                 for _send_attempt in range(3):
@@ -1031,6 +1128,7 @@ class TelegramAdapter(BasePlatformAdapter):
                                 parse_mode=ParseMode.MARKDOWN_V2,
                                 reply_to_message_id=reply_to_id,
                                 message_thread_id=effective_thread_id,
+                                reply_markup=reply_markup,
                                 **self._link_preview_kwargs(),
                             )
                         except Exception as md_error:
@@ -1044,6 +1142,7 @@ class TelegramAdapter(BasePlatformAdapter):
                                     parse_mode=None,
                                     reply_to_message_id=reply_to_id,
                                     message_thread_id=effective_thread_id,
+                                    reply_markup=reply_markup,
                                     **self._link_preview_kwargs(),
                                 )
                             else:
@@ -1129,18 +1228,21 @@ class TelegramAdapter(BasePlatformAdapter):
         content: str,
         *,
         finalize: bool = False,
+        metadata: Optional[Dict[str, Any]] = None,
     ) -> SendResult:
         """Edit a previously sent Telegram message."""
         if not self._bot:
             return SendResult(success=False, error="Not connected")
         try:
             formatted = self.format_message(content)
+            reply_markup = self._feedback_markup_from_metadata(metadata)
             try:
                 await self._bot.edit_message_text(
                     chat_id=int(chat_id),
                     message_id=int(message_id),
                     text=formatted,
                     parse_mode=ParseMode.MARKDOWN_V2,
+                    reply_markup=reply_markup,
                 )
             except Exception as fmt_err:
                 # "Message is not modified" is a no-op, not an error
@@ -1151,6 +1253,7 @@ class TelegramAdapter(BasePlatformAdapter):
                     chat_id=int(chat_id),
                     message_id=int(message_id),
                     text=content,
+                    reply_markup=reply_markup,
                 )
             return SendResult(success=True, message_id=message_id)
         except Exception as e:
@@ -1170,6 +1273,7 @@ class TelegramAdapter(BasePlatformAdapter):
                         chat_id=int(chat_id),
                         message_id=int(message_id),
                         text=truncated,
+                        reply_markup=reply_markup,
                     )
                 except Exception:
                     pass  # best-effort truncation
@@ -1192,6 +1296,7 @@ class TelegramAdapter(BasePlatformAdapter):
                         chat_id=int(chat_id),
                         message_id=int(message_id),
                         text=content,
+                        reply_markup=reply_markup,
                     )
                     return SendResult(success=True, message_id=message_id)
                 except Exception as retry_err:
@@ -1671,6 +1776,52 @@ class TelegramAdapter(BasePlatformAdapter):
                     )
                 except Exception as exc:
                     logger.error("Failed to resolve gateway approval from Telegram button: %s", exc)
+            return
+
+        # --- Open Brain feedback callbacks (obf:verdict:token) ---
+        if data.startswith("obf:"):
+            parts = data.split(":", 2)
+            if len(parts) != 3:
+                await query.answer(text="Invalid feedback data.")
+                return
+
+            verdict_code = parts[1]
+            token = parts[2]
+            caller_id = str(getattr(query.from_user, "id", ""))
+            if not self._is_callback_user_authorized(caller_id):
+                await query.answer(text="⛔ You are not authorized to rate responses.")
+                return
+
+            context = self._feedback_context(token)
+            if not context:
+                await query.answer(text="This feedback prompt expired.")
+                return
+
+            verdict = "good" if verdict_code == "g" else "bad" if verdict_code == "b" else None
+            if verdict is None:
+                await query.answer(text="Unknown feedback choice.")
+                return
+
+            try:
+                await record_query_feedback(
+                    query_id=str(context.get("query_id") or ""),
+                    query_text=str(context.get("query_text") or ""),
+                    verdict=verdict,
+                    source=str(context.get("source") or "hermes"),
+                    result_kind=context.get("result_kind"),
+                    result_id=context.get("result_id"),
+                    response_verdict=context.get("response_verdict"),
+                )
+            except Exception as exc:
+                logger.warning("[%s] Failed to record Open Brain feedback: %s", self.name, exc)
+                await query.answer(text="⚠️ Couldn't save feedback.")
+                return
+
+            try:
+                await query.edit_message_reply_markup(reply_markup=None)
+            except Exception:
+                pass
+            await query.answer(text="Logged 👍" if verdict == "good" else "Logged 👎")
             return
 
         # --- Update prompt callbacks ---
