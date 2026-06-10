@@ -75,11 +75,17 @@ def _resolve_open_brain_server() -> tuple[str, dict[str, str]]:
     if not isinstance(headers, dict):
         headers = {}
 
-    normalized_headers = {
-        str(key): str(value)
-        for key, value in headers.items()
-        if str(value).strip()
-    }
+    normalized_headers: dict[str, str] = {}
+    for key, value in headers.items():
+        expanded = os.path.expandvars(str(value))
+        if not expanded.strip():
+            continue
+        if "${" in expanded:
+            raise OpenBrainConfigError(
+                f"The `open_brain` MCP header {str(key)!r} contains an unexpanded "
+                "environment placeholder; set the referenced environment variable."
+            )
+        normalized_headers[str(key)] = expanded
     normalized_headers.setdefault("content-type", "application/json")
     normalized_headers.setdefault("accept", "application/json")
     return url, normalized_headers

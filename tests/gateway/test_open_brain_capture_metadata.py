@@ -19,6 +19,42 @@ def _make_source(*, message_id: str = "m-123") -> SimpleNamespace:
     )
 
 
+def _server_config(headers: dict) -> dict:
+    return {
+        "mcp_servers": {
+            "open_brain": {
+                "url": "https://example.test/functions/v1/open-brain-mcp",
+                "headers": headers,
+            }
+        }
+    }
+
+
+def test_resolve_open_brain_server_expands_env_placeholders_in_headers(monkeypatch):
+    from gateway.open_brain import _resolve_open_brain_server
+
+    monkeypatch.setenv("OPEN_BRAIN_TEST_KEY", "secret-value")
+    with patch(
+        "gateway.open_brain.load_config",
+        return_value=_server_config({"x-brain-key": "${OPEN_BRAIN_TEST_KEY}"}),
+    ):
+        _, headers = _resolve_open_brain_server()
+
+    assert headers["x-brain-key"] == "secret-value"
+
+
+def test_resolve_open_brain_server_rejects_unexpanded_placeholder(monkeypatch):
+    from gateway.open_brain import OpenBrainConfigError, _resolve_open_brain_server
+
+    monkeypatch.delenv("OPEN_BRAIN_MISSING_KEY", raising=False)
+    with patch(
+        "gateway.open_brain.load_config",
+        return_value=_server_config({"x-brain-key": "${OPEN_BRAIN_MISSING_KEY}"}),
+    ):
+        with pytest.raises(OpenBrainConfigError, match="unexpanded"):
+            _resolve_open_brain_server()
+
+
 @pytest.mark.asyncio
 @patch("gateway.open_brain.call_open_brain_tool", new_callable=AsyncMock)
 async def test_capture_meeting_note_adds_provenance_and_dedup_metadata(mock_call):
