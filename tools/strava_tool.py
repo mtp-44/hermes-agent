@@ -114,18 +114,27 @@ def _get_valid_access_token() -> str:
 
 def _fetch_activities(count: int = 30, after_epoch: Optional[int] = None) -> List[Dict]:
     token = _get_valid_access_token()
-    params: Dict[str, Any] = {"per_page": min(count, 200), "page": 1}
-    if after_epoch:
-        params["after"] = after_epoch
+    activities: List[Dict] = []
+    page = 1
+    while len(activities) < count:
+        per_page = min(count - len(activities), 200)
+        params: Dict[str, Any] = {"per_page": per_page, "page": page}
+        if after_epoch:
+            params["after"] = after_epoch
 
-    resp = httpx.get(
-        f"{_STRAVA_API_BASE}/athlete/activities",
-        headers={"Authorization": f"Bearer {token}"},
-        params=params,
-        timeout=30,
-    )
-    resp.raise_for_status()
-    return resp.json()
+        resp = httpx.get(
+            f"{_STRAVA_API_BASE}/athlete/activities",
+            headers={"Authorization": f"Bearer {token}"},
+            params=params,
+            timeout=30,
+        )
+        resp.raise_for_status()
+        batch = resp.json()
+        activities.extend(batch)
+        if len(batch) < per_page:
+            break
+        page += 1
+    return activities
 
 
 # ── Content formatting ──────────────────────────────────────────────────────────
@@ -187,6 +196,33 @@ def _build_metadata(a: Dict) -> Dict:
     return {k: v for k, v in meta.items() if v is not None}
 
 
+# ── Embeddings ──────────────────────────────────────────────────────────────────
+# Must match open_brain/core/embeddings.py: text-embedding-3-small, 1536 dims.
+# Rows without embeddings are invisible to query_brain's pgvector search.
+
+_EMBEDDING_MODEL = "openai/text-embedding-3-small"
+_OPENROUTER_EMBED_URL = "https://openrouter.ai/api/v1/embeddings"
+
+
+def _embed_content(text: str) -> Optional[List[float]]:
+    api_key = os.getenv("OPENROUTER_API_KEY", "")
+    if not api_key:
+        logger.warning("OPENROUTER_API_KEY not set — inserting thought without embedding")
+        return None
+    try:
+        resp = httpx.post(
+            _OPENROUTER_EMBED_URL,
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json={"model": _EMBEDDING_MODEL, "input": [text]},
+            timeout=30,
+        )
+        resp.raise_for_status()
+        return resp.json()["data"][0]["embedding"]
+    except Exception as e:
+        logger.warning("Embedding failed, inserting without embedding: %s", e)
+        return None
+
+
 # ── Supabase REST helpers ───────────────────────────────────────────────────────
 
 def _sb_headers(key: str, with_prefer: bool = True) -> Dict[str, str]:
@@ -212,10 +248,15 @@ def _activity_exists(url: str, key: str, strava_id: int) -> bool:
 
 
 def _insert_activity(url: str, key: str, activity: Dict) -> Dict:
+    content = _format_content(activity)
+    payload: Dict[str, Any] = {"content": content, "metadata": _build_metadata(activity)}
+    embedding = _embed_content(content)
+    if embedding:
+        payload["embedding"] = embedding
     resp = httpx.post(
         f"{url}/rest/v1/thoughts",
         headers=_sb_headers(key),
-        json={"content": _format_content(activity), "metadata": _build_metadata(activity)},
+        json=payload,
         timeout=15,
     )
     resp.raise_for_status()
@@ -223,17 +264,31 @@ def _insert_activity(url: str, key: str, activity: Dict) -> Dict:
     return rows[0] if rows else {}
 
 
-def _query_activities(url: str, key: str, limit: int = 20) -> List[Dict]:
+def _query_activities(
+    url: str,
+    key: str,
+    limit: int = 20,
+    date: Optional[str] = None,
+    year: Optional[str] = None,
+    activity_type: Optional[str] = None,
+) -> List[Dict]:
+    params: Dict[str, str] = {
+        "metadata->>domain": "eq.fitness",
+        "metadata->>source": "eq.strava",
+        "select": "id,content,metadata,created_at",
+        "order": "metadata->>date.desc",
+        "limit": str(limit),
+    }
+    if date:
+        params["metadata->>date"] = f"eq.{date}"
+    elif year:
+        params["metadata->>date"] = f"like.{year}-*"
+    if activity_type:
+        params["metadata->>activity_type"] = f"eq.{activity_type}"
     resp = httpx.get(
         f"{url}/rest/v1/thoughts",
         headers=_sb_headers(key, with_prefer=False),
-        params={
-            "metadata->>domain": "eq.fitness",
-            "metadata->>source": "eq.strava",
-            "select": "id,content,metadata,created_at",
-            "order": "created_at.desc",
-            "limit": str(limit),
-        },
+        params=params,
         timeout=15,
     )
     resp.raise_for_status()
@@ -243,7 +298,7 @@ def _query_activities(url: str, key: str, limit: int = 20) -> List[Dict]:
 # ── Tool handlers ───────────────────────────────────────────────────────────────
 
 def _handle_strava_sync(args: dict, **_kw) -> str:
-    count = min(int(args.get("count", 30)), 200)
+    count = min(int(args.get("count", 30)), 2000)
     activity_types = args.get("activity_types")  # None = all
 
     supabase_url, supabase_key = _get_supabase_config()
@@ -296,13 +351,20 @@ def _handle_strava_sync(args: dict, **_kw) -> str:
 
 
 def _handle_strava_activities(args: dict, **_kw) -> str:
-    limit = min(int(args.get("limit", 20)), 100)
+    limit = min(int(args.get("limit", 20)), 500)
     supabase_url, supabase_key = _get_supabase_config()
     if not supabase_url or not supabase_key:
         return tool_error("SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY must be set in ~/.hermes/.env")
 
     try:
-        rows = _query_activities(supabase_url, supabase_key, limit=limit)
+        rows = _query_activities(
+            supabase_url,
+            supabase_key,
+            limit=limit,
+            date=args.get("date"),
+            year=str(args.get("year")) if args.get("year") else None,
+            activity_type=args.get("activity_type"),
+        )
     except Exception as e:
         return tool_error(f"Failed to query open brain: {e}")
 
@@ -348,7 +410,7 @@ STRAVA_SYNC_SCHEMA = {
         "properties": {
             "count": {
                 "type": "integer",
-                "description": "How many recent activities to fetch from Strava (default 30, max 200).",
+                "description": "How many recent activities to fetch from Strava (default 30, max 2000). Use a large value to backfill full history.",
                 "default": 30,
             },
             "activity_types": {
@@ -366,18 +428,31 @@ STRAVA_SYNC_SCHEMA = {
 STRAVA_ACTIVITIES_SCHEMA = {
     "name": "strava_activities",
     "description": (
-        "List Strava activities already synced to the open brain. "
+        "List Strava activities already synced to the open brain (full history 2014→present). "
         "Returns structured data (date, distance, elevation, HR, power, etc.) "
         "so you can compare rides, find PRs, or spot trends. "
-        "Run strava_sync first to pull in the latest activities."
+        "ALWAYS use this (not query_brain) for date-specific or year-specific questions like "
+        "'did I ride on 2023-05-23' or 'how many rides in 2024' — filter by date or year."
     ),
     "parameters": {
         "type": "object",
         "properties": {
             "limit": {
                 "type": "integer",
-                "description": "Maximum number of activities to return (default 20, max 100).",
+                "description": "Maximum number of activities to return (default 20, max 500).",
                 "default": 20,
+            },
+            "date": {
+                "type": "string",
+                "description": "Exact date filter, ISO format YYYY-MM-DD, e.g. '2023-05-23'.",
+            },
+            "year": {
+                "type": "integer",
+                "description": "Filter to a single year, e.g. 2024.",
+            },
+            "activity_type": {
+                "type": "string",
+                "description": "Filter by Strava activity type, e.g. 'Ride', 'VirtualRide', 'Run'.",
             },
         },
         "required": [],
