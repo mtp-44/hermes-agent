@@ -8,6 +8,7 @@ import pytest
 
 from gateway.config import PlatformConfig
 from gateway.open_brain_feedback import (
+    capture_analyze_brain_feedback_candidate,
     capture_query_brain_feedback_candidate,
     clear_feedback_candidate,
     pop_feedback_candidate,
@@ -39,6 +40,39 @@ def test_capture_and_pop_feedback_candidate():
     assert candidate["result_kind"] == "thoughts"
     assert candidate["result_id"] == "row-1"
     assert candidate["response_verdict"] == "answer"
+
+
+def test_capture_analyze_brain_candidate_for_analytical_route():
+    session_id = "agent:main:telegram:dm:42"
+    clear_feedback_candidate(session_id)
+
+    capture_analyze_brain_feedback_candidate(
+        session_id=session_id,
+        tool_call_id="tool-2",
+        args={"question": "How long was my longest ride in July 2023?"},
+        result='{"result":"{\\"route\\":\\"analytical\\",\\"answer\\":\\"98.2 km\\",\\"status\\":\\"exact\\"}"}',
+    )
+
+    candidate = pop_feedback_candidate(session_id)
+    assert candidate is not None
+    assert candidate["query_text"] == "How long was my longest ride in July 2023?"
+    assert candidate["result_kind"] is None
+    assert candidate["result_id"] is None
+    assert candidate["response_verdict"] == "analytical"
+
+
+def test_capture_analyze_brain_skips_recall_and_unsupported_routes():
+    session_id = "agent:main:telegram:dm:42"
+    clear_feedback_candidate(session_id)
+
+    for route in ("recall", "unsupported", "needs_clarification", "error"):
+        capture_analyze_brain_feedback_candidate(
+            session_id=session_id,
+            tool_call_id="tool-3",
+            args={"question": "How many conversations did I have?"},
+            result='{"result":"{\\"route\\":\\"' + route + '\\",\\"answer\\":\\"n/a\\"}"}',
+        )
+        assert pop_feedback_candidate(session_id) is None
 
 
 @pytest.mark.asyncio

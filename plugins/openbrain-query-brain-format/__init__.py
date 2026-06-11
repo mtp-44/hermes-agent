@@ -3,9 +3,13 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from gateway.open_brain_feedback import capture_query_brain_feedback_candidate
+from gateway.open_brain_feedback import (
+    capture_analyze_brain_feedback_candidate,
+    capture_query_brain_feedback_candidate,
+)
 
 _QUERY_BRAIN_TOOL_NAME = "mcp_open_brain_query_brain"
+_ANALYZE_BRAIN_TOOL_NAME = "mcp_open_brain_analyze_brain_query"
 _DIRECT_REPLY_SCORE_THRESHOLD = 0.75
 
 
@@ -99,14 +103,20 @@ def register(ctx) -> None:
         tool_call_id: str = "",
         **_: Any,
     ) -> None:
-        if tool_name != _QUERY_BRAIN_TOOL_NAME:
-            return
-        capture_query_brain_feedback_candidate(
-            session_id=session_id,
-            tool_call_id=tool_call_id,
-            args=args if isinstance(args, dict) else {},
-            result=result,
-        )
+        if tool_name == _QUERY_BRAIN_TOOL_NAME:
+            capture_query_brain_feedback_candidate(
+                session_id=session_id,
+                tool_call_id=tool_call_id,
+                args=args if isinstance(args, dict) else {},
+                result=result,
+            )
+        elif tool_name == _ANALYZE_BRAIN_TOOL_NAME:
+            capture_analyze_brain_feedback_candidate(
+                session_id=session_id,
+                tool_call_id=tool_call_id,
+                args=args if isinstance(args, dict) else {},
+                result=result,
+            )
 
     def _transform_tool_result(tool_name: str, result: str, **_: Any) -> str | None:
         if tool_name != _QUERY_BRAIN_TOOL_NAME:
