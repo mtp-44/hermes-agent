@@ -69,6 +69,49 @@ def capture_query_brain_feedback_candidate(
         _LATEST_BY_SESSION[session_id] = candidate
 
 
+def capture_analyze_brain_feedback_candidate(
+    *,
+    session_id: str,
+    tool_call_id: str,
+    args: dict[str, Any] | None,
+    result: str,
+    source: str = "hermes",
+) -> None:
+    """Feedback candidate for analyze_brain_query answers.
+
+    Only real analytical answers are rateable: recall routes are followed by a
+    query_brain call (captured separately), and clarification/unsupported/error
+    routes carry no answer worth a verdict.
+    """
+    if not session_id:
+        return
+
+    payload = _parse_mcp_tool_result(result)
+    if not payload:
+        return
+
+    route = str(payload.get("route") or "").strip()
+    if route not in ("analytical", "hybrid"):
+        return
+
+    query_text = str((args or {}).get("question") or "").strip()
+    if not query_text:
+        return
+
+    candidate = {
+        "query_id": f"hermes:{session_id}:{tool_call_id or 'analyze_brain_query'}",
+        "query_text": query_text,
+        "result_kind": None,
+        "result_id": None,
+        "response_verdict": "analytical",
+        "source": source,
+        "observed_at": time.time(),
+    }
+
+    with _LOCK:
+        _LATEST_BY_SESSION[session_id] = candidate
+
+
 def pop_feedback_candidate(
     session_id: str,
     *,
