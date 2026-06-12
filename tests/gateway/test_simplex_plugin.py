@@ -467,3 +467,15 @@ async def test_image_file_still_sets_photo_type():
 
     assert dispatched, "_handle_chat_item did not dispatch any event"
     assert dispatched[0].message_type == MessageType.PHOTO
+
+
+def test_setup_prompt_no_longer_offers_display_names():
+    """The setup wizard must not suggest display names as SIMPLEX_ALLOWED_USERS
+    values: authorization only matches the stable numeric contactId, and a
+    display-name entry would silently fail closed (upstream #44729, HA-0011)."""
+    import inspect
+    import plugins.platforms.simplex.adapter as adapter_module
+
+    src = inspect.getsource(adapter_module.interactive_setup)
+    prompt = next(l for l in src.splitlines() if '"SIMPLEX_ALLOWED_USERS"' in l)
+    assert "display name" not in prompt.lower()
