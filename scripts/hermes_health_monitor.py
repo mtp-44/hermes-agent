@@ -343,9 +343,12 @@ class HealthMonitor:
 
 
 def _restart_ollama() -> RestartResult:
+    getuid = getattr(os, "getuid", None)
+    if sys.platform != "darwin" or getuid is None:
+        return RestartResult(False, "ollama launchctl restart is only supported on macOS")
     try:
         result = subprocess.run(
-            ["launchctl", "kickstart", "-k", f"gui/{os.getuid()}/com.mh.ollama"],
+            ["launchctl", "kickstart", "-k", f"gui/{getuid()}/com.mh.ollama"],
             capture_output=True,
             text=True,
             timeout=20,
