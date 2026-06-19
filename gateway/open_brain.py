@@ -194,6 +194,21 @@ async def record_query_feedback(
     )
 
 
+async def record_proactive_feedback(
+    *,
+    surface_id: str,
+    status: str,
+) -> dict[str, Any]:
+    """Persist Useful/Dismiss feedback for proactive Open Brain surfaces."""
+    return await call_open_brain_tool(
+        "record_proactive_feedback",
+        {
+            "surface_id": surface_id,
+            "status": status,
+        },
+    )
+
+
 async def capture_meeting_note(
     note_text: str,
     *,
