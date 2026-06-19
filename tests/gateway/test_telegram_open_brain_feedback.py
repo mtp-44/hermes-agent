@@ -134,3 +134,58 @@ async def test_feedback_callback_records_vote_and_clears_markup():
     assert kwargs["verdict"] == "good"
     assert kwargs["query_id"] == "q-2"
     query.edit_message_reply_markup.assert_awaited_once_with(reply_markup=None)
+
+
+@pytest.mark.asyncio
+async def test_proactive_callback_records_useful_and_clears_markup():
+    adapter = _make_adapter()
+    adapter._is_callback_user_authorized = MagicMock(return_value=True)
+
+    query = AsyncMock()
+    query.data = "prx:a:00000000-0000-0000-0000-000000000001"
+    query.message = MagicMock()
+    query.message.chat_id = 12345
+    query.from_user = MagicMock()
+    query.from_user.id = "12345"
+    query.answer = AsyncMock()
+    query.edit_message_reply_markup = AsyncMock()
+
+    update = MagicMock()
+    update.callback_query = query
+    context = MagicMock()
+
+    with patch("gateway.platforms.telegram.record_proactive_feedback", new=AsyncMock(return_value={"id": "surface-1"})) as mock_record:
+        await adapter._handle_callback_query(update, context)
+
+    mock_record.assert_awaited_once_with(
+        surface_id="00000000-0000-0000-0000-000000000001",
+        status="acted_on",
+    )
+    query.edit_message_reply_markup.assert_awaited_once_with(reply_markup=None)
+
+
+@pytest.mark.asyncio
+async def test_proactive_callback_records_dismissed():
+    adapter = _make_adapter()
+    adapter._is_callback_user_authorized = MagicMock(return_value=True)
+
+    query = AsyncMock()
+    query.data = "prx:d:00000000-0000-0000-0000-000000000002"
+    query.message = MagicMock()
+    query.message.chat_id = 12345
+    query.from_user = MagicMock()
+    query.from_user.id = "12345"
+    query.answer = AsyncMock()
+    query.edit_message_reply_markup = AsyncMock()
+
+    update = MagicMock()
+    update.callback_query = query
+    context = MagicMock()
+
+    with patch("gateway.platforms.telegram.record_proactive_feedback", new=AsyncMock(return_value={"id": "surface-2"})) as mock_record:
+        await adapter._handle_callback_query(update, context)
+
+    mock_record.assert_awaited_once_with(
+        surface_id="00000000-0000-0000-0000-000000000002",
+        status="dismissed",
+    )

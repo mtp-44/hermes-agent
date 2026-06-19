@@ -90,7 +90,7 @@ from gateway.platforms.telegram_network import (
     parse_fallback_ip_env,
 )
 from utils import atomic_replace
-from gateway.open_brain import record_query_feedback
+from gateway.open_brain import record_proactive_feedback, record_query_feedback
 
 _TELEGRAM_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
 _TELEGRAM_IMAGE_MIME_TO_EXT = {
@@ -4336,6 +4336,39 @@ class TelegramAdapter(BasePlatformAdapter):
             except Exception:
                 pass
             await query.answer(text="Logged 👍" if verdict == "good" else "Logged 👎")
+            return
+
+        # --- Open Brain proactive feedback callbacks (prx:a|d:surface_id) ---
+        if data.startswith("prx:"):
+            parts = data.split(":", 2)
+            if len(parts) != 3:
+                await query.answer(text="Invalid proactive feedback data.")
+                return
+
+            action = parts[1]
+            surface_id = parts[2]
+            caller_id = str(getattr(query.from_user, "id", ""))
+            if not self._is_callback_user_authorized(caller_id):
+                await query.answer(text="⛔ You are not authorized to rate proactive surfaces.")
+                return
+
+            status = "acted_on" if action == "a" else "dismissed" if action == "d" else None
+            if status is None:
+                await query.answer(text="Unknown proactive feedback choice.")
+                return
+
+            try:
+                await record_proactive_feedback(surface_id=surface_id, status=status)
+            except Exception as exc:
+                logger.warning("[%s] Failed to record Open Brain proactive feedback: %s", self.name, exc)
+                await query.answer(text="⚠️ Couldn't save feedback.")
+                return
+
+            try:
+                await query.edit_message_reply_markup(reply_markup=None)
+            except Exception:
+                pass
+            await query.answer(text="Marked useful" if status == "acted_on" else "Dismissed")
             return
 
         # --- Update prompt callbacks ---
