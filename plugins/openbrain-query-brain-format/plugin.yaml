@@ -1,0 +1,6 @@
+name: openbrain-query-brain-format
+version: 1.0.0
+description: "Formats Open Brain query_brain tool results into cleaner aggregate, empty, and warning-limited retrieval context for Hermes."
+author: "OpenAI Codex"
+hooks:
+  - transform_tool_result
