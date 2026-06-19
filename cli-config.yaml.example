@@ -72,6 +72,22 @@ model:
   #
 # max_tokens: 8192
 
+  # ── Ollama-specific settings (local inference only) ───────────────────────
+  #
+  # ollama_num_ctx: Context window size passed to Ollama on every request.
+  #   Hermes auto-detects this from /api/show — only set if detection is wrong
+  #   or you want to cap VRAM use with a smaller window than the model default.
+  #
+  # ollama_num_ctx: 32768
+  #
+  # ollama_keep_alive: How long Ollama keeps the model loaded in memory after
+  #   the last request. Accepts seconds (int) or duration strings ("5m", "1h").
+  #   Use -1 to keep the model loaded indefinitely (recommended for always-on
+  #   agents — avoids cold-load delays on every conversation).
+  #   Defaults to Ollama's global OLLAMA_KEEP_ALIVE setting (5 minutes if unset).
+  #
+  # ollama_keep_alive: -1
+
   # ── Custom request headers (optional) ─────────────────────────────────────
   #
   # default_headers: extra HTTP headers sent on every request to an

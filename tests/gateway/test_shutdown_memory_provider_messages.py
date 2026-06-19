@@ -73,7 +73,10 @@ class TestCleanupAgentResourcesPassesMessages:
 
         # The fix must call shutdown_memory_provider with the exact list
         # identity — providers iterate it to extract facts.
-        agent.shutdown_memory_provider.assert_called_once_with(transcript)
+        agent.shutdown_memory_provider.assert_called_once_with(
+            transcript,
+            boundary_reason="gateway_shutdown",
+        )
 
     def test_empty_list_still_forwarded(self):
         """An agent that initialised but ran no turns has an empty list
@@ -86,7 +89,10 @@ class TestCleanupAgentResourcesPassesMessages:
 
         runner._cleanup_agent_resources(agent)
 
-        agent.shutdown_memory_provider.assert_called_once_with([])
+        agent.shutdown_memory_provider.assert_called_once_with(
+            [],
+            boundary_reason="gateway_shutdown",
+        )
 
     def test_missing_attribute_falls_back_to_no_arg(self):
         """Test stubs built via ``object.__new__(AIAgent)`` skip
@@ -98,7 +104,9 @@ class TestCleanupAgentResourcesPassesMessages:
 
         runner._cleanup_agent_resources(agent)
 
-        agent.shutdown_memory_provider.assert_called_once_with()
+        agent.shutdown_memory_provider.assert_called_once_with(
+            boundary_reason="gateway_shutdown",
+        )
 
     def test_non_list_attribute_falls_back_to_no_arg(self):
         """A MagicMock-based agent auto-synthesises ``_session_messages``
@@ -112,7 +120,9 @@ class TestCleanupAgentResourcesPassesMessages:
 
         runner._cleanup_agent_resources(agent)
 
-        agent.shutdown_memory_provider.assert_called_once_with()
+        agent.shutdown_memory_provider.assert_called_once_with(
+            boundary_reason="gateway_shutdown",
+        )
 
     def test_provider_exception_is_swallowed(self):
         """Provider teardown must be best-effort — a raising

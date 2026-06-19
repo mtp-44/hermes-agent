@@ -248,6 +248,7 @@ class GatewayStreamConsumer:
         message_id: str,
         content: str,
         finalize: bool = False,
+        metadata: dict | None = None,
     ):
         """Edit via the adapter, passing routing metadata when supported."""
         kwargs = {
@@ -259,14 +260,15 @@ class GatewayStreamConsumer:
         # must accept finalize= even when it is False (guarded by tests).
         kwargs["finalize"] = finalize
 
-        if self.metadata:
+        edit_metadata = metadata if metadata is not None else self.metadata
+        if edit_metadata:
             try:
                 params = inspect.signature(self.adapter.edit_message).parameters
                 if "metadata" in params or any(
                     param.kind is inspect.Parameter.VAR_KEYWORD
                     for param in params.values()
                 ):
-                    kwargs["metadata"] = self.metadata
+                    kwargs["metadata"] = edit_metadata
             except (TypeError, ValueError):
                 pass
         return await self.adapter.edit_message(**kwargs)
@@ -885,6 +887,7 @@ class GatewayStreamConsumer:
                         result = await self._edit_message(
                             message_id=self._message_id,
                             content=clean_text,
+                            metadata=self.metadata,
                         )
                         if result.success:
                             self._last_sent_text = clean_text
@@ -1125,6 +1128,7 @@ class GatewayStreamConsumer:
             await self._edit_message(
                 message_id=self._message_id,
                 content=prefix,
+                metadata=self.metadata,
             )
             self._last_sent_text = prefix
         except Exception:
@@ -1434,6 +1438,7 @@ class GatewayStreamConsumer:
                         message_id=self._message_id,
                         content=text,
                         finalize=finalize,
+                        metadata=self.metadata,
                     )
                     if result.success:
                         self._already_sent = True

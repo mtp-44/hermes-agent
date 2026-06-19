@@ -1,5 +1,6 @@
 import pytest
 from unittest.mock import AsyncMock
+import logging
 
 from gateway.config import GatewayConfig, Platform, PlatformConfig
 from gateway.platforms.base import BasePlatformAdapter
@@ -139,6 +140,35 @@ async def test_runner_records_connected_platform_state_on_success(monkeypatch, t
     assert state["platforms"]["discord"]["state"] == "connected"
     assert state["platforms"]["discord"]["error_code"] is None
     assert state["platforms"]["discord"]["error_message"] is None
+
+
+@pytest.mark.asyncio
+async def test_runner_logs_startup_snapshot(monkeypatch, tmp_path, caplog):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    config = GatewayConfig(
+        platforms={
+            Platform.DISCORD: PlatformConfig(enabled=True, token="***"),
+            Platform.TELEGRAM: PlatformConfig(enabled=False, token="***"),
+        },
+        sessions_dir=tmp_path / "sessions",
+    )
+    runner = GatewayRunner(config)
+
+    monkeypatch.setattr(runner, "_create_adapter", lambda platform, platform_config: _SuccessfulAdapter())
+    monkeypatch.setattr(runner.hooks, "discover_and_load", lambda: None)
+    monkeypatch.setattr(runner.hooks, "emit", AsyncMock())
+    monkeypatch.setattr(runner, "_startup_route_snapshot", lambda: "local=qwen, fast=gpt-5.4-mini")
+    monkeypatch.setattr(runner, "_startup_mcp_snapshot", lambda: "open_brain(http, configured, tools=0)")
+
+    caplog.set_level(logging.INFO)
+    ok = await runner.start()
+
+    assert ok is True
+    assert "Gateway config path:" in caplog.text
+    assert "Gateway env path:" in caplog.text
+    assert "Gateway enabled platforms: discord" in caplog.text
+    assert "Gateway model routes: local=qwen, fast=gpt-5.4-mini" in caplog.text
+    assert "Gateway MCP servers: open_brain(http, configured, tools=0)" in caplog.text
 
 
 @pytest.mark.asyncio

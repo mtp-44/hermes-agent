@@ -254,6 +254,7 @@ class ChatCompletionsTransport(ProviderTransport):
             is_lmstudio: bool
             is_custom_provider: bool
             ollama_num_ctx: int | None
+            ollama_keep_alive: int | str | None
             # Provider routing
             provider_preferences: dict | None
             # Qwen-specific
@@ -440,6 +441,15 @@ class ChatCompletionsTransport(ProviderTransport):
             if thinking_config:
                 extra_body["thinking_config"] = thinking_config
 
+        ollama_ctx = params.get("ollama_num_ctx")
+        if ollama_ctx:
+            options = extra_body.get("options", {})
+            options["num_ctx"] = ollama_ctx
+            extra_body["options"] = options
+        ollama_keep_alive = params.get("ollama_keep_alive")
+        if ollama_keep_alive is not None:
+            extra_body["keep_alive"] = ollama_keep_alive
+
         # Merge any pre-built extra_body additions
         additions = params.get("extra_body_additions")
         if additions:
@@ -556,6 +566,9 @@ class ChatCompletionsTransport(ProviderTransport):
         # Profile's reasoning/thinking extra_body entries
         if extra_body_from_profile:
             extra_body.update(extra_body_from_profile)
+        ollama_keep_alive = params.get("ollama_keep_alive")
+        if ollama_keep_alive is not None:
+            extra_body["keep_alive"] = ollama_keep_alive
 
         # Merge any pre-built extra_body additions from the caller
         additions = params.get("extra_body_additions")

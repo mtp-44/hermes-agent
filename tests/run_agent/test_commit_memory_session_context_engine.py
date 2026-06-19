@@ -22,13 +22,28 @@ def _make_minimal_agent(memory_manager, context_compressor, session_id="abc"):
     """
     from run_agent import AIAgent
 
+    def _capture_context(messages=None, **kwargs):
+        return {
+            "session_id": session_id,
+            "messages": messages or [],
+            **kwargs,
+        }
+
     obj = SimpleNamespace(
         _memory_manager=memory_manager,
         context_compressor=context_compressor,
         session_id=session_id,
+        _build_session_capture_context=_capture_context,
     )
     obj.commit_memory_session = AIAgent.commit_memory_session.__get__(obj)
     return obj
+
+
+def _assert_memory_manager_notified(memory_manager, messages):
+    memory_manager.on_session_end.assert_called_once()
+    args, kwargs = memory_manager.on_session_end.call_args
+    assert args == (messages,)
+    assert kwargs["capture_context"]["messages"] == messages
 
 
 def test_commit_memory_session_notifies_context_engine():
@@ -40,7 +55,7 @@ def test_commit_memory_session_notifies_context_engine():
     msgs = [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "yo"}]
     agent.commit_memory_session(msgs)
 
-    mm.on_session_end.assert_called_once_with(msgs)
+    _assert_memory_manager_notified(mm, msgs)
     ctx.on_session_end.assert_called_once_with("sess-42", msgs)
 
 
@@ -52,7 +67,7 @@ def test_commit_memory_session_with_no_messages_passes_empty_list():
 
     agent.commit_memory_session(None)
 
-    mm.on_session_end.assert_called_once_with([])
+    _assert_memory_manager_notified(mm, [])
     ctx.on_session_end.assert_called_once_with("sess-7", [])
 
 
@@ -73,7 +88,7 @@ def test_commit_memory_session_no_context_engine_still_notifies_memory_manager()
 
     agent.commit_memory_session([{"role": "user", "content": "x"}])
 
-    mm.on_session_end.assert_called_once_with([{"role": "user", "content": "x"}])
+    _assert_memory_manager_notified(mm, [{"role": "user", "content": "x"}])
 
 
 def test_commit_memory_session_tolerates_memory_manager_failure():
@@ -99,4 +114,4 @@ def test_commit_memory_session_tolerates_context_engine_failure():
     # Must not raise
     agent.commit_memory_session([{"role": "user", "content": "x"}])
 
-    mm.on_session_end.assert_called_once()
+    _assert_memory_manager_notified(mm, [{"role": "user", "content": "x"}])

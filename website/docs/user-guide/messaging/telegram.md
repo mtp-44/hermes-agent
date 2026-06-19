@@ -138,6 +138,21 @@ hermes gateway
 
 The bot should come online within seconds. Send it a message on Telegram to verify.
 
+## Open Brain Feedback Buttons
+
+If your Hermes config includes an `open_brain` MCP server and the model uses
+`query_brain` during a Telegram turn, Hermes now adds 👍/👎 buttons to that
+reply after delivery.
+
+- 👍 records a `good` `query_feedback` row in Open Brain.
+- 👎 records a `bad` row in Open Brain.
+- The buttons are best-effort and expire after a gateway restart, just like
+  other Telegram callback state.
+
+This gives you a lightweight way to collect Phase 3 retrieval feedback from the
+Hermes Telegram surface without leaving chat. The richer "search correct /
+should be none" correction flow still lives in the dedicated Open Brain bot.
+
 ## Sending Generated Files from Docker-backed Terminals
 
 If your terminal backend is `docker`, keep in mind that Telegram attachments are

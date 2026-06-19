@@ -81,14 +81,17 @@ async def test_reset_fires_finalize_hook(mock_invoke_hook):
 
     await runner._handle_reset_command(_make_event("/new"))
 
-    assert any(
-        c.args == ("on_session_finalize",)
-        and c.kwargs["session_id"] == "sess-old"
-        and c.kwargs["platform"] == "telegram"
-        and c.kwargs["old_session_id"] == "sess-old"
-        and c.kwargs["new_session_id"] == "sess-new"
-        for c in mock_invoke_hook.call_args_list
+    finalize_call = next(
+        c for c in mock_invoke_hook.call_args_list
+        if c[0] and c[0][0] == "on_session_finalize"
     )
+    assert finalize_call[1]["session_id"] == "sess-old"
+    assert finalize_call[1]["platform"] == "telegram"
+    assert finalize_call[1]["old_session_id"] == "sess-old"
+    assert finalize_call[1]["new_session_id"] == "sess-new"
+    assert finalize_call[1]["capture_eligible"] is True
+    assert finalize_call[1]["capture_nosave"] is False
+    assert finalize_call[1]["capture_private"] is False
 
 
 @pytest.mark.asyncio
@@ -153,6 +156,9 @@ async def test_shutdown_fires_finalize_for_active_agents(mock_invoke_hook):
     agent2 = MagicMock()
     agent2.session_id = "sess-b"
     runner._running_agents = {"key-a": agent1, "key-b": agent2}
+    runner.session_store = MagicMock()
+    runner.session_store._ensure_loaded = MagicMock()
+    runner.session_store._entries = {}
 
     with patch("gateway.status.remove_pid_file"), \
          patch("gateway.status.write_runtime_status"):
@@ -164,6 +170,69 @@ async def test_shutdown_fires_finalize_for_active_agents(mock_invoke_hook):
     ]
     session_ids = {c[1]["session_id"] for c in finalize_calls}
     assert session_ids == {"sess-a", "sess-b"}
+
+
+@pytest.mark.asyncio
+@patch("gateway.open_brain.save_session_summary", new_callable=AsyncMock)
+@patch("hermes_cli.plugins.invoke_hook")
+async def test_shutdown_captures_summary_for_tracked_session(mock_invoke_hook, mock_save_summary):
+    from gateway.run import GatewayRunner
+
+    runner = object.__new__(GatewayRunner)
+    runner._running = True
+    runner._background_tasks = set()
+    runner._pending_messages = {}
+    runner._pending_approvals = {}
+    runner._shutdown_event = MagicMock()
+    runner.adapters = {}
+    runner._exit_reason = "test"
+    runner._exit_code = None
+    runner._draining = False
+    runner._restart_requested = False
+    runner._restart_task_started = False
+    runner._restart_detached = False
+    runner._restart_via_service = False
+    runner._restart_drain_timeout = 0.0
+    runner._stop_task = None
+    runner._running_agents_ts = {}
+    runner._update_runtime_status = MagicMock()
+
+    session_key = "agent:main:telegram:dm:42"
+    source = SessionSource(
+        platform=Platform.TELEGRAM,
+        user_id="u1",
+        chat_id="c1",
+        user_name="tester",
+        chat_type="dm",
+    )
+    entry = SessionEntry(
+        session_key=session_key,
+        session_id="sess-a",
+        created_at=datetime.now(),
+        updated_at=datetime.now(),
+        origin=source,
+        platform=Platform.TELEGRAM,
+        chat_type="dm",
+    )
+    agent = MagicMock()
+    agent.session_id = "sess-a"
+    runner._running_agents = {session_key: agent}
+    runner.session_store = MagicMock()
+    runner.session_store._ensure_loaded = MagicMock()
+    runner.session_store._entries = {session_key: entry}
+    runner.session_store.load_transcript.return_value = [
+        {"role": "user", "content": "Need a summary"},
+        {"role": "assistant", "content": "Shutdown path is covered."},
+    ]
+    mock_save_summary.return_value = {"record_id": "sum-456", "message_count": 2}
+
+    with patch("gateway.status.remove_pid_file"), \
+         patch("gateway.status.write_runtime_status"):
+        await runner.stop()
+
+    mock_save_summary.assert_awaited_once()
+    assert mock_save_summary.await_args.kwargs["session_id"] == "sess-a"
+    assert mock_save_summary.await_args.kwargs["reason"] == "shutdown"
 
 
 @pytest.mark.asyncio
@@ -253,3 +322,91 @@ async def test_idle_expiry_fires_finalize_hook(mock_invoke_hook):
         f"on_session_finalize was not fired during idle expiry; "
         f"got session_ids={session_ids} (regression of #14981)"
     )
+
+
+@pytest.mark.asyncio
+@patch("gateway.open_brain.save_session_summary", new_callable=AsyncMock)
+@patch("hermes_cli.plugins.invoke_hook")
+async def test_idle_expiry_captures_summary_when_eligible(mock_invoke_hook, mock_save_summary):
+    from datetime import datetime, timedelta
+
+    from gateway.run import GatewayRunner
+
+    runner = object.__new__(GatewayRunner)
+    runner._running = True
+    runner._running_agents = {}
+    runner._agent_cache = {}
+    runner._agent_cache_lock = None
+    runner._last_session_store_prune_ts = 0.0
+
+    session_key = "agent:main:telegram:dm:42"
+    source = SessionSource(
+        platform=Platform.TELEGRAM,
+        user_id="u1",
+        chat_id="c1",
+        user_name="tester",
+        chat_type="dm",
+    )
+    expired_entry = SessionEntry(
+        session_key=session_key,
+        session_id="sess-expired",
+        created_at=datetime.now() - timedelta(hours=2),
+        updated_at=datetime.now() - timedelta(hours=2),
+        origin=source,
+        platform=Platform.TELEGRAM,
+        chat_type="dm",
+    )
+
+    runner.session_store = MagicMock()
+    runner.session_store._ensure_loaded = MagicMock()
+    runner.session_store._entries = {session_key: expired_entry}
+    runner.session_store._is_session_expired = MagicMock(return_value=True)
+    runner.session_store._lock = MagicMock()
+    runner.session_store._lock.__enter__ = MagicMock(return_value=None)
+    runner.session_store._lock.__exit__ = MagicMock(return_value=None)
+    runner.session_store._save = MagicMock()
+    runner.session_store.load_transcript.return_value = [
+        {"role": "user", "content": "Need a summary"},
+        {"role": "assistant", "content": "Capture is wired up."},
+    ]
+    runner._evict_cached_agent = MagicMock()
+    runner._cleanup_agent_resources = MagicMock()
+    runner._sweep_idle_cached_agents = MagicMock(return_value=0)
+
+    _orig_sleep = __import__("asyncio").sleep
+
+    async def _fast_sleep(_):
+        await _orig_sleep(0)
+
+    def _hook_and_stop(*a, **kw):
+        runner._running = False
+        return None
+
+    mock_invoke_hook.side_effect = _hook_and_stop
+    mock_save_summary.return_value = {"record_id": "sum-123", "message_count": 2}
+
+    with patch("gateway.run.asyncio.sleep", side_effect=_fast_sleep):
+        await runner._session_expiry_watcher(interval=0)
+
+    mock_save_summary.assert_awaited_once()
+    assert mock_save_summary.await_args.kwargs["session_id"] == "sess-expired"
+    assert mock_save_summary.await_args.kwargs["reason"] == "expiry"
+
+
+@pytest.mark.asyncio
+@patch("hermes_cli.plugins.invoke_hook")
+async def test_finalize_hook_includes_capture_flags(mock_invoke_hook):
+    runner = _make_runner()
+    session_key = build_session_key(_make_source())
+    runner.session_store._entries[session_key].capture_nosave = True
+    runner.session_store._entries[session_key].capture_private = True
+
+    await runner._handle_reset_command(_make_event("/new"))
+
+    finalize_call = next(
+        c for c in mock_invoke_hook.call_args_list
+        if c[0] and c[0][0] == "on_session_finalize"
+    )
+    assert finalize_call[1]["capture_nosave"] is True
+    assert finalize_call[1]["capture_private"] is True
+    assert finalize_call[1]["capture_eligible"] is False

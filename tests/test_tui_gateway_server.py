@@ -1663,7 +1663,7 @@ def test_session_close_commits_memory_and_fires_finalize_hook(monkeypatch):
     calls = {"hooks": []}
 
     agent = types.SimpleNamespace(session_id="session-key")
-    agent.commit_memory_session = lambda history: calls.setdefault("history", history)
+    agent.commit_memory_session = lambda history, **_: calls.setdefault("history", history)
     server._sessions["sid"] = _session(
         agent=agent, history=[{"role": "user", "content": "hello"}]
     )
@@ -5160,8 +5160,9 @@ def test_session_create_no_race_keeps_worker_alive(monkeypatch):
     # entries mid-run, which would flip this build thread's ``replaced`` check
     # to True and trigger a spurious unregister. Snapshot, clear, and restore
     # so this test sees only its own session regardless of shard composition.
-    _saved_sessions = dict(server._sessions)
-    server._sessions.clear()
+    with server._sessions_lock:
+        _saved_sessions = dict(server._sessions)
+        server._sessions.clear()
 
     try:
         resp = server.handle_request(
@@ -5175,24 +5176,28 @@ def test_session_create_no_race_keeps_worker_alive(monkeypatch):
 
         # Wait for the build to finish (ready event inside session dict).
         session = server._sessions[sid]
+        key = session["session_key"]
         built = session["agent_ready"].wait(timeout=10.0)
         assert built, "agent build did not complete within timeout"
 
         # Build finished without a close race — nothing should have been
-        # cleaned up by the orphan check.
+        # cleaned up by the orphan check for this session.  Late daemon
+        # timers from earlier session.create race tests can still pass through
+        # these monkeypatched hooks, so tolerate unrelated session keys.
         assert (
-            closed_workers == []
+            key not in closed_workers
         ), f"build thread closed its own worker despite no race: {closed_workers}"
         assert (
-            unregistered_keys == []
+            key not in unregistered_keys
         ), f"build thread unregistered its own notify despite no race: {unregistered_keys}"
 
         # Session should have the live worker installed.
         assert session.get("slash_worker") is not None
     finally:
         # Cleanup + restore sibling sessions we snapshotted.
-        server._sessions.clear()
-        server._sessions.update(_saved_sessions)
+        with server._sessions_lock:
+            server._sessions.clear()
+            server._sessions.update(_saved_sessions)
 
 
 def test_get_db_degrades_cleanly_when_sessiondb_init_fails(monkeypatch):

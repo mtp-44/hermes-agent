@@ -117,6 +117,26 @@ COMMAND_REGISTRY: list[CommandDef] = [
                gateway_only=True, aliases=("set-home",)),
     CommandDef("resume", "Resume a previously-named session", "Session",
                args_hint="[name]"),
+    CommandDef("nosave", "Skip automatic capture for the current session", "Session",
+               gateway_only=True, args_hint="[on|off|status]",
+               subcommands=("on", "off", "status")),
+    CommandDef("private", "Disable automatic capture until turned off", "Session",
+               gateway_only=True, args_hint="[on|off|status]",
+               subcommands=("on", "off", "status")),
+    CommandDef("capture-status", "Show whether this session is eligible for automatic capture", "Session",
+               gateway_only=True, aliases=("capture_status",)),
+    CommandDef("note", "Save a short meeting note directly to Openbrain", "Session",
+               gateway_only=True, aliases=("m",), args_hint="<text>"),
+    CommandDef("brief", "Show recent Hermes captures from Openbrain", "Session",
+               gateway_only=True, args_hint="[query]"),
+    CommandDef("digest", "Show a synthesized weekly digest from Hermes captures", "Session",
+               gateway_only=True, args_hint="[query]"),
+    CommandDef("jira", "Show current sprint issues from Jira MCP", "Session",
+               gateway_only=True, args_hint="[filter]"),
+    CommandDef("stale", "Show stale action items and contacts from Openbrain", "Session",
+               gateway_only=True),
+    CommandDef("finance-check", "Check for finance anomalies against the prior period", "Session",
+               gateway_only=True, aliases=("finance_check",)),
 
     # Configuration
     CommandDef("sessions", "Browse and resume previous sessions", "Session"),
@@ -353,12 +373,18 @@ ACTIVE_SESSION_BYPASS_COMMANDS: frozenset[str] = frozenset(
         "agents",
         "approve",
         "background",
+        "brief",
+        "capture-status",
         "commands",
         "deny",
         "help",
         "new",
         "ob",
+        "nosave",
+        "note",
+        "ob",
         "profile",
+        "private",
         "queue",
         "restart",
         "status",
@@ -1048,17 +1074,27 @@ _SLACK_RESERVED_COMMANDS = frozenset({
 _SLACK_PRIORITY_ALIASES = ("btw", "bg")
 
 # Canonical commands intentionally NOT given a native Slack slash slot. Slack
-# caps apps at 50 slash commands and the registry is at that ceiling; rather
+# caps apps at 50 slash commands and the registry is past that ceiling; rather
 # than let the clamp silently drop whichever command sorts last (and break
-# Telegram parity), we explicitly route a few low-frequency commands through
+# Telegram parity), we explicitly route lower-frequency commands through
 # ``/hermes <command>`` on Slack only. They remain native on every other
-# surface (CLI, TUI, Telegram, Discord). Keep this list TIGHT and intentional —
-# the telegram-parity test reads it so an entry here is a deliberate
+# surface (CLI, TUI, Telegram, Discord). Keep this list intentional — the
+# telegram-parity test reads it so an entry here is a deliberate
 # "Slack-via-/hermes" decision, not a silent clamp.
-#   - credits: the billing/top-up surface; reached via /hermes credits on Slack.
-#   - billing: the terminal-billing surface (buy/auto-reload/limit); /hermes billing.
-#   - debug: the log/report upload surface; reached via /hermes debug on Slack.
-_SLACK_VIA_HERMES_ONLY = frozenset({"credits", "billing", "debug"})
+_SLACK_VIA_HERMES_ONLY = frozenset({
+    "billing",
+    "codex-runtime",
+    "commands",
+    "credits",
+    "debug",
+    "insights",
+    "platform",
+    "reload-skills",
+    "restart",
+    "update",
+    "usage",
+    "version",
+})
 
 
 def _sanitize_slack_name(raw: str) -> str:

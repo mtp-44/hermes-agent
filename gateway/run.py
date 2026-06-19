@@ -3343,6 +3343,58 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         route["request_overrides"] = overrides or {}
         return route
 
+    def _startup_route_snapshot(self) -> str:
+        """Return a compact startup summary of configured model routes."""
+        route_bits = [f"local={_resolve_gateway_model() or '<unset>'}"]
+        for route_name in ("claude", "opus", "fast", "5.5"):
+            try:
+                route_cfg = self._load_model_route_config(route_name)
+            except Exception:
+                continue
+            model = str(route_cfg.get("model") or route_cfg.get("default_model") or "").strip()
+            if model:
+                route_bits.append(f"{route_name}={model}")
+        return ", ".join(route_bits)
+
+    def _startup_mcp_snapshot(self) -> str:
+        """Return a compact startup summary of configured MCP servers."""
+        try:
+            from tools.mcp_tool import get_mcp_status
+
+            status_rows = get_mcp_status()
+        except Exception as exc:
+            return f"unavailable ({exc})"
+
+        if not status_rows:
+            return "none configured"
+
+        parts = []
+        for row in status_rows:
+            if not isinstance(row, dict):
+                continue
+            name = str(row.get("name") or "unknown")
+            transport = str(row.get("transport") or "unknown")
+            connected = "connected" if row.get("connected") else "configured"
+            tools = int(row.get("tools") or 0)
+            parts.append(f"{name}({transport}, {connected}, tools={tools})")
+        return ", ".join(parts) if parts else "none configured"
+
+    def _log_startup_snapshot(self) -> None:
+        """Log the startup config summary expected for long-lived service ops."""
+        enabled_platforms = sorted(
+            platform.value
+            for platform, platform_config in self.config.platforms.items()
+            if getattr(platform_config, "enabled", False)
+        )
+        logger.info("Gateway config path: %s", _config_path)
+        logger.info("Gateway env path: %s", _env_path)
+        logger.info(
+            "Gateway enabled platforms: %s",
+            ", ".join(enabled_platforms) if enabled_platforms else "none",
+        )
+        logger.info("Gateway model routes: %s", self._startup_route_snapshot())
+        logger.info("Gateway MCP servers: %s", self._startup_mcp_snapshot())
+
     async def _handle_adapter_fatal_error(self, adapter: BasePlatformAdapter) -> None:
         """React to an adapter failure after startup.
 
@@ -4530,16 +4582,34 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     e,
                 )
 
-    def _finalize_shutdown_agents(self, active_agents: Dict[str, Any]) -> None:
-        for agent in active_agents.values():
+    async def _finalize_shutdown_agents(self, active_agents: Dict[str, Any]) -> None:
+        for session_key, agent in active_agents.items():
+            entry = None
+            if getattr(self, "session_store", None) is not None:
+                try:
+                    self.session_store._ensure_loaded()
+                    entry = self.session_store._entries.get(session_key)
+                except Exception:
+                    entry = None
+            await self._capture_session_summary_if_eligible(entry, reason="shutdown")
             try:
                 from hermes_cli.plugins import invoke_hook as _invoke_hook
-                _invoke_hook(
-                    "on_session_finalize",
-                    session_id=getattr(agent, "session_id", None),
-                    platform="gateway",
-                    reason="shutdown",
-                )
+                if entry is not None:
+                    _invoke_hook(
+                        "on_session_finalize",
+                        **self._build_session_finalize_hook_kwargs(
+                            entry,
+                            platform="gateway",
+                            reason="shutdown",
+                        ),
+                    )
+                else:
+                    _invoke_hook(
+                        "on_session_finalize",
+                        session_id=getattr(agent, "session_id", None),
+                        platform="gateway",
+                        reason="shutdown",
+                    )
             except Exception:
                 pass
             self._cleanup_agent_resources(agent)
@@ -5114,7 +5184,6 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         except RuntimeError:
             self._gateway_loop = None
         logger.info("Session storage: %s", self.config.sessions_dir)
-
         # Sanity-check that systemd's TimeoutStopSec covers our drain
         # window.  When the user upgraded hermes-agent without re-running
         # ``hermes setup``, their unit file may still encode the old
@@ -5171,6 +5240,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 )
         except Exception:
             pass
+
+        self._log_startup_snapshot()
         try:
             from hermes_cli.profiles import get_active_profile_name
             _profile = get_active_profile_name()
@@ -5978,15 +6049,21 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
                 for key, entry in _expired_entries:
                     try:
+                        await self._capture_session_summary_if_eligible(
+                            entry,
+                            reason="expiry",
+                        )
                         try:
                             from hermes_cli.plugins import invoke_hook as _invoke_hook
                             _parts = key.split(":")
                             _platform = _parts[2] if len(_parts) > 2 else ""
                             _invoke_hook(
                                 "on_session_finalize",
-                                session_id=entry.session_id,
-                                platform=_platform,
-                                reason="session_expired",
+                                **self._build_session_finalize_hook_kwargs(
+                                    entry,
+                                    platform=_platform,
+                                    reason="session_expired",
+                                ),
                             )
                         except Exception:
                             pass
@@ -6504,7 +6581,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 except Exception as e:
                     logger.error("Failed to launch detached gateway restart: %s", e)
 
-            self._finalize_shutdown_agents(active_agents)
+            await self._finalize_shutdown_agents(active_agents)
 
             # Also shut down memory providers on idle cached agents.
             # _finalize_shutdown_agents only handles agents that were
@@ -7644,6 +7721,33 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             if _cmd_def_inner and _cmd_def_inner.name == "agents":
                 return await self._handle_agents_command(event)
 
+            if _cmd_def_inner and _cmd_def_inner.name == "nosave":
+                return await self._handle_nosave_command(event)
+
+            if _cmd_def_inner and _cmd_def_inner.name == "private":
+                return await self._handle_private_command(event)
+
+            if _cmd_def_inner and _cmd_def_inner.name == "capture-status":
+                return await self._handle_capture_status_command(event)
+
+            if _cmd_def_inner and _cmd_def_inner.name == "note":
+                return await self._handle_note_command(event)
+
+            if _cmd_def_inner and _cmd_def_inner.name == "brief":
+                return await self._handle_brief_command(event)
+
+            if _cmd_def_inner and _cmd_def_inner.name == "digest":
+                return await self._handle_digest_command(event)
+
+            if _cmd_def_inner and _cmd_def_inner.name == "jira":
+                return await self._handle_jira_command(event)
+
+            if _cmd_def_inner and _cmd_def_inner.name == "stale":
+                return await self._handle_stale_command(event)
+
+            if _cmd_def_inner and _cmd_def_inner.name == "finance-check":
+                return await self._handle_finance_check_command(event)
+
             # /background must bypass the running-agent guard — it starts a
             # parallel task and must never interrupt the active conversation.
             # /btw is an alias of /background and resolves to the same canonical
@@ -7977,6 +8081,33 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         if canonical == "platform":
             return await self._handle_platform_command(event)
+
+        if canonical == "nosave":
+            return await self._handle_nosave_command(event)
+
+        if canonical == "private":
+            return await self._handle_private_command(event)
+
+        if canonical == "capture-status":
+            return await self._handle_capture_status_command(event)
+
+        if canonical == "note":
+            return await self._handle_note_command(event)
+
+        if canonical == "brief":
+            return await self._handle_brief_command(event)
+
+        if canonical == "digest":
+            return await self._handle_digest_command(event)
+
+        if canonical == "jira":
+            return await self._handle_jira_command(event)
+
+        if canonical == "stale":
+            return await self._handle_stale_command(event)
+
+        if canonical == "finance-check":
+            return await self._handle_finance_check_command(event)
 
         if canonical == "restart":
             return await self._handle_restart_command(event)
@@ -10121,6 +10252,418 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         return "\n".join(lines)
 
+    @staticmethod
+    def _capture_flags_for_entry(entry) -> dict[str, bool]:
+        """Return normalized capture flags for a SessionEntry-like object."""
+        capture_nosave = bool(getattr(entry, "capture_nosave", False))
+        capture_private = bool(getattr(entry, "capture_private", False))
+        return {
+            "capture_nosave": capture_nosave,
+            "capture_private": capture_private,
+            "capture_eligible": not (capture_nosave or capture_private),
+        }
+
+    def _format_capture_status(self, entry) -> str:
+        flags = self._capture_flags_for_entry(entry)
+        reasons = []
+        if flags["capture_private"]:
+            reasons.append("private mode is on")
+        if flags["capture_nosave"]:
+            reasons.append("current session is marked /nosave")
+
+        lines = [
+            "🧠 **Capture Status**",
+            "",
+            f"**Automatic session-end capture:** {'Eligible' if flags['capture_eligible'] else 'Disabled'}",
+            f"**Private mode:** {'On' if flags['capture_private'] else 'Off'}",
+            f"**/nosave:** {'On' if flags['capture_nosave'] else 'Off'}",
+        ]
+        if reasons:
+            lines.append(f"**Why disabled:** {', '.join(reasons)}")
+        else:
+            lines.append("**Why enabled:** no capture block is active")
+        lines.append("")
+        lines.append("`/note` still saves immediately because it is an explicit capture command.")
+        return "\n".join(lines)
+
+    def _build_session_finalize_hook_kwargs(self, entry, *, platform: str, reason: str | None = None) -> dict[str, object]:
+        kwargs: dict[str, object] = {
+            "session_id": getattr(entry, "session_id", None),
+            "platform": platform,
+        }
+        if reason is not None:
+            kwargs["reason"] = reason
+        kwargs.update(self._capture_flags_for_entry(entry))
+        return kwargs
+
+    async def _capture_session_summary_if_eligible(self, entry, *, reason: str) -> None:
+        """Best-effort session-end capture that respects per-session privacy flags."""
+        if entry is None:
+            return
+
+        flags = self._capture_flags_for_entry(entry)
+        if not flags["capture_eligible"]:
+            return
+
+        source = getattr(entry, "origin", None)
+        session_id = getattr(entry, "session_id", None)
+        if source is None or not session_id:
+            return
+
+        try:
+            messages = self.session_store.load_transcript(session_id)
+        except Exception as exc:
+            logger.warning("Failed to load transcript for session-end capture %s: %s", session_id, exc)
+            return
+        if not messages:
+            return
+
+        try:
+            from gateway.open_brain import OpenBrainConfigError, save_session_summary
+
+            payload = await save_session_summary(
+                session_id=session_id,
+                source=source,
+                messages=messages,
+                reason=reason,
+            )
+        except OpenBrainConfigError as exc:
+            logger.info("Skipping session-end capture for %s: %s", session_id, exc)
+            return
+        except Exception as exc:
+            logger.warning("Session-end capture failed for %s: %s", session_id, exc)
+            return
+
+        if payload and payload.get("record_id"):
+            if payload.get("deduplicated"):
+                logger.debug(
+                    "Reused existing session summary for %s as %s (dedup, %s messages, reason=%s)",
+                    session_id,
+                    payload["record_id"],
+                    payload.get("message_count", 0),
+                    reason,
+                )
+            else:
+                logger.info(
+                    "Captured session summary for %s as %s (%s messages, reason=%s)",
+                    session_id,
+                    payload["record_id"],
+                    payload.get("message_count", 0),
+                    reason,
+                )
+
+    async def _handle_nosave_command(self, event: MessageEvent) -> str:
+        source = event.source
+        session_entry = self.session_store.get_or_create_session(source)
+        session_key = session_entry.session_key
+        raw = event.get_command_args().strip().lower()
+
+        if raw in ("", "on"):
+            updated = self.session_store.set_capture_controls(session_key, nosave=True)
+            if updated is None:
+                return "Couldn't update capture status for this session."
+            return "🛑 Automatic session-end capture is now disabled for this session."
+
+        if raw == "off":
+            updated = self.session_store.set_capture_controls(session_key, nosave=False)
+            if updated is None:
+                return "Couldn't update capture status for this session."
+            return "✅ Automatic session-end capture is allowed again unless private mode is on."
+
+        if raw == "status":
+            return self._format_capture_status(session_entry)
+
+        return "Usage: /nosave [on|off|status]"
+
+    async def _handle_private_command(self, event: MessageEvent) -> str:
+        source = event.source
+        session_entry = self.session_store.get_or_create_session(source)
+        session_key = session_entry.session_key
+        raw = event.get_command_args().strip().lower()
+
+        if raw == "status":
+            return self._format_capture_status(session_entry)
+
+        if raw == "on":
+            updated = self.session_store.set_capture_controls(session_key, private=True)
+            if updated is None:
+                return "Couldn't update private mode for this session."
+            return "🔒 Private mode is on. Automatic capture will stay off until you turn it back off."
+
+        if raw == "off":
+            updated = self.session_store.set_capture_controls(session_key, private=False)
+            if updated is None:
+                return "Couldn't update private mode for this session."
+            return "🔓 Private mode is off. Automatic capture is allowed again unless /nosave is still on."
+
+        if raw == "":
+            next_value = not bool(getattr(session_entry, "capture_private", False))
+            updated = self.session_store.set_capture_controls(session_key, private=next_value)
+            if updated is None:
+                return "Couldn't update private mode for this session."
+            return (
+                "🔒 Private mode is on. Automatic capture will stay off until you turn it back off."
+                if next_value
+                else "🔓 Private mode is off. Automatic capture is allowed again unless /nosave is still on."
+            )
+
+        return "Usage: /private [on|off|status]"
+
+    async def _handle_capture_status_command(self, event: MessageEvent) -> str:
+        session_entry = self.session_store.get_or_create_session(event.source)
+        return self._format_capture_status(session_entry)
+
+    async def _handle_note_command(self, event: MessageEvent) -> str:
+        note_text = event.get_command_args().strip()
+        if not note_text:
+            return "Usage: /note <text>"
+
+        try:
+            from gateway.open_brain import OpenBrainConfigError, capture_meeting_note
+
+            payload = await capture_meeting_note(note_text, source=event.source)
+        except OpenBrainConfigError as exc:
+            return f"Openbrain isn't configured for direct note capture: {exc}"
+        except Exception as exc:
+            logger.warning("Meeting note capture failed: %s", exc)
+            return f"⚠️ Note capture failed: {exc}"
+
+        record_id = payload.get("id")
+        deduplicated = bool(payload.get("deduplicated"))
+        private_on = bool(getattr(self.session_store.get_or_create_session(event.source), "capture_private", False))
+        suffix = " Private mode stays on; this note was saved explicitly." if private_on else ""
+        action = "Already saved in Openbrain" if deduplicated else "Saved to Openbrain as a meeting note"
+        if record_id:
+            return f"📝 {action} (`{record_id}`).{suffix}"
+        return f"📝 {action}.{suffix}"
+
+    @staticmethod
+    def _format_brief_timestamp(raw_value: object) -> str:
+        text = str(raw_value or "").strip()
+        if not text:
+            return "unknown time"
+        try:
+            normalized = text.replace("Z", "+00:00")
+            parsed = datetime.fromisoformat(normalized)
+            return parsed.strftime("%Y-%m-%d %H:%M")
+        except ValueError:
+            return text
+
+    async def _handle_brief_command(self, event: MessageEvent) -> str:
+        query = event.get_command_args().strip()
+
+        try:
+            from gateway.open_brain import OpenBrainConfigError, fetch_briefing
+
+            items = await fetch_briefing(query=query or None, limit=3)
+        except OpenBrainConfigError as exc:
+            return f"Openbrain isn't configured for `/brief`: {exc}"
+        except Exception as exc:
+            logger.warning("Brief readback failed: %s", exc)
+            return f"⚠️ Brief readback failed: {exc}"
+
+        if not items:
+            if query:
+                return f"🧠 No Hermes captures matched `{query}`."
+            return "🧠 No recent Hermes captures found yet."
+
+        lines = ["🧠 **Brief**"]
+        if query:
+            lines.extend(["", f"Query: `{query}`"])
+        for item in items:
+            record_type = str(item.get("record_type") or "thought").replace("_", " ")
+            timestamp = self._format_brief_timestamp(item.get("created_at"))
+            excerpt = str(item.get("excerpt") or "").strip()
+            citation = str(item.get("citation") or "").strip()
+            source_id = str(item.get("source_id") or "").strip()
+            session_id = str(item.get("session_id") or "").strip()
+            cite_bits = [bit for bit in (citation, source_id or session_id) if bit]
+            cite_suffix = f" [{', '.join(cite_bits)}]" if cite_bits else ""
+            lines.append(f"- {timestamp} · {record_type}{cite_suffix}: {excerpt}")
+        return "\n".join(lines)
+
+    async def _handle_digest_command(self, event: MessageEvent) -> str:
+        query = event.get_command_args().strip()
+
+        try:
+            from gateway.open_brain import OpenBrainConfigError, fetch_digest
+
+            digest = await fetch_digest(query=query or None, days=7)
+        except OpenBrainConfigError as exc:
+            return f"Openbrain isn't configured for `/digest`: {exc}"
+        except Exception as exc:
+            logger.warning("Digest readback failed: %s", exc)
+            return f"⚠️ Digest readback failed: {exc}"
+
+        total_items = int(digest.get("total_items") or 0)
+        if total_items <= 0:
+            if query:
+                return f"🧠 No Hermes captures matched `{query}` for this week's digest."
+            return "🧠 No Hermes captures found for the last 7 days."
+
+        lines = ["🧠 **Digest**"]
+        if query:
+            lines.extend(["", f"Query: `{query}`"])
+        lines.extend(
+            [
+                "",
+                (
+                    f"Window: last 7 days · {total_items} captures "
+                    f"({int(digest.get('meeting_notes') or 0)} notes, "
+                    f"{int(digest.get('session_summaries') or 0)} summaries)"
+                ),
+            ]
+        )
+
+        decisions = digest.get("decisions") or []
+        if decisions:
+            lines.append("")
+            lines.append("Decisions & outcomes:")
+            for item in decisions:
+                lines.append(f"- {item['text']}{item.get('reference') or ''}")
+
+        actions = digest.get("actions") or []
+        if actions:
+            lines.append("")
+            lines.append("Open loops:")
+            for item in actions:
+                lines.append(f"- {item['text']}{item.get('reference') or ''}")
+
+        highlights = digest.get("highlights") or []
+        if highlights:
+            lines.append("")
+            lines.append("Highlights:")
+            for item in highlights:
+                lines.append(f"- {item['text']}{item.get('reference') or ''}")
+
+        return "\n".join(lines)
+
+    async def _handle_jira_command(self, event: MessageEvent) -> str:
+        query = event.get_command_args().strip()
+
+        try:
+            from gateway.jira_mcp import JiraConfigError, fetch_current_sprint_issues
+
+            issues = await fetch_current_sprint_issues(query=query or None, limit=8)
+        except JiraConfigError as exc:
+            return f"Jira isn't configured for `/jira`: {exc}"
+        except Exception as exc:
+            logger.warning("Jira readback failed: %s", exc)
+            return f"⚠️ Jira readback failed: {exc}"
+
+        if not issues:
+            if query:
+                return f"📋 No current sprint Jira issues matched `{query}`."
+            return "📋 No current sprint Jira issues found."
+
+        lines = ["📋 **Jira**", "", "Source: Jira current sprint"]
+        if query:
+            lines.append(f"Filter: `{query}`")
+        for issue in issues:
+            parts = [issue["key"]]
+            if issue.get("status"):
+                parts.append(issue["status"])
+            if issue.get("priority"):
+                parts.append(issue["priority"])
+            prefix = " · ".join(parts)
+            suffix = f" — {issue['assignee']}" if issue.get("assignee") else ""
+            lines.append(f"- {prefix}: {issue['summary']}{suffix}")
+        lines.extend(
+            [
+                "",
+                "Stay on `/local` by default. Use `/fast` or `/claude` explicitly if you want a richer work synthesis.",
+            ]
+        )
+        return "\n".join(lines)
+
+    async def _handle_finance_check_command(self, event: MessageEvent) -> str:
+        try:
+            from gateway.open_brain import OpenBrainConfigError, fetch_finance_anomalies
+
+            report = await fetch_finance_anomalies()
+        except OpenBrainConfigError as exc:
+            return f"Openbrain isn't configured for `/finance-check`: {exc}"
+        except Exception as exc:
+            logger.warning("Finance check failed: %s", exc)
+            return f"⚠️ Finance check failed: {exc}"
+
+        if not report.get("has_anomalies"):
+            days = int(report.get("days") or 30)
+            current_total = report.get("current_total") or 0
+            return (
+                f"✅ No finance anomalies in the last {days} days. "
+                f"Total spend: {current_total:.0f}."
+            )
+
+        days = int(report.get("days") or 30)
+        current_total = float(report.get("current_total") or 0)
+        prior_total = float(report.get("prior_total") or 0)
+        lines = ["💰 **Finance check**", "", f"Period: last {days} days vs prior {days} days"]
+        if prior_total > 0:
+            overall_pct = (current_total - prior_total) / prior_total * 100
+            sign = "+" if overall_pct >= 0 else ""
+            lines.append(f"Total: {current_total:.0f} vs {prior_total:.0f} prior ({sign}{overall_pct:.0f}%)")
+        else:
+            lines.append(f"Total: {current_total:.0f} (no prior-period data)")
+
+        category_anomalies = report.get("category_anomalies") or []
+        if category_anomalies:
+            lines.extend(["", "Category anomalies:"])
+            for item in category_anomalies:
+                lines.append(f"- {item['category']}: {item['reason']}")
+
+        large_transactions = report.get("large_transactions") or []
+        if large_transactions:
+            lines.extend(["", "Large transactions:"])
+            for txn in large_transactions:
+                date_str = str(txn.get("date") or "").strip()
+                desc = str(txn.get("description") or txn.get("category") or "").strip()
+                amount = float(txn.get("amount") or 0)
+                date_prefix = f"{date_str}: " if date_str else ""
+                lines.append(f"- {date_prefix}{desc} ({amount:.0f})")
+
+        return "\n".join(lines)
+
+    async def _handle_stale_command(self, event: MessageEvent) -> str:
+        try:
+            from gateway.open_brain import OpenBrainConfigError, fetch_stale_items
+
+            report = await fetch_stale_items()
+        except OpenBrainConfigError as exc:
+            return f"Openbrain isn't configured for `/stale`: {exc}"
+        except Exception as exc:
+            logger.warning("Stale readback failed: %s", exc)
+            return f"⚠️ Stale readback failed: {exc}"
+
+        stale_actions = report.get("stale_actions") or []
+        stale_contacts = report.get("stale_contacts") or []
+        action_days = int(report.get("action_days") or 14)
+
+        if not stale_actions and not stale_contacts:
+            return f"✅ Nothing stale found in the last {action_days}+ days."
+
+        lines = ["🕰️ **Stale**"]
+
+        if stale_actions:
+            lines.extend(["", f"Open loops older than {action_days} days:"])
+            for item in stale_actions:
+                age = int(item.get("age_days") or 0)
+                text = str(item.get("text") or "").strip()
+                citation = str(item.get("citation") or "").strip()
+                cite_suffix = f" [{citation}]" if citation else ""
+                lines.append(f"- {age}d ago{cite_suffix}: {text}")
+
+        if stale_contacts:
+            lines.extend(["", "Contacts not mentioned recently:"])
+            for contact in stale_contacts:
+                name = str(contact.get("name") or "").strip()
+                excerpt = str(contact.get("excerpt") or "").strip()
+                citation = str(contact.get("citation") or "").strip()
+                cite_suffix = f" [{citation}]" if citation else ""
+                lines.append(f"- {name}{cite_suffix}: last seen in \"{excerpt}\"")
+
+        return "\n".join(lines)
+
     async def _handle_open_brain_capture_command(self, event: MessageEvent) -> Union[str, EphemeralReply]:
         """Handle /ob command without resetting the live conversation."""
         source = event.source
@@ -10345,6 +10888,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 }
         except Exception:
             origin = None
+
         try:
             from hermes_cli.suggestions_cmd import handle_suggestions_command
 
@@ -15015,6 +15559,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         result_holder = [None]  # Mutable container for the result
         tools_holder = [None]   # Mutable container for the tool definitions
         stream_consumer_holder = [None]  # Mutable container for stream consumer
+        _turn_started_at = time.time()
+        _feedback_context: dict[str, Any] | None = None
         
         # Bridge sync step_callback → async hooks.emit for agent:step events
         _loop_for_step = asyncio.get_running_loop()
@@ -16486,6 +17032,31 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # Check if we were interrupted OR have a queued message (/queue).
             result = result_holder[0]
             adapter = self.adapters.get(source.platform)
+            if source.platform == Platform.TELEGRAM and session_id and result and result.get("final_response"):
+                try:
+                    from gateway.open_brain_feedback import pop_feedback_candidate
+                    _feedback_context = pop_feedback_candidate(
+                        session_id,
+                        since=_turn_started_at,
+                    )
+                except Exception as _feedback_err:
+                    logger.debug("Open Brain feedback capture lookup failed: %s", _feedback_err)
+                    _feedback_context = None
+                if _feedback_context and adapter and hasattr(adapter, "stage_open_brain_feedback"):
+                    try:
+                        adapter.stage_open_brain_feedback(
+                            session_key or session_id,
+                            _feedback_context,
+                            generation=run_generation,
+                        )
+                        if _status_thread_metadata is None:
+                            _status_thread_metadata = {}
+                        _status_thread_metadata["open_brain_feedback"] = _feedback_context
+                        _sc = stream_consumer_holder[0]
+                        if _sc is not None:
+                            _sc.metadata = _status_thread_metadata
+                    except Exception as _feedback_stage_err:
+                        logger.debug("Open Brain feedback staging failed: %s", _feedback_stage_err)
             
             # Get pending message from adapter.
             # Use session_key (not source.chat_id) to match adapter's storage keys.
@@ -16777,6 +17348,29 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             await stream_task
                         except asyncio.CancelledError:
                             pass
+                if (
+                    _feedback_context
+                    and source.platform == Platform.TELEGRAM
+                    and _status_adapter
+                    and hasattr(_status_adapter, "attach_open_brain_feedback")
+                ):
+                    _sc = stream_consumer_holder[0]
+                    _streamed_message_id = getattr(_sc, "_message_id", None) if _sc else None
+                    _streamed_sent = bool(_sc and getattr(_sc, "final_response_sent", False))
+                    if _streamed_sent and _streamed_message_id:
+                        try:
+                            if hasattr(_status_adapter, "pop_staged_open_brain_feedback"):
+                                _status_adapter.pop_staged_open_brain_feedback(
+                                    session_key or session_id,
+                                    generation=run_generation,
+                                )
+                            await _status_adapter.attach_open_brain_feedback(
+                                source.chat_id,
+                                _streamed_message_id,
+                                _feedback_context,
+                            )
+                        except Exception as _feedback_attach_err:
+                            logger.debug("Open Brain feedback attach failed: %s", _feedback_attach_err)
             
             # Clean up tracking
             tracking_task.cancel()

@@ -8,6 +8,7 @@ Uses python-telegram-bot library for:
 """
 
 import asyncio
+from collections import OrderedDict
 import dataclasses
 import inspect
 import json
@@ -18,6 +19,7 @@ import html as _html
 import re
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Set, Any
+from uuid import uuid4
 
 logger = logging.getLogger(__name__)
 
@@ -88,6 +90,7 @@ from gateway.platforms.telegram_network import (
     parse_fallback_ip_env,
 )
 from utils import atomic_replace
+from gateway.open_brain import record_proactive_feedback, record_query_feedback
 
 _TELEGRAM_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
 _TELEGRAM_IMAGE_MIME_TO_EXT = {
@@ -513,6 +516,10 @@ class TelegramAdapter(BasePlatformAdapter):
         # Tracks status bubbles owned by this adapter so subsequent calls with the
         # same key edit the same message instead of appending new ones (#30045).
         self._status_message_ids: Dict[tuple, str] = {}
+        # Query feedback callback contexts keyed by short token
+        self._feedback_entries: OrderedDict[str, dict] = OrderedDict()
+        self._feedback_max_entries = 200
+        self._staged_feedback: Dict[str, Any] = {}
 
     def _notification_kwargs(
         self, metadata: Optional[Dict[str, Any]]
@@ -580,6 +587,92 @@ class TelegramAdapter(BasePlatformAdapter):
             return os.getenv("GATEWAY_ALLOW_ALL_USERS", "").lower() in {"true", "1", "yes"}
         allowed_ids = {uid.strip() for uid in allowed_csv.split(",") if uid.strip()}
         return "*" in allowed_ids or normalized_user_id in allowed_ids
+
+    def _register_feedback_context(self, context: dict[str, Any]) -> str:
+        token = uuid4().hex[:12]
+        self._feedback_entries[token] = context
+        while len(self._feedback_entries) > self._feedback_max_entries:
+            self._feedback_entries.popitem(last=False)
+        return token
+
+    def _feedback_context(self, token: str) -> dict[str, Any] | None:
+        return self._feedback_entries.get(token)
+
+    def _build_feedback_keyboard(self, token: str) -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup([[
+            InlineKeyboardButton("👍 Good", callback_data=f"obf:g:{token}"),
+            InlineKeyboardButton("👎 Bad", callback_data=f"obf:b:{token}"),
+        ]])
+
+    def _feedback_markup_from_metadata(
+        self,
+        metadata: Optional[Dict[str, Any]],
+        *,
+        enabled: bool = True,
+    ) -> Any:
+        if not enabled or not metadata:
+            return None
+        context = metadata.get("open_brain_feedback")
+        if not isinstance(context, dict):
+            return None
+        token = self._register_feedback_context(context)
+        return self._build_feedback_keyboard(token)
+
+    def stage_open_brain_feedback(
+        self,
+        session_key: str,
+        context: dict[str, Any],
+        *,
+        generation: int | None = None,
+    ) -> None:
+        if not session_key or not isinstance(context, dict):
+            return
+        if generation is None:
+            self._staged_feedback[session_key] = context
+        else:
+            self._staged_feedback[session_key] = (int(generation), context)
+
+    def pop_staged_open_brain_feedback(
+        self,
+        session_key: str,
+        *,
+        generation: int | None = None,
+    ) -> dict[str, Any] | None:
+        if not session_key:
+            return None
+        entry = self._staged_feedback.get(session_key)
+        if entry is None:
+            return None
+        if isinstance(entry, tuple) and len(entry) == 2:
+            entry_generation, context = entry
+            if generation is not None and int(entry_generation) != int(generation):
+                return None
+            self._staged_feedback.pop(session_key, None)
+            return context if isinstance(context, dict) else None
+        if generation is not None:
+            return None
+        self._staged_feedback.pop(session_key, None)
+        return entry if isinstance(entry, dict) else None
+
+    async def attach_open_brain_feedback(
+        self,
+        chat_id: str,
+        message_id: str,
+        context: dict[str, Any],
+    ) -> bool:
+        if not self._bot or not chat_id or not message_id or not isinstance(context, dict):
+            return False
+        try:
+            token = self._register_feedback_context(context)
+            await self._bot.edit_message_reply_markup(
+                chat_id=int(chat_id),
+                message_id=int(message_id),
+                reply_markup=self._build_feedback_keyboard(token),
+            )
+            return True
+        except Exception as exc:
+            logger.debug("[%s] Failed to attach Open Brain feedback buttons: %s", self.name, exc)
+            return False
 
     @classmethod
     def _metadata_thread_id(cls, metadata: Optional[Dict[str, Any]]) -> Optional[str]:
@@ -2430,6 +2523,10 @@ class TelegramAdapter(BasePlatformAdapter):
                     thread_kwargs = dict(thread_kwargs)
                     thread_kwargs["message_thread_id"] = None
                 effective_thread_id = thread_kwargs.get("message_thread_id")
+                reply_markup = self._feedback_markup_from_metadata(
+                    metadata,
+                    enabled=i == len(chunks) - 1,
+                )
 
                 msg = None
                 for _send_attempt in range(3):
@@ -2442,6 +2539,7 @@ class TelegramAdapter(BasePlatformAdapter):
                                 parse_mode=ParseMode.MARKDOWN_V2,
                                 reply_to_message_id=reply_to_id,
                                 **thread_kwargs,
+                                reply_markup=reply_markup,
                                 **self._link_preview_kwargs(),
                                 **self._notification_kwargs(metadata),
                             )
@@ -2456,6 +2554,7 @@ class TelegramAdapter(BasePlatformAdapter):
                                     parse_mode=None,
                                     reply_to_message_id=reply_to_id,
                                     **thread_kwargs,
+                                    reply_markup=reply_markup,
                                     **self._link_preview_kwargs(),
                                     **self._notification_kwargs(metadata),
                                 )
@@ -2699,13 +2798,17 @@ class TelegramAdapter(BasePlatformAdapter):
                 return SendResult(success=True, message_id=message_id)
 
             formatted = self.format_message(content)
+            reply_markup = self._feedback_markup_from_metadata(metadata)
+            edit_kwargs = {
+                "chat_id": int(chat_id),
+                "message_id": int(message_id),
+                "text": formatted,
+                "parse_mode": ParseMode.MARKDOWN_V2,
+            }
+            if reply_markup is not None:
+                edit_kwargs["reply_markup"] = reply_markup
             try:
-                await self._bot.edit_message_text(
-                    chat_id=int(chat_id),
-                    message_id=int(message_id),
-                    text=formatted,
-                    parse_mode=ParseMode.MARKDOWN_V2,
-                )
+                await self._bot.edit_message_text(**edit_kwargs)
             except Exception as fmt_err:
                 # "Message is not modified" is a no-op, not an error
                 if "not modified" in str(fmt_err).lower():
@@ -2717,11 +2820,14 @@ class TelegramAdapter(BasePlatformAdapter):
                     fmt_err,
                 )
                 _plain = _strip_mdv2(content) if content else content
-                await self._bot.edit_message_text(
-                    chat_id=int(chat_id),
-                    message_id=int(message_id),
-                    text=_plain,
-                )
+                plain_kwargs = {
+                    "chat_id": int(chat_id),
+                    "message_id": int(message_id),
+                    "text": _plain,
+                }
+                if reply_markup is not None:
+                    plain_kwargs["reply_markup"] = reply_markup
+                await self._bot.edit_message_text(**plain_kwargs)
             return SendResult(success=True, message_id=message_id)
         except Exception as e:
             err_str = str(e).lower()
@@ -2757,6 +2863,7 @@ class TelegramAdapter(BasePlatformAdapter):
                         chat_id=int(chat_id),
                         message_id=int(message_id),
                         text=content,
+                        reply_markup=reply_markup,
                     )
                     return SendResult(success=True, message_id=message_id)
                 except Exception as retry_err:
@@ -4181,6 +4288,91 @@ class TelegramAdapter(BasePlatformAdapter):
                         "Telegram clarify button: resolve_gateway_clarify returned False (id=%s)",
                         clarify_id,
                     )
+            return
+
+        # --- Open Brain feedback callbacks (obf:verdict:token) ---
+        if data.startswith("obf:"):
+            parts = data.split(":", 2)
+            if len(parts) != 3:
+                await query.answer(text="Invalid feedback data.")
+                return
+
+            verdict_code = parts[1]
+            token = parts[2]
+            caller_id = str(getattr(query.from_user, "id", ""))
+            if not self._is_callback_user_authorized(
+                caller_id,
+                chat_id=query_chat_id,
+                chat_type=str(query_chat_type) if query_chat_type is not None else None,
+                thread_id=str(query_thread_id) if query_thread_id is not None else None,
+                user_name=query_user_name,
+            ):
+                await query.answer(text="⛔ You are not authorized to rate responses.")
+                return
+
+            context = self._feedback_context(token)
+            if not context:
+                await query.answer(text="This feedback prompt expired.")
+                return
+
+            verdict = "good" if verdict_code == "g" else "bad" if verdict_code == "b" else None
+            if verdict is None:
+                await query.answer(text="Unknown feedback choice.")
+                return
+
+            try:
+                await record_query_feedback(
+                    query_id=str(context.get("query_id") or ""),
+                    query_text=str(context.get("query_text") or ""),
+                    verdict=verdict,
+                    source=str(context.get("source") or "hermes"),
+                    result_kind=context.get("result_kind"),
+                    result_id=context.get("result_id"),
+                    response_verdict=context.get("response_verdict"),
+                )
+            except Exception as exc:
+                logger.warning("[%s] Failed to record Open Brain feedback: %s", self.name, exc)
+                await query.answer(text="⚠️ Couldn't save feedback.")
+                return
+
+            try:
+                await query.edit_message_reply_markup(reply_markup=None)
+            except Exception:
+                pass
+            await query.answer(text="Logged 👍" if verdict == "good" else "Logged 👎")
+            return
+
+        # --- Open Brain proactive feedback callbacks (prx:a|d:surface_id) ---
+        if data.startswith("prx:"):
+            parts = data.split(":", 2)
+            if len(parts) != 3:
+                await query.answer(text="Invalid proactive feedback data.")
+                return
+
+            action = parts[1]
+            surface_id = parts[2]
+            caller_id = str(getattr(query.from_user, "id", ""))
+            if not self._is_callback_user_authorized(caller_id):
+                await query.answer(text="⛔ You are not authorized to rate proactive surfaces.")
+                return
+
+            status = "acted_on" if action == "a" else "dismissed" if action == "d" else None
+            if status is None:
+                await query.answer(text="Unknown proactive feedback choice.")
+                return
+
+            try:
+                await record_proactive_feedback(surface_id=surface_id, status=status)
+            except Exception as exc:
+                logger.warning("[%s] Failed to record Open Brain proactive feedback: %s", self.name, exc)
+                await query.answer(text="⚠️ Couldn't save feedback.")
+                return
+
+            try:
+                await query.edit_message_reply_markup(reply_markup=None)
+            except Exception:
+                pass
+            await query.answer(text="Marked useful" if status == "acted_on" else "Dismissed")
             return
 
         # --- Update prompt callbacks ---
