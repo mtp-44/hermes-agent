@@ -1074,17 +1074,27 @@ _SLACK_RESERVED_COMMANDS = frozenset({
 _SLACK_PRIORITY_ALIASES = ("btw", "bg")
 
 # Canonical commands intentionally NOT given a native Slack slash slot. Slack
-# caps apps at 50 slash commands and the registry is at that ceiling; rather
+# caps apps at 50 slash commands and the registry is past that ceiling; rather
 # than let the clamp silently drop whichever command sorts last (and break
-# Telegram parity), we explicitly route a few low-frequency commands through
+# Telegram parity), we explicitly route lower-frequency commands through
 # ``/hermes <command>`` on Slack only. They remain native on every other
-# surface (CLI, TUI, Telegram, Discord). Keep this list TIGHT and intentional —
-# the telegram-parity test reads it so an entry here is a deliberate
+# surface (CLI, TUI, Telegram, Discord). Keep this list intentional — the
+# telegram-parity test reads it so an entry here is a deliberate
 # "Slack-via-/hermes" decision, not a silent clamp.
-#   - credits: the billing/top-up surface; reached via /hermes credits on Slack.
-#   - billing: the terminal-billing surface (buy/auto-reload/limit); /hermes billing.
-#   - debug: the log/report upload surface; reached via /hermes debug on Slack.
-_SLACK_VIA_HERMES_ONLY = frozenset({"credits", "billing", "debug"})
+_SLACK_VIA_HERMES_ONLY = frozenset({
+    "billing",
+    "codex-runtime",
+    "commands",
+    "credits",
+    "debug",
+    "insights",
+    "platform",
+    "reload-skills",
+    "restart",
+    "update",
+    "usage",
+    "version",
+})
 
 
 def _sanitize_slack_name(raw: str) -> str:

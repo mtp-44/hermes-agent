@@ -63,7 +63,7 @@ class _FakeGateway:
     async def _drain_active_agents(self, timeout):
         return {}, False
 
-    def _finalize_shutdown_agents(self, agents):
+    async def _finalize_shutdown_agents(self, agents):
         for agent in agents.values():
             self._cleanup_agent_resources(agent)
 

@@ -2799,14 +2799,16 @@ class TelegramAdapter(BasePlatformAdapter):
 
             formatted = self.format_message(content)
             reply_markup = self._feedback_markup_from_metadata(metadata)
+            edit_kwargs = {
+                "chat_id": int(chat_id),
+                "message_id": int(message_id),
+                "text": formatted,
+                "parse_mode": ParseMode.MARKDOWN_V2,
+            }
+            if reply_markup is not None:
+                edit_kwargs["reply_markup"] = reply_markup
             try:
-                await self._bot.edit_message_text(
-                    chat_id=int(chat_id),
-                    message_id=int(message_id),
-                    text=formatted,
-                    parse_mode=ParseMode.MARKDOWN_V2,
-                    reply_markup=reply_markup,
-                )
+                await self._bot.edit_message_text(**edit_kwargs)
             except Exception as fmt_err:
                 # "Message is not modified" is a no-op, not an error
                 if "not modified" in str(fmt_err).lower():
@@ -2818,12 +2820,14 @@ class TelegramAdapter(BasePlatformAdapter):
                     fmt_err,
                 )
                 _plain = _strip_mdv2(content) if content else content
-                await self._bot.edit_message_text(
-                    chat_id=int(chat_id),
-                    message_id=int(message_id),
-                    text=_plain,
-                    reply_markup=reply_markup,
-                )
+                plain_kwargs = {
+                    "chat_id": int(chat_id),
+                    "message_id": int(message_id),
+                    "text": _plain,
+                }
+                if reply_markup is not None:
+                    plain_kwargs["reply_markup"] = reply_markup
+                await self._bot.edit_message_text(**plain_kwargs)
             return SendResult(success=True, message_id=message_id)
         except Exception as e:
             err_str = str(e).lower()
