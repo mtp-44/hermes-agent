@@ -1663,7 +1663,7 @@ def test_session_close_commits_memory_and_fires_finalize_hook(monkeypatch):
     calls = {"hooks": []}
 
     agent = types.SimpleNamespace(session_id="session-key")
-    agent.commit_memory_session = lambda history: calls.setdefault("history", history)
+    agent.commit_memory_session = lambda history, **_: calls.setdefault("history", history)
     server._sessions["sid"] = _session(
         agent=agent, history=[{"role": "user", "content": "hello"}]
     )

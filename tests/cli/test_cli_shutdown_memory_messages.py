@@ -41,7 +41,10 @@ def test_cleanup_forwards_session_messages(mock_invoke_hook):
         cli_mod._active_agent_ref = None
         cli_mod._cleanup_done = False
 
-    agent.shutdown_memory_provider.assert_called_once_with(transcript)
+    agent.shutdown_memory_provider.assert_called_once_with(
+        transcript,
+        boundary_reason="cli_close",
+    )
 
 
 @patch("hermes_cli.plugins.invoke_hook")
@@ -63,7 +66,10 @@ def test_cleanup_empty_list_still_forwarded(mock_invoke_hook):
         cli_mod._active_agent_ref = None
         cli_mod._cleanup_done = False
 
-    agent.shutdown_memory_provider.assert_called_once_with([])
+    agent.shutdown_memory_provider.assert_called_once_with(
+        [],
+        boundary_reason="cli_close",
+    )
 
 
 @patch("hermes_cli.plugins.invoke_hook")
@@ -87,7 +93,9 @@ def test_cleanup_non_list_attribute_falls_back_to_no_arg(mock_invoke_hook):
         cli_mod._active_agent_ref = None
         cli_mod._cleanup_done = False
 
-    agent.shutdown_memory_provider.assert_called_once_with()
+    agent.shutdown_memory_provider.assert_called_once_with(
+        boundary_reason="cli_close",
+    )
 
 
 @patch("hermes_cli.plugins.invoke_hook")
