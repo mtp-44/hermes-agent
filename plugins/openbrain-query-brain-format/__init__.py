@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from gateway.open_brain_feedback import capture_query_brain_feedback_candidate
+
 _QUERY_BRAIN_TOOL_NAME = "mcp_open_brain_query_brain"
 _DIRECT_REPLY_SCORE_THRESHOLD = 0.75
 
@@ -89,9 +91,27 @@ def _rewrite_result(result: str) -> str:
 
 
 def register(ctx) -> None:
+    def _post_tool_call(
+        tool_name: str,
+        args: dict[str, Any],
+        result: str,
+        session_id: str = "",
+        tool_call_id: str = "",
+        **_: Any,
+    ) -> None:
+        if tool_name != _QUERY_BRAIN_TOOL_NAME:
+            return
+        capture_query_brain_feedback_candidate(
+            session_id=session_id,
+            tool_call_id=tool_call_id,
+            args=args if isinstance(args, dict) else {},
+            result=result,
+        )
+
     def _transform_tool_result(tool_name: str, result: str, **_: Any) -> str | None:
         if tool_name != _QUERY_BRAIN_TOOL_NAME:
             return None
         return _rewrite_result(result)
 
+    ctx.register_hook("post_tool_call", _post_tool_call)
     ctx.register_hook("transform_tool_result", _transform_tool_result)
