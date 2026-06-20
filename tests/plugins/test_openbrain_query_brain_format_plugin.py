@@ -88,8 +88,7 @@ def test_rewrite_result_leaves_normal_results_unchanged():
     assert rewritten == original
 
 
-def test_register_adds_transform_hook():
-    plugin = _load_plugin_module()
+def _register_and_capture(plugin):
     captured: list[tuple[str, object]] = []
 
     class DummyCtx:
@@ -97,6 +96,56 @@ def test_register_adds_transform_hook():
             captured.append((hook_name, callback))
 
     plugin.register(DummyCtx())
+    return captured
 
-    assert len(captured) == 1
-    assert captured[0][0] == "transform_tool_result"
+
+def test_register_adds_post_tool_call_and_transform_hooks():
+    plugin = _load_plugin_module()
+
+    captured = _register_and_capture(plugin)
+
+    assert [name for name, _ in captured] == ["post_tool_call", "transform_tool_result"]
+
+
+def test_post_tool_call_captures_query_brain_candidate(monkeypatch):
+    plugin = _load_plugin_module()
+    calls: list[str] = []
+    monkeypatch.setattr(
+        plugin, "capture_query_brain_feedback_candidate", lambda **_: calls.append("query")
+    )
+    monkeypatch.setattr(
+        plugin, "capture_analyze_brain_feedback_candidate", lambda **_: calls.append("analyze")
+    )
+
+    post_tool_call = dict(_register_and_capture(plugin))["post_tool_call"]
+    post_tool_call(
+        tool_name="mcp_open_brain_query_brain",
+        args={"query": "x"},
+        result="{}",
+        session_id="s",
+        tool_call_id="t",
+    )
+
+    assert calls == ["query"]
+
+
+def test_post_tool_call_captures_analyze_brain_candidate(monkeypatch):
+    plugin = _load_plugin_module()
+    calls: list[str] = []
+    monkeypatch.setattr(
+        plugin, "capture_query_brain_feedback_candidate", lambda **_: calls.append("query")
+    )
+    monkeypatch.setattr(
+        plugin, "capture_analyze_brain_feedback_candidate", lambda **_: calls.append("analyze")
+    )
+
+    post_tool_call = dict(_register_and_capture(plugin))["post_tool_call"]
+    post_tool_call(
+        tool_name="mcp_open_brain_analyze_brain_query",
+        args={"question": "x"},
+        result="{}",
+        session_id="s",
+        tool_call_id="t",
+    )
+
+    assert calls == ["analyze"]
