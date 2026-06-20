@@ -22,6 +22,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+import psutil
+
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parent
@@ -556,12 +558,12 @@ class HermesUpdateGuard:
             self.add("runtime-gateway-pid", "fail", "gateway pid is empty")
             return
         try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
-            self.add("runtime-gateway-pid", "fail", f"gateway pid {pid} is not running")
+            running = psutil.pid_exists(pid)
+        except Exception as exc:  # psutil should not raise here, but stay boring
+            self.add("runtime-gateway-pid", "warn", f"could not check gateway pid {pid}: {exc}", severity="warn")
             return
-        except PermissionError:
-            self.add("runtime-gateway-pid", "warn", f"gateway pid {pid} exists but current user cannot signal it", severity="warn")
+        if not running:
+            self.add("runtime-gateway-pid", "fail", f"gateway pid {pid} is not running")
             return
         self.add("runtime-gateway-pid", "pass", f"gateway running as pid {pid}")
 
