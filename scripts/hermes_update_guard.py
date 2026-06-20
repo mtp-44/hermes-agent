@@ -72,13 +72,35 @@ LOCAL_DELTA_PATHS = (
     "launchd/com.mh.ollama.plist",
 )
 
-LOCAL_DELTA_PATTERNS = (
+# Each entry is (relative_path, required). ``required`` is either a single
+# substring or a tuple of substrings that must *all* be present in the file.
+# These are "must contain substring" assertions, not symbol-resolution checks:
+# they exist to catch upstream replays that drop a local Hermes/Open Brain
+# delta. Asserting a wiring call (not just the symbol it references) is the
+# point — see the query-feedback entry below.
+LOCAL_DELTA_PATTERNS: tuple[tuple[str, str | tuple[str, ...]], ...] = (
     ("agent/session_capture.py", "SessionCaptureContext"),
     ("plugins/memory/openbrain/__init__.py", "OpenBrainMemoryProvider"),
-    ("plugins/openbrain-query-brain-format/__init__.py", "mcp_open_brain_query_brain"),
+    # The 👍/👎 query-feedback buttons only fire when the producer hook is
+    # actually wired. A 2026-06 upstream replay (1fc7e29a4) kept these symbols
+    # *defined* but dropped the register_hook("post_tool_call", ...) call, so
+    # the feature went dead while a symbol-presence check still passed. Assert
+    # both the hook registration and the candidate-capture call, not just that
+    # the formatter symbol exists.
+    (
+        "plugins/openbrain-query-brain-format/__init__.py",
+        (
+            "mcp_open_brain_query_brain",
+            'register_hook("post_tool_call"',
+            "capture_query_brain_feedback_candidate(",
+        ),
+    ),
     ("gateway/open_brain.py", "record_query_feedback"),
     ("gateway/open_brain_feedback.py", "capture_query_brain_feedback_candidate"),
     ("gateway/platforms/telegram.py", "record_query_feedback"),
+    # Consumer side of the same feature: the gateway must still pop the
+    # feedback candidate that the producer hook captured.
+    ("gateway/run.py", "pop_feedback_candidate"),
     ("scripts/hermes_health_monitor.py", "_check_openbrain"),
 )
 
@@ -423,14 +445,18 @@ class HermesUpdateGuard:
             self.add("local-delta-files", "pass", f"{len(LOCAL_DELTA_PATHS)} local delta files present")
 
         missing_patterns: list[str] = []
-        for rel_path, pattern in LOCAL_DELTA_PATTERNS:
+        marker_count = 0
+        for rel_path, required in LOCAL_DELTA_PATTERNS:
             text = _read_text(REPO_ROOT / rel_path)
-            if pattern not in text:
-                missing_patterns.append(f"{rel_path}:{pattern}")
+            needles = (required,) if isinstance(required, str) else tuple(required)
+            for needle in needles:
+                marker_count += 1
+                if needle not in text:
+                    missing_patterns.append(f"{rel_path}:{needle}")
         if missing_patterns:
             self.add("local-delta-patterns", "fail", f"expected integration markers missing: {', '.join(missing_patterns)}")
         else:
-            self.add("local-delta-patterns", "pass", f"{len(LOCAL_DELTA_PATTERNS)} integration markers present")
+            self.add("local-delta-patterns", "pass", f"{marker_count} integration markers present")
 
     def _check_config(self) -> None:
         config_path = self.hermes_home / "config.yaml"
