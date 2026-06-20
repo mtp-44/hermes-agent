@@ -1,5 +1,11 @@
 # Cleanup After Upstream Sync - 2026-06-19
 
+> **Disposable artifact.** This is a point-in-time cleanup checklist for one
+> specific sync, not standing guidance. The SHAs, branch names, and worktrees
+> below are only valid for this update. Delete this file once every item has
+> been executed. Standing update process lives in
+> `docs/hermes-update-runbook.md`.
+
 Current safe point:
 
 - `main` is at merge commit `7c074cb3b` from PR #1.

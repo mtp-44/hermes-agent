@@ -51,7 +51,9 @@ cd /Users/mh/ai/agents/hermes-agent
 /Users/mh/ai/agents/hermes-agent/.venv/bin/python scripts/hermes_update_guard.py --post
 ```
 
-When network access is available, add `--live-smoke`:
+This box runs 24/7 with network access, so `--live-smoke` is the default
+post-update expectation. Only drop it when running offline or in a sandbox that
+cannot reach Open Brain:
 
 ```bash
 /Users/mh/ai/agents/hermes-agent/.venv/bin/python scripts/hermes_update_guard.py --post --live-smoke
@@ -68,14 +70,14 @@ For machine-readable output:
 1. Run the guard with `--pre`.
 2. Confirm `main` is the production branch and matches `origin/main`.
 3. Confirm the working tree is clean.
-4. Confirm local Hermes/Open Brain integration files are present:
-   - `agent/session_capture.py`
-   - `plugins/memory/openbrain/__init__.py`
-   - `plugins/openbrain-query-brain-format/__init__.py`
-   - `gateway/open_brain.py`
-   - `gateway/open_brain_feedback.py`
-   - Telegram feedback and session-boundary hooks
-   - Hermes health monitor and LaunchAgents
+4. Confirm the local Hermes/Open Brain integration surface is intact. The guard
+   checks this for you: `LOCAL_DELTA_PATHS` (files present) and
+   `LOCAL_DELTA_PATTERNS` (the load-bearing symbol still lives in each file) in
+   `scripts/hermes_update_guard.py` are the canonical list. Edit the script, not
+   this doc, when the delta surface changes. At a high level it covers Open Brain
+   routing/config and memory provider, the query_brain formatter plugin, session
+   and Telegram feedback hooks, `/ob` capture, the health monitor, and the
+   LaunchAgents.
 5. Confirm `~/.hermes/config.yaml` loads and `mcp_servers.open_brain` expands
    its auth header. Never print secret values.
 6. Confirm SSL/CA inputs are valid. A partial venv update or stale CA env var
@@ -110,6 +112,62 @@ git push origin <tag-name>
 - Keep the Open Brain hosted MCP as canonical. Do not point Hermes at the local
   experimental Open Brain MCP prototype.
 
+## Update Steps
+
+The happy path. Do not skip the guard at the start or the smoke at the end.
+
+Remotes:
+
+- `origin` → `mtp-44/hermes-agent` — your fork, the production push target.
+- `reference` → `NousResearch/hermes-agent` — upstream mirror, push disabled.
+  This is where new upstream work comes from.
+
+1. Run the pre-update guard and the pre-update checklist above. Do not proceed
+   past a blocking failure.
+2. Fetch upstream and your fork:
+
+   ```bash
+   git fetch reference
+   git fetch origin
+   ```
+
+3. Create a dated sync branch off production and bring upstream in there, never
+   directly on `main`:
+
+   ```bash
+   git switch main
+   git switch -c sync/unified-retrieval-main-$(date +%Y-%m-%d)
+   git merge reference/main   # or cherry-pick/rebase a specific upstream range
+   ```
+
+4. Resolve conflicts per the Update Rules above. For every load-bearing local
+   delta, confirm the logic survived where upstream moved it — do not blanket
+   "keep ours."
+5. Reinstall dependencies into the project venv (lockfile-driven):
+
+   ```bash
+   uv sync
+   ```
+
+   If provider calls fail afterward with SSL/CA errors, repair per
+   `docs/rca-ssl-cacert-post-git-pull.md`:
+
+   ```bash
+   /Users/mh/ai/agents/hermes-agent/.venv/bin/python -m pip install --force-reinstall certifi openai httpx
+   ```
+
+6. Open a PR from the sync branch into `main` and let CI pass before merging
+   (this mirrors PR #1). Merge into `main` only on green.
+7. Tag the pre-restart production state if you have not already (see
+   Pre-Update Checklist step 7).
+8. Restart the gateway from the freshly merged `main`:
+
+   ```bash
+   HERMES_HOME=/Users/mh/.hermes hermes gateway restart
+   ```
+
+9. Run the Post-Update Smoke below.
+
 ## Post-Update Smoke
 
 After dependencies, merge/replay, and restart:
@@ -122,8 +180,10 @@ After dependencies, merge/replay, and restart:
    - `openbrain`
    - `disk`
    - `memory`
-3. Confirm Open Brain exposes at least 30 tools. Current expected live count is
-   32 from the gateway health monitor.
+3. Confirm Open Brain exposes at least the tool floor
+   (`EXPECTED_OPENBRAIN_TOOL_FLOOR` in the guard, currently 30). The live count
+   is expected to be at or above the floor and to grow over time, so a higher
+   number is fine — only a count below the floor is a regression.
 4. Send a real Telegram smoke message and confirm the gateway logs an inbound
    message plus a response.
 5. Ask a recall question that should call `mcp_open_brain_query_brain`.
@@ -162,6 +222,19 @@ for at least one day:
 - delete stale `sync/*` update branches
 - delete interrupted `claude/*` worktrees/branches after confirming no session
   needs them
-- keep rollback tags and `backup/pre-pull-main-2026-05-01`
+- keep the most recent known-good `archive/pre-hermes-update-*` tag and
+  `backup/pre-pull-main-2026-05-01`; prune older `archive/pre-hermes-update-*`
+  tags once a newer update has proven stable, so they do not accumulate:
+
+  ```bash
+  git tag --list 'archive/pre-hermes-update-*' --sort=-creatordate
+  # keep the newest, delete the rest locally and on origin as needed:
+  # git tag -d <old-tag>
+  # git push origin --delete <old-tag>
+  ```
+
+Per-sync cleanup checklists (with that update's specific SHAs, branches, and
+worktrees) go in `docs/cleanup/<date>-<slug>.md` and are deleted once executed.
+See `docs/cleanup/2026-06-19-after-upstream-sync.md` for the template.
 
 Cleanup is not part of the update itself. It is a separate, lower-risk task.
