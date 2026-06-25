@@ -79,7 +79,27 @@ class GatewayBoundaryCapturer:
             from plugins.memory import load_memory_provider
 
             provider = load_memory_provider(provider_name)
-            if provider is None or not provider.is_available():
+            if provider is None:
+                return None
+            # Initialize once before the availability check: is_available() is
+            # config-dependent and a provider may only resolve its credentials
+            # (e.g. from $HERMES_HOME/.env) once initialize() has run with the
+            # hermes_home. Checking availability first would wrongly disable a
+            # correctly-configured provider whose key lives in that file.
+            try:
+                provider.initialize(
+                    "",
+                    platform="",
+                    hermes_home=str(get_hermes_home()),
+                    agent_context="primary",
+                )
+            except Exception as exc:
+                logger.debug(
+                    "Gateway boundary capture: provider '%s' pre-init failed: %s",
+                    provider_name,
+                    exc,
+                )
+            if not provider.is_available():
                 logger.info(
                     "Gateway boundary capture disabled: provider '%s' unavailable",
                     provider_name,

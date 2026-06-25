@@ -23,6 +23,9 @@ class _FakeProvider:
     def is_available(self):
         return True
 
+    def get_tool_schemas(self):
+        return []
+
     def initialize(self, session_id, **kwargs):
         self.initialized.append((session_id, kwargs))
 
@@ -98,6 +101,39 @@ def test_private_forces_ineligible():
     _messages, ctx = provider.calls[0]
     assert ctx["eligible"] is False
     assert ctx["capture_skip_reason"] == "private_mode"
+
+
+def test_binding_initializes_before_availability_check(monkeypatch):
+    """Regression: a provider whose key only resolves after initialize() (e.g.
+    from $HERMES_HOME/.env) must still bind. Checking is_available() before
+    initialize() would wrongly disable a correctly-configured provider.
+    """
+
+    class _LateProvider(_FakeProvider):
+        def __init__(self):
+            super().__init__()
+            self._ready = False
+
+        def initialize(self, session_id, **kwargs):
+            super().initialize(session_id, **kwargs)
+            if kwargs.get("hermes_home"):
+                self._ready = True  # key resolves only once hermes_home is known
+
+        def is_available(self):
+            return self._ready
+
+    provider = _LateProvider()
+    monkeypatch.setattr(
+        "plugins.memory.load_memory_provider", lambda name: provider, raising=False
+    )
+    cap = GatewayBoundaryCapturer(provider_name="late")
+
+    ok = cap.capture(
+        session_id="s1", platform="cli", messages=_MESSAGES, boundary_reason="reset",
+    )
+
+    assert ok is True
+    assert provider.calls, "provider.on_session_end should have been invoked"
 
 
 def test_empty_messages_skip():
