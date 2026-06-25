@@ -116,7 +116,11 @@ git push origin <tag-name>
   the `plugins/openbrain-commands/` standalone plugin, which loads only when
   enabled in `~/.hermes/config.yaml`. If the entry is missing after an update,
   those four commands silently disappear. The post-update smoke must confirm
-  `/brief` still responds.
+  `/brief` still responds. Automatable pre-restart rehearsal (catches the
+  missing-entry case before it reaches the live gateway):
+  `.venv/bin/python -m pytest tests/plugins/test_openbrain_commands_plugin.py`
+  exercises the real `PluginManager` and asserts the four commands load only
+  when the plugin is enabled.
 - Keep the Open Brain hosted MCP as canonical. Do not point Hermes at the local
   experimental Open Brain MCP prototype.
 

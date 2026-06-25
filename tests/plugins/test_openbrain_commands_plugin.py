@@ -100,3 +100,43 @@ async def test_finance_check_clean_and_anomalies():
         out = await obc._handle_finance_check("")
         assert "💰 **Finance check**" in out and "Travel: +200%" in out
         assert "+50%" in out
+
+
+# --- Real-manager load rehearsal (Phase 5c.4) -------------------------------
+# The tests above use a fake ctx. These exercise the *actual* PluginManager
+# discovery + standalone-gating path, encoding the deploy invariant that broke
+# on 2026-06-25: this is a ``standalone`` plugin, so removing the core dispatch
+# branches (5c.3) means the four commands exist ONLY when ``openbrain-commands``
+# is in ``plugins.enabled``. A restart with a config missing that entry silently
+# drops /brief /digest /stale /finance-check.
+
+_OB_COMMANDS = {"brief", "digest", "stale", "finance-check"}
+
+
+def _load_manager_with_enabled(enabled):
+    from hermes_cli.plugins import PluginManager
+
+    mgr = PluginManager()
+    with patch("hermes_cli.plugins._get_enabled_plugins", return_value=enabled):
+        mgr.discover_and_load(force=True)
+    return mgr
+
+
+def test_manager_loads_commands_when_enabled():
+    # The bundled standalone plugin must register all four commands once it is
+    # listed in plugins.enabled — the exact thing the live config now does.
+    mgr = _load_manager_with_enabled({"openbrain-commands"})
+    registered = set(mgr._plugin_commands)
+    assert _OB_COMMANDS <= registered, (
+        f"missing {_OB_COMMANDS - registered}; got {sorted(registered)}"
+    )
+    for name in _OB_COMMANDS:
+        assert mgr._plugin_commands[name].get("plugin") == "openbrain-commands"
+
+
+def test_manager_skips_commands_when_not_enabled():
+    # Regression guard: a config that does NOT enable the plugin must leave the
+    # commands unregistered (so this failure mode is caught in CI, not on a live
+    # gateway restart).
+    mgr = _load_manager_with_enabled(set())
+    assert _OB_COMMANDS.isdisjoint(set(mgr._plugin_commands))
