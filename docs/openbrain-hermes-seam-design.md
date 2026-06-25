@@ -67,36 +67,49 @@ evicted still drives the configured memory provider's `on_session_end` with full
 messages + boundary metadata + privacy flags, with no `open_brain` symbol in any
 modified core file.
 
-## Seam 2 — External slash-command registration
+## Seam 2 — External slash-command registration — **NO CORE GAP (corrected 2026-06-25)**
 
-**Problem.** `command:*` + `emit_collect` already lets a hook return a reply, but
-(a) commands must be *registered* to appear in the help/registry and be parsed,
-and that list is hardcoded in `hermes_cli/commands.py`; (b) the fork's eight
-handlers are hardcoded `if canonical == "ob" …` blocks in `run.py`'s dispatch.
+**Original premise (wrong).** The 5c.1 inventory assumed external command
+registration was a missing core seam.
 
-**Generic seam (Open-Brain-free).** A registration API for external `CommandDef`s:
+**Reality after reading the code.** Upstream **already has a complete external
+slash-command system**, and it is richer than the `command:*`/HOOK.yaml path:
 
-- An entry point (hook config or plugin manifest) where an adapter contributes
-  `CommandDef(name, description, category, gateway_only=…, aliases=…)` rows that
-  merge into the existing registry used by `/commands` and help.
-- Dispatch for a registered-but-not-core command routes through the existing
-  `emit_collect("command:<name>", ctx)` and uses the first non-None returned
-  string as the reply (the mechanism `run.py:7983` already uses) — instead of a
-  hardcoded `if` branch.
-- `ctx` carries the generic command context already assembled at that site
-  (platform, user_id, chat_id, thread_id, session_id, args).
+- `hermes_cli.plugins.PluginContext.register_command(name, handler,
+  description, args_hint)` (`hermes_cli/plugins.py:415`) registers an in-session
+  slash command whose `handler(raw_args) -> str | None` returns the reply
+  directly. Stored in the plugin manager's `_plugin_commands`.
+- `is_gateway_known_command()` (`hermes_cli/commands.py`) already returns True
+  for plugin-registered commands via `_iter_plugin_command_entries()`, so they
+  receive the full `command:<name>` lifecycle, slash-access gating, and menu
+  surfacing (Telegram/Slack/Discord) — identical to built-ins.
+- The gateway **already dispatches them**: `gateway/run.py:8351` does
+  `get_plugin_command_handler(name)` → `handler(user_args)` → awaits if async →
+  `return str(result)` as the reply.
+- The `command:<name>` `emit_collect` decision path (`run.py:7983`/`8017`) is a
+  *separate, complementary* hook for deny/handled/rewrite policy.
 
-**Commit shape.** Extend the command registry to accept externally-registered
-`CommandDef`s and the gateway dispatch to fall through to `emit_collect` for them.
-Generic; the words "ob"/"note"/"brief" never appear in core.
+**Conclusion.** There is **no generic core change to make for seam 2.** What
+remains is entirely Phase 5c.3 adapter work + 5c.5 deletion:
 
-**What this deletes later.** The eight `CommandDef` additions in
-`hermes_cli/commands.py` and the eight hardcoded dispatch branches in `run.py`
-move into an adapter `command:*` hook handler that returns replies.
+- Register `/ob /note /brief /digest /stale /nosave /private /capture-status` in
+  an Open Brain plugin's `register(ctx)` via `ctx.register_command(...)`, each
+  with a handler that returns the reply (the bodies move out of `run.py` /
+  `gateway/slash_commands.py` largely unchanged).
+- Delete the eight `CommandDef` rows from `hermes_cli/commands.py` and the eight
+  hardcoded `if canonical == …` branches from the gateway dispatch.
 
-**Acceptance.** A registered external command (test fixture, generically named)
-appears in `/commands`, is parsed, dispatches through `emit_collect`, and its
-returned string is delivered as the reply — with no Open Brain reference in core.
+> **Supersedes the 2026-06-25 "extend HOOK.yaml" decision for seam 2.** That
+> decision presumed a core registration gap that does not exist. The plugin
+> system already satisfies "one adapter package owns its commands + handlers."
+> HOOK.yaml's only true limitation (it can declare `events:` but not
+> `commands:`) is moot here because the plugin system — already the home of
+> `plugins/memory/openbrain` and `plugins/openbrain-query-brain-format` — is the
+> natural and complete vehicle.
+
+**Acceptance (now a 5c.3 acceptance).** The eight commands work from an Open
+Brain plugin with no `CommandDef`/dispatch edits in `hermes_cli/commands.py` or
+the gateway core; deleting the plugin removes them cleanly.
 
 ## Seam 3 — Platform message decoration + callback/action handling
 
