@@ -179,3 +179,58 @@ the regression net and graduate into the 5c.4 conformance smoke.
    registry (current fork behavior, 200-entry LRU) as the generic default, or make
    persistence pluggable? (Recommend: generic in-memory default, pluggable later.)
    Decide at seam-3 implementation time.
+
+---
+
+## Phase 5c.3 adapter-relocation feasibility (added 2026-06-25)
+
+After the three generic-core seams landed, reading the plugin/command system
+surfaced two constraints that shape how Open Brain behavior can move into an
+adapter. Recorded here so 5c.3 is executed with eyes open.
+
+### Constraint 1 — plugin command handlers get only `raw_args`
+
+`PluginContext.register_command(name, handler, …)` dispatches `handler(raw_args)
+-> str | None` (`gateway/run.py:8351`). That is enough for the **read-only** Open
+Brain commands, which need only the query string and a `gateway.open_brain` call:
+
+- `/brief`, `/digest`, `/stale`, `/finance-check` — cleanly movable.
+
+It is **not** enough for the **session-aware** commands:
+
+- `/ob` (capture the conversation suffix) needs the session transcript.
+- `/note` needs `event.source` (capture metadata) + the session's `capture_private`
+  flag.
+
+Options for the session-aware pair: (a) leave them as documented gateway glue;
+(b) add a small generic upstream seam giving plugin command handlers a richer
+context object (`event`/source/session), which also benefits any plugin. This is
+a genuine follow-on seam, not mechanical relocation.
+
+### Constraint 2 — standalone plugins are opt-in via `plugins.enabled`
+
+`PluginManifest.kind` defaults to `standalone`, which loads **only when listed in
+`plugins.enabled`** in `config.yaml` (`hermes_cli/plugins.py:248`). `backend` and
+`platform` kinds auto-load; `standalone` does not. So moving commands into a new
+bundled plugin makes the gateway's `config.yaml` part of the adapter contract: if
+the `plugins.enabled` entry is missing on the live host (mini-mh), the migrated
+commands silently disappear. This must be coordinated with the deploy and covered
+by the 5c.4 update rehearsal.
+
+### Recommended 5c.3 sequencing
+
+1. Migrate the four read-only commands into a bundled `standalone` Open Brain
+   commands plugin; remove their `CommandDef`s + hardcoded dispatch branches from
+   core; add the `plugins.enabled` entry; verify on a fresh load. **Not deployed**
+   until the rehearsal confirms the commands survive a gateway restart.
+2. Migrate `obf:`/`prx:` feedback onto the seam-3 `actions` protocol
+   (`set_action_handler` + `metadata["actions"]`); then delete the bespoke
+   telegram feedback code + the `base.py` shim.
+3. Decide the session-aware command pair (`/ob`, `/note`): richer-context seam vs
+   retained core glue.
+4. Relocate `gateway/open_brain.py` / `open_brain_feedback.py` under the adapter
+   package and delete `save_session_summary`/`distill_session_transcript` (now
+   dead after seam 1).
+
+The consent commands `/nosave`, `/private`, `/capture-status` are **generic
+capture-consent controls, not Open Brain behavior** — they stay in core.
