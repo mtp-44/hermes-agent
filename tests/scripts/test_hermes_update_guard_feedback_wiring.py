@@ -27,6 +27,9 @@ from scripts.hermes_update_guard import (
 PLUGIN_REL = "plugins/openbrain-query-brain-format/__init__.py"
 HOOK_NEEDLE = 'register_hook("post_tool_call"'
 CAPTURE_NEEDLE = "capture_query_brain_feedback_candidate("
+DECORATOR_NEEDLE = "register_outbound_decorator("
+ACTION_HANDLER_NEEDLE = "register_action_handler("
+POP_NEEDLE = "pop_feedback_candidate("
 HOOK_LINE = 'ctx.register_hook("post_tool_call", _post_tool_call)'
 
 
@@ -44,11 +47,19 @@ def _delta_patterns_check(guard: HermesUpdateGuard):
 
 
 def test_patterns_assert_feedback_wiring_not_just_symbols():
-    """The producer hook and consumer pop must be required substrings."""
+    """The full feedback wiring (capture, produce, consume) must be required.
+
+    Since Phase 5c.3 step 2 the feature lives in the adapter plugin and rides
+    the generic message-action seam; assert each wiring call, plus the core
+    decorator consultation that lets the plugin attach its buttons.
+    """
     flat = {(rel, needle) for rel, req in LOCAL_DELTA_PATTERNS for needle in ((req,) if isinstance(req, str) else req)}
     assert (PLUGIN_REL, HOOK_NEEDLE) in flat
     assert (PLUGIN_REL, CAPTURE_NEEDLE) in flat
-    assert ("gateway/run.py", "pop_feedback_candidate") in flat
+    assert (PLUGIN_REL, DECORATOR_NEEDLE) in flat
+    assert (PLUGIN_REL, ACTION_HANDLER_NEEDLE) in flat
+    assert (PLUGIN_REL, POP_NEEDLE) in flat
+    assert ("gateway/run.py", "get_outbound_decorators") in flat
 
 
 def test_real_repo_passes_feedback_wiring_check():
@@ -88,15 +99,19 @@ def test_dropped_producer_hook_fails_loudly(tmp_path, monkeypatch):
 
 
 def test_dropped_consumer_pop_fails_loudly(tmp_path, monkeypatch):
-    """Simulate a replay that drops the gateway-side pop_feedback_candidate use."""
+    """Simulate a replay that drops the plugin-side pop_feedback_candidate use.
+
+    Post-migration the consumer wiring lives in the adapter plugin's outbound
+    decorator, not gateway/run.py."""
     _mirror_repo_deltas(tmp_path)
-    run_py = tmp_path / "gateway/run.py"
-    text = run_py.read_text(encoding="utf-8")
-    run_py.write_text(text.replace("pop_feedback_candidate", "pop_disabled_candidate"), encoding="utf-8")
+    plugin = tmp_path / PLUGIN_REL
+    text = plugin.read_text(encoding="utf-8")
+    assert POP_NEEDLE in text, "fixture assumption broke: pop call not found in real plugin"
+    plugin.write_text(text.replace(POP_NEEDLE, "pop_disabled_candidate("), encoding="utf-8")
 
     monkeypatch.setattr(guard_mod, "REPO_ROOT", tmp_path)
     guard = _make_guard()
     guard._check_local_delta_surface()
     check = _delta_patterns_check(guard)
     assert check.status == "fail"
-    assert "gateway/run.py:pop_feedback_candidate" in check.detail
+    assert f"{PLUGIN_REL}:{POP_NEEDLE}" in check.detail

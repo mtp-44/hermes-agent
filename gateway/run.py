@@ -17014,31 +17014,50 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # Check if we were interrupted OR have a queued message (/queue).
             result = result_holder[0]
             adapter = self.adapters.get(source.platform)
+            # Generic outbound-message decoration (Phase 5c seam 3): consult any
+            # plugin-registered decorators for interactive actions to attach to
+            # the final response, then stage them for the send/attach paths. The
+            # gateway is feature-neutral here — Open Brain query feedback is one
+            # such decorator, owned entirely by its adapter plugin.
+            _outbound_actions: list = []
             if source.platform == Platform.TELEGRAM and session_id and result and result.get("final_response"):
                 try:
-                    from gateway.open_brain_feedback import pop_feedback_candidate
-                    _feedback_context = pop_feedback_candidate(
-                        session_id,
-                        since=_turn_started_at,
-                    )
-                except Exception as _feedback_err:
-                    logger.debug("Open Brain feedback capture lookup failed: %s", _feedback_err)
-                    _feedback_context = None
-                if _feedback_context and adapter and hasattr(adapter, "stage_open_brain_feedback"):
+                    from hermes_cli.plugins import get_plugin_manager
+                    _decorators = get_plugin_manager().get_outbound_decorators()
+                except Exception as _deco_err:
+                    logger.debug("Outbound decorator lookup failed: %s", _deco_err)
+                    _decorators = []
+                if _decorators:
+                    _deco_ctx = {
+                        "session_id": session_id,
+                        "session_key": session_key or session_id,
+                        "platform": "telegram",
+                        "text": result.get("final_response"),
+                        "since": _turn_started_at,
+                        "generation": run_generation,
+                    }
+                    for _deco in _decorators:
+                        try:
+                            _res = _deco(_deco_ctx)
+                            if _res:
+                                _outbound_actions.extend(_res)
+                        except Exception as _deco_run_err:
+                            logger.debug("Outbound decorator failed: %s", _deco_run_err)
+                if _outbound_actions and adapter and hasattr(adapter, "stage_actions"):
                     try:
-                        adapter.stage_open_brain_feedback(
+                        adapter.stage_actions(
                             session_key or session_id,
-                            _feedback_context,
+                            _outbound_actions,
                             generation=run_generation,
                         )
                         if _status_thread_metadata is None:
                             _status_thread_metadata = {}
-                        _status_thread_metadata["open_brain_feedback"] = _feedback_context
+                        _status_thread_metadata["actions"] = _outbound_actions
                         _sc = stream_consumer_holder[0]
                         if _sc is not None:
                             _sc.metadata = _status_thread_metadata
-                    except Exception as _feedback_stage_err:
-                        logger.debug("Open Brain feedback staging failed: %s", _feedback_stage_err)
+                    except Exception as _stage_err:
+                        logger.debug("Outbound action staging failed: %s", _stage_err)
             
             # Get pending message from adapter.
             # Use session_key (not source.chat_id) to match adapter's storage keys.
@@ -17331,28 +17350,30 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         except asyncio.CancelledError:
                             pass
                 if (
-                    _feedback_context
+                    _outbound_actions
                     and source.platform == Platform.TELEGRAM
                     and _status_adapter
-                    and hasattr(_status_adapter, "attach_open_brain_feedback")
+                    and hasattr(_status_adapter, "attach_actions")
                 ):
                     _sc = stream_consumer_holder[0]
                     _streamed_message_id = getattr(_sc, "_message_id", None) if _sc else None
                     _streamed_sent = bool(_sc and getattr(_sc, "final_response_sent", False))
                     if _streamed_sent and _streamed_message_id:
                         try:
-                            if hasattr(_status_adapter, "pop_staged_open_brain_feedback"):
-                                _status_adapter.pop_staged_open_brain_feedback(
+                            # Consume the stage so the non-streamed send path
+                            # doesn't also render the buttons.
+                            if hasattr(_status_adapter, "pop_staged_actions"):
+                                _status_adapter.pop_staged_actions(
                                     session_key or session_id,
                                     generation=run_generation,
                                 )
-                            await _status_adapter.attach_open_brain_feedback(
+                            await _status_adapter.attach_actions(
                                 source.chat_id,
                                 _streamed_message_id,
-                                _feedback_context,
+                                _outbound_actions,
                             )
-                        except Exception as _feedback_attach_err:
-                            logger.debug("Open Brain feedback attach failed: %s", _feedback_attach_err)
+                        except Exception as _action_attach_err:
+                            logger.debug("Outbound action attach failed: %s", _action_attach_err)
             
             # Clean up tracking
             tracking_task.cancel()

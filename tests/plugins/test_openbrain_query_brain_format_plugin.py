@@ -149,3 +149,94 @@ def test_post_tool_call_captures_analyze_brain_candidate(monkeypatch):
     )
 
     assert calls == ["analyze"]
+
+
+# --- Query feedback via the generic message-action seam (Phase 5c.3 step 2) ---
+
+def test_decorate_outbound_skips_non_telegram_and_missing():
+    plugin = _load_plugin_module()
+    assert plugin._decorate_outbound({"platform": "slack", "session_id": "s"}) is None
+    assert plugin._decorate_outbound({"platform": "telegram", "session_id": ""}) is None
+
+
+def test_decorate_outbound_attaches_feedback_actions(monkeypatch):
+    plugin = _load_plugin_module()
+    candidate = {"query_id": "q1", "query_text": "hi", "source": "hermes"}
+    monkeypatch.setattr(plugin, "pop_feedback_candidate", lambda session_id, since=None: candidate)
+
+    actions = plugin._decorate_outbound(
+        {"platform": "telegram", "session_id": "s", "since": 1.0}
+    )
+    assert [a["action_id"] for a in actions] == ["obg", "obb"]
+    tok = actions[0]["token"]
+    assert actions[1]["token"] == tok
+    # Token resolves once to the candidate (one-shot).
+    assert plugin._resolve_feedback(tok) == candidate
+    assert plugin._resolve_feedback(tok) is None
+
+
+def test_decorate_outbound_none_when_no_candidate(monkeypatch):
+    plugin = _load_plugin_module()
+    monkeypatch.setattr(plugin, "pop_feedback_candidate", lambda session_id, since=None: None)
+    assert plugin._decorate_outbound({"platform": "telegram", "session_id": "s"}) is None
+
+
+@pytest.mark.asyncio
+async def test_handle_feedback_records_and_acks(monkeypatch):
+    plugin = _load_plugin_module()
+    import gateway.open_brain as ob
+
+    recorded = {}
+
+    async def _record(**kwargs):
+        recorded.update(kwargs)
+
+    monkeypatch.setattr(ob, "record_query_feedback", _record)
+
+    token = plugin._register_feedback(
+        {"query_id": "q9", "query_text": "ride?", "result_kind": "life_items",
+         "result_id": "r1", "response_verdict": "answer", "source": "hermes"}
+    )
+    msg = await plugin._handle_feedback("obg", token, {})
+    assert msg == "Logged 👍"
+    assert recorded["verdict"] == "good" and recorded["query_id"] == "q9"
+    # One-shot: a second press finds nothing.
+    assert await plugin._handle_feedback("obg", token, {}) == "This feedback prompt expired."
+
+
+@pytest.mark.asyncio
+async def test_handle_feedback_bad_verdict(monkeypatch):
+    plugin = _load_plugin_module()
+    import gateway.open_brain as ob
+    seen = {}
+    async def _record(**kwargs):
+        seen.update(kwargs)
+    monkeypatch.setattr(ob, "record_query_feedback", _record)
+    token = plugin._register_feedback({"query_id": "q", "query_text": "t", "source": "hermes"})
+    assert await plugin._handle_feedback("obb", token, {}) == "Logged 👎"
+    assert seen["verdict"] == "bad"
+
+
+def test_register_wires_decorator_and_action_handlers():
+    plugin = _load_plugin_module()
+
+    class RichCtx:
+        def __init__(self):
+            self.hooks = {}
+            self.decorators = []
+            self.action_handlers = {}
+
+        def register_hook(self, name, cb):
+            self.hooks[name] = cb
+
+        def register_outbound_decorator(self, cb):
+            self.decorators.append(cb)
+
+        def register_action_handler(self, action_id, cb):
+            self.action_handlers[action_id] = cb
+
+    ctx = RichCtx()
+    plugin.register(ctx)
+    assert ctx.decorators == [plugin._decorate_outbound]
+    assert set(ctx.action_handlers) == {"obg", "obb"}
+    assert ctx.action_handlers["obg"] is plugin._handle_feedback

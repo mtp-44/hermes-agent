@@ -81,6 +81,9 @@ def _adapter():
     a = object.__new__(TelegramAdapter)
     a.platform = Platform.TELEGRAM  # backs the read-only ``name`` property
     a._action_handler = None
+    # Action presses are authorized like other gated callbacks; default the
+    # dispatch tests to an authorized caller (a dedicated test covers deny).
+    a._is_callback_user_authorized = lambda *args, **kwargs: True
     return a
 
 
@@ -141,6 +144,24 @@ async def test_dispatch_action_invokes_handler_and_answers():
     assert handled is True
     assert seen["call"] == ("good", "tok9", "7")
     query.answer.assert_awaited_once_with(text="Thanks!")
+
+
+@pytest.mark.asyncio
+async def test_dispatch_denies_unauthorized_press():
+    a = _adapter()
+    a._is_callback_user_authorized = lambda *args, **kwargs: False
+    handler = AsyncMock()
+    a.set_action_handler(handler)
+    query = SimpleNamespace(
+        answer=AsyncMock(),
+        message=SimpleNamespace(chat_id=1, chat=None, message_thread_id=None),
+        from_user=SimpleNamespace(id=666, first_name="x"),
+    )
+    handled = await a._dispatch_action_callback(query, "act:good:tok")
+    assert handled is True  # it was an action callback, just denied
+    handler.assert_not_called()
+    query.answer.assert_awaited_once()
+    assert "authorized" in (query.answer.await_args.kwargs.get("text") or "").lower()
 
 
 @pytest.mark.asyncio

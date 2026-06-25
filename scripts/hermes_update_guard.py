@@ -81,26 +81,33 @@ LOCAL_DELTA_PATHS = (
 LOCAL_DELTA_PATTERNS: tuple[tuple[str, str | tuple[str, ...]], ...] = (
     ("agent/session_capture.py", "SessionCaptureContext"),
     ("plugins/memory/openbrain/__init__.py", "OpenBrainMemoryProvider"),
-    # The 👍/👎 query-feedback buttons only fire when the producer hook is
-    # actually wired. A 2026-06 upstream replay (1fc7e29a4) kept these symbols
+    # The 👍/👎 query-feedback buttons only fire when the full wiring is
+    # present. A 2026-06 upstream replay (1fc7e29a4) kept these symbols
     # *defined* but dropped the register_hook("post_tool_call", ...) call, so
-    # the feature went dead while a symbol-presence check still passed. Assert
-    # both the hook registration and the candidate-capture call, not just that
-    # the formatter symbol exists.
+    # the feature went dead while a symbol-presence check still passed. Since
+    # Phase 5c.3 step 2 the whole feature lives in this adapter plugin: it
+    # captures the candidate (post_tool_call), produces the buttons (outbound
+    # decorator), and records the press (action handlers). Assert each wiring
+    # call, not just that a symbol exists.
     (
         "plugins/openbrain-query-brain-format/__init__.py",
         (
             "mcp_open_brain_query_brain",
             'register_hook("post_tool_call"',
             "capture_query_brain_feedback_candidate(",
+            "register_outbound_decorator(",
+            "register_action_handler(",
+            "pop_feedback_candidate(",
+            "record_query_feedback(",
         ),
     ),
     ("gateway/open_brain.py", "record_query_feedback"),
     ("gateway/open_brain_feedback.py", "capture_query_brain_feedback_candidate"),
-    ("gateway/platforms/telegram.py", "record_query_feedback"),
-    # Consumer side of the same feature: the gateway must still pop the
-    # feedback candidate that the producer hook captured.
-    ("gateway/run.py", "pop_feedback_candidate"),
+    # Generic message-action seam the feedback feature now rides: the core must
+    # consult outbound decorators (producer) and the telegram adapter must
+    # dispatch action presses (consumer). These survive the bespoke-code removal.
+    ("gateway/run.py", "get_outbound_decorators"),
+    ("gateway/platforms/telegram.py", "_dispatch_action_callback"),
     ("scripts/hermes_health_monitor.py", "_check_openbrain"),
 )
 

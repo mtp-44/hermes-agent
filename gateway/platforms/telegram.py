@@ -811,6 +811,21 @@ class TelegramAdapter(BasePlatformAdapter):
         if decoded is None:
             return False
         action_id, token = decoded
+        message = getattr(query, "message", None)
+        # Authorize the press the same way other gated inline callbacks are
+        # (the platform owns identity; feature handlers must not have to). An
+        # action press is a privileged interaction — fail closed.
+        caller_id = str(getattr(query.from_user, "id", ""))
+        chat = getattr(message, "chat", None)
+        if not self._is_callback_user_authorized(
+            caller_id,
+            chat_id=getattr(message, "chat_id", None),
+            chat_type=getattr(chat, "type", None),
+            thread_id=getattr(message, "message_thread_id", None),
+            user_name=getattr(query.from_user, "first_name", None),
+        ):
+            await query.answer(text="⛔ You are not authorized to do that.")
+            return True
         # Prefer a plugin-registered handler for this action_id (the generic
         # seam most features use); fall back to a single handler set via
         # set_action_handler (used by tests and simple in-process producers).
@@ -826,12 +841,11 @@ class TelegramAdapter(BasePlatformAdapter):
         if handler is None:
             await query.answer()
             return True
-        message = getattr(query, "message", None)
         ctx = {
             "platform": self.name,
             "chat_id": getattr(message, "chat_id", None),
             "thread_id": getattr(message, "message_thread_id", None),
-            "user_id": str(getattr(query.from_user, "id", "")),
+            "user_id": caller_id,
             "token": token,
         }
         try:
@@ -842,6 +856,12 @@ class TelegramAdapter(BasePlatformAdapter):
             logger.warning("[%s] action handler failed for %s: %s", self.name, action_id, exc)
             await query.answer()
             return True
+        # A consumed action retires its buttons (best-effort), matching the
+        # one-shot feedback UX these buttons replace.
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
         await query.answer(text=str(result) if result else None)
         return True
 
@@ -2694,10 +2714,7 @@ class TelegramAdapter(BasePlatformAdapter):
                     thread_kwargs = dict(thread_kwargs)
                     thread_kwargs["message_thread_id"] = None
                 effective_thread_id = thread_kwargs.get("message_thread_id")
-                reply_markup = self._feedback_markup_from_metadata(
-                    metadata,
-                    enabled=i == len(chunks) - 1,
-                ) or self._actions_markup_from_metadata(
+                reply_markup = self._actions_markup_from_metadata(
                     metadata,
                     enabled=i == len(chunks) - 1,
                 )
@@ -2972,7 +2989,7 @@ class TelegramAdapter(BasePlatformAdapter):
                 return SendResult(success=True, message_id=message_id)
 
             formatted = self.format_message(content)
-            reply_markup = self._feedback_markup_from_metadata(metadata)
+            reply_markup = self._actions_markup_from_metadata(metadata)
             edit_kwargs = {
                 "chat_id": int(chat_id),
                 "message_id": int(message_id),

@@ -76,7 +76,10 @@ def test_capture_analyze_brain_skips_recall_and_unsupported_routes():
 
 
 @pytest.mark.asyncio
-async def test_send_attaches_feedback_buttons_from_metadata():
+async def test_send_attaches_action_buttons_from_metadata():
+    # Post-migration (Phase 5c.3 step 2): the send path renders the generic
+    # ``metadata["actions"]`` produced by the Open Brain adapter's outbound
+    # decorator, not the old ``open_brain_feedback`` key.
     adapter = _make_adapter()
     mock_msg = MagicMock()
     mock_msg.message_id = 101
@@ -86,18 +89,19 @@ async def test_send_attaches_feedback_buttons_from_metadata():
         "12345",
         "Open Brain says the boiler was mentioned last Tuesday.",
         metadata={
-            "open_brain_feedback": {
-                "query_id": "q-1",
-                "query_text": "When did I last mention the boiler?",
-                "source": "hermes",
-            },
+            "actions": [
+                {"label": "👍 Good", "action_id": "obg", "token": "tok1"},
+                {"label": "👎 Bad", "action_id": "obb", "token": "tok1"},
+            ],
         },
     )
 
     assert result.success is True
     kwargs = adapter._bot.send_message.call_args.kwargs
+    # A keyboard was attached from metadata["actions"]. The precise act: wire
+    # format is asserted in test_message_actions (the harness stubs the telegram
+    # module, so button internals aren't introspectable here).
     assert kwargs["reply_markup"] is not None
-    assert len(adapter._feedback_entries) == 1
 
 
 @pytest.mark.asyncio

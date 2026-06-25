@@ -4233,17 +4233,20 @@ class BasePlatformAdapter(ABC):
                 # Pre-extract snapshot for the #29346 recovery/invariant below.
                 _response_pre_extract = response
 
-                _feedback_context = None
-                _feedback_pop = getattr(self, "pop_staged_open_brain_feedback", None)
-                if callable(_feedback_pop):
+                # Generic message-action seam (Phase 5c): a non-streamed send
+                # renders any actions staged for this session by an outbound
+                # decorator. Feature-neutral — no Open Brain knowledge here.
+                _staged_actions = None
+                _actions_pop = getattr(self, "pop_staged_actions", None)
+                if callable(_actions_pop):
                     try:
-                        _feedback_context = _feedback_pop(session_key)
+                        _staged_actions = _actions_pop(session_key)
                     except Exception:
-                        _feedback_context = None
-                if _feedback_context:
+                        _staged_actions = None
+                if _staged_actions:
                     if _thread_metadata is None:
                         _thread_metadata = {}
-                    _thread_metadata["open_brain_feedback"] = _feedback_context
+                    _thread_metadata["actions"] = _staged_actions
                 # Extract MEDIA:<path> tags (from TTS tool) before other processing
                 media_files, response = self.extract_media(response)
                 media_files = self.filter_media_delivery_paths(media_files)
