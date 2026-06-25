@@ -104,11 +104,19 @@ git push origin <tag-name>
 - Treat these local deltas as load-bearing:
   - Open Brain MCP routing and config
   - `/ob` manual capture
-  - session-boundary capture
+  - session-boundary capture (now provider-driven via the generic
+    `gateway/boundary_capture.py`; needs the `openbrain` memory provider
+    available — `OPENBRAIN_MCP_KEY` in `~/.hermes/.env`)
   - Open Brain memory provider
   - query_brain formatter plugin
   - Telegram Open Brain feedback buttons
   - health monitor and LaunchAgents
+- **`plugins.enabled` must list `openbrain-commands`** (Phase 5c.3). The
+  read-only commands `/brief`, `/digest`, `/stale`, `/finance-check` now live in
+  the `plugins/openbrain-commands/` standalone plugin, which loads only when
+  enabled in `~/.hermes/config.yaml`. If the entry is missing after an update,
+  those four commands silently disappear. The post-update smoke must confirm
+  `/brief` still responds.
 - Keep the Open Brain hosted MCP as canonical. Do not point Hermes at the local
   experimental Open Brain MCP prototype.
 
@@ -190,7 +198,10 @@ After dependencies, merge/replay, and restart:
 6. Ask an analytical question that should call `mcp_open_brain_analyze_brain_query`.
 7. Trigger `/ob` or a safe session-boundary capture only when you are prepared
    to write to Open Brain.
-8. Check `~/.hermes/logs/gateway.log`, `agent.log`, and `health-monitor.jsonl`.
+8. Send `/brief` and confirm it responds (read-only). A "no such command" /
+   silent reply means the `openbrain-commands` plugin did not load — check it is
+   in `plugins.enabled` (Phase 5c.3 read-only commands live in that plugin).
+9. Check `~/.hermes/logs/gateway.log`, `agent.log`, and `health-monitor.jsonl`.
    Prefer structured health JSONL over stale stderr in `health-monitor.log`.
 
 ## Rollback
