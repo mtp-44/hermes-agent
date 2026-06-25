@@ -7739,20 +7739,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             if _cmd_def_inner and _cmd_def_inner.name == "note":
                 return await self._handle_note_command(event)
 
-            if _cmd_def_inner and _cmd_def_inner.name == "brief":
-                return await self._handle_brief_command(event)
-
-            if _cmd_def_inner and _cmd_def_inner.name == "digest":
-                return await self._handle_digest_command(event)
-
+            # /brief, /digest, /stale, /finance-check now live in the
+            # ``openbrain-commands`` plugin (Phase 5c.3) and dispatch through the
+            # generic plugin-command path.
             if _cmd_def_inner and _cmd_def_inner.name == "jira":
                 return await self._handle_jira_command(event)
-
-            if _cmd_def_inner and _cmd_def_inner.name == "stale":
-                return await self._handle_stale_command(event)
-
-            if _cmd_def_inner and _cmd_def_inner.name == "finance-check":
-                return await self._handle_finance_check_command(event)
 
             # /background must bypass the running-agent guard — it starts a
             # parallel task and must never interrupt the active conversation.
@@ -8100,20 +8091,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         if canonical == "note":
             return await self._handle_note_command(event)
 
-        if canonical == "brief":
-            return await self._handle_brief_command(event)
-
-        if canonical == "digest":
-            return await self._handle_digest_command(event)
-
+        # /brief, /digest, /stale, /finance-check are served by the
+        # ``openbrain-commands`` plugin (Phase 5c.3); they dispatch through the
+        # generic plugin-command path below. The now-unused
+        # _handle_{brief,digest,stale,finance_check}_command methods are dead
+        # and removed in 5c.5.
         if canonical == "jira":
             return await self._handle_jira_command(event)
-
-        if canonical == "stale":
-            return await self._handle_stale_command(event)
-
-        if canonical == "finance-check":
-            return await self._handle_finance_check_command(event)
 
         if canonical == "restart":
             return await self._handle_restart_command(event)

@@ -127,16 +127,12 @@ COMMAND_REGISTRY: list[CommandDef] = [
                gateway_only=True, aliases=("capture_status",)),
     CommandDef("note", "Save a short meeting note directly to Openbrain", "Session",
                gateway_only=True, aliases=("m",), args_hint="<text>"),
-    CommandDef("brief", "Show recent Hermes captures from Openbrain", "Session",
-               gateway_only=True, args_hint="[query]"),
-    CommandDef("digest", "Show a synthesized weekly digest from Hermes captures", "Session",
-               gateway_only=True, args_hint="[query]"),
+    # /brief, /digest, /stale, /finance-check relocated to the
+    # ``openbrain-commands`` plugin (Phase 5c.3); they register via
+    # PluginContext.register_command and require ``openbrain-commands`` in
+    # ``plugins.enabled``.
     CommandDef("jira", "Show current sprint issues from Jira MCP", "Session",
                gateway_only=True, args_hint="[filter]"),
-    CommandDef("stale", "Show stale action items and contacts from Openbrain", "Session",
-               gateway_only=True),
-    CommandDef("finance-check", "Check for finance anomalies against the prior period", "Session",
-               gateway_only=True, aliases=("finance_check",)),
 
     # Configuration
     CommandDef("sessions", "Browse and resume previous sessions", "Session"),

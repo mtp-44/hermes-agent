@@ -1,0 +1,4 @@
+name: openbrain-commands
+version: 1.0.0
+description: "Open Brain read-only slash commands (/brief /digest /stale /finance-check) — read durable memory through the hosted open-brain-mcp. Part of the Open Brain Hermes adapter (Phase 5c.3)."
+author: "Open Brain adapter"
