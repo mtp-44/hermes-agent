@@ -2423,6 +2423,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             has_active_processes_fn=lambda key: process_registry.has_active_for_session(key),
         )
         self.delivery_router = DeliveryRouter(self.config)
+        # Generic boundary capturer: drives the configured memory provider's
+        # on_session_end() for sessions whose agent was evicted before the
+        # gateway boundary (reset/expiry/shutdown). Provider-agnostic; binds
+        # lazily on first capture.
+        from gateway.boundary_capture import GatewayBoundaryCapturer
+        self._boundary_capturer = GatewayBoundaryCapturer()
         self._running = False
         self._gateway_loop: Optional[asyncio.AbstractEventLoop] = None
         self._shutdown_event = asyncio.Event()
@@ -10297,17 +10303,29 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         return kwargs
 
     async def _capture_session_summary_if_eligible(self, entry, *, reason: str) -> None:
-        """Best-effort session-end capture that respects per-session privacy flags."""
+        """Best-effort session-end capture that respects per-session privacy flags.
+
+        Routes the gateway boundary through the configured memory provider's
+        ``on_session_end`` (via the generic :class:`GatewayBoundaryCapturer`), so
+        an evicted session uses the same capture pipeline as a resident agent.
+        No memory backend is named here. ``/nosave`` skips capture entirely;
+        ``/private`` still notifies the provider but with ``eligible=False`` so a
+        flag-honoring provider performs no durable write.
+        """
         if entry is None:
             return
 
         flags = self._capture_flags_for_entry(entry)
-        if not flags["capture_eligible"]:
+        if flags["capture_nosave"]:
             return
 
         source = getattr(entry, "origin", None)
         session_id = getattr(entry, "session_id", None)
         if source is None or not session_id:
+            return
+
+        capturer = getattr(self, "_boundary_capturer", None)
+        if capturer is None or not capturer.enabled:
             return
 
         try:
@@ -10319,38 +10337,18 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             return
 
         try:
-            from gateway.open_brain import OpenBrainConfigError, save_session_summary
-
-            payload = await save_session_summary(
+            await asyncio.to_thread(
+                capturer.capture,
                 session_id=session_id,
-                source=source,
+                platform=str(getattr(source, "platform", "") or ""),
                 messages=messages,
-                reason=reason,
+                boundary_reason=reason,
+                eligible=not flags["capture_private"],
+                user_id=str(getattr(source, "user_id", "") or ""),
+                chat_id=str(getattr(source, "chat_id", "") or ""),
             )
-        except OpenBrainConfigError as exc:
-            logger.info("Skipping session-end capture for %s: %s", session_id, exc)
-            return
         except Exception as exc:
             logger.warning("Session-end capture failed for %s: %s", session_id, exc)
-            return
-
-        if payload and payload.get("record_id"):
-            if payload.get("deduplicated"):
-                logger.debug(
-                    "Reused existing session summary for %s as %s (dedup, %s messages, reason=%s)",
-                    session_id,
-                    payload["record_id"],
-                    payload.get("message_count", 0),
-                    reason,
-                )
-            else:
-                logger.info(
-                    "Captured session summary for %s as %s (%s messages, reason=%s)",
-                    session_id,
-                    payload["record_id"],
-                    payload.get("message_count", 0),
-                    reason,
-                )
 
     async def _handle_nosave_command(self, event: MessageEvent) -> str:
         source = event.source

@@ -173,12 +173,13 @@ async def test_shutdown_fires_finalize_for_active_agents(mock_invoke_hook):
 
 
 @pytest.mark.asyncio
-@patch("gateway.open_brain.save_session_summary", new_callable=AsyncMock)
 @patch("hermes_cli.plugins.invoke_hook")
-async def test_shutdown_captures_summary_for_tracked_session(mock_invoke_hook, mock_save_summary):
+async def test_shutdown_captures_summary_for_tracked_session(mock_invoke_hook):
     from gateway.run import GatewayRunner
 
     runner = object.__new__(GatewayRunner)
+    runner._boundary_capturer = MagicMock()
+    runner._boundary_capturer.enabled = True
     runner._running = True
     runner._background_tasks = set()
     runner._pending_messages = {}
@@ -224,15 +225,16 @@ async def test_shutdown_captures_summary_for_tracked_session(mock_invoke_hook, m
         {"role": "user", "content": "Need a summary"},
         {"role": "assistant", "content": "Shutdown path is covered."},
     ]
-    mock_save_summary.return_value = {"record_id": "sum-456", "message_count": 2}
 
     with patch("gateway.status.remove_pid_file"), \
          patch("gateway.status.write_runtime_status"):
         await runner.stop()
 
-    mock_save_summary.assert_awaited_once()
-    assert mock_save_summary.await_args.kwargs["session_id"] == "sess-a"
-    assert mock_save_summary.await_args.kwargs["reason"] == "shutdown"
+    runner._boundary_capturer.capture.assert_called_once()
+    _kwargs = runner._boundary_capturer.capture.call_args.kwargs
+    assert _kwargs["session_id"] == "sess-a"
+    assert _kwargs["boundary_reason"] == "shutdown"
+    assert _kwargs["eligible"] is True
 
 
 @pytest.mark.asyncio
@@ -325,14 +327,15 @@ async def test_idle_expiry_fires_finalize_hook(mock_invoke_hook):
 
 
 @pytest.mark.asyncio
-@patch("gateway.open_brain.save_session_summary", new_callable=AsyncMock)
 @patch("hermes_cli.plugins.invoke_hook")
-async def test_idle_expiry_captures_summary_when_eligible(mock_invoke_hook, mock_save_summary):
+async def test_idle_expiry_captures_summary_when_eligible(mock_invoke_hook):
     from datetime import datetime, timedelta
 
     from gateway.run import GatewayRunner
 
     runner = object.__new__(GatewayRunner)
+    runner._boundary_capturer = MagicMock()
+    runner._boundary_capturer.enabled = True
     runner._running = True
     runner._running_agents = {}
     runner._agent_cache = {}
@@ -383,14 +386,14 @@ async def test_idle_expiry_captures_summary_when_eligible(mock_invoke_hook, mock
         return None
 
     mock_invoke_hook.side_effect = _hook_and_stop
-    mock_save_summary.return_value = {"record_id": "sum-123", "message_count": 2}
 
     with patch("gateway.run.asyncio.sleep", side_effect=_fast_sleep):
         await runner._session_expiry_watcher(interval=0)
 
-    mock_save_summary.assert_awaited_once()
-    assert mock_save_summary.await_args.kwargs["session_id"] == "sess-expired"
-    assert mock_save_summary.await_args.kwargs["reason"] == "expiry"
+    runner._boundary_capturer.capture.assert_called_once()
+    _kwargs = runner._boundary_capturer.capture.call_args.kwargs
+    assert _kwargs["session_id"] == "sess-expired"
+    assert _kwargs["boundary_reason"] == "expiry"
 
 
 @pytest.mark.asyncio

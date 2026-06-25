@@ -46,6 +46,8 @@ def _make_runner():
     runner._pending_approvals = {}
     runner._busy_input_mode = "interrupt"
     runner._draining = False
+    runner._boundary_capturer = MagicMock()
+    runner._boundary_capturer.enabled = True
 
     session_key = build_session_key(_make_source())
     session_entry = SessionEntry(
@@ -308,90 +310,56 @@ async def test_jira_command_passes_filter(mock_fetch_issues):
 
 
 @pytest.mark.asyncio
-@patch("gateway.open_brain.save_session_summary", new_callable=AsyncMock)
 @patch("hermes_cli.plugins.invoke_hook")
-async def test_reset_captures_session_summary_when_eligible(mock_invoke_hook, mock_save_summary):
+async def test_reset_captures_session_summary_when_eligible(mock_invoke_hook):
     runner = _make_runner()
-    mock_save_summary.return_value = {"record_id": "sum-123", "message_count": 2}
 
     await runner._handle_reset_command(_make_event("/reset"))
 
-    mock_save_summary.assert_awaited_once()
-    assert mock_save_summary.await_args.kwargs["session_id"] == "sess-old"
-    assert mock_save_summary.await_args.kwargs["reason"] == "reset"
-    assert mock_save_summary.await_args.kwargs["messages"] == runner.session_store.load_transcript.return_value
+    runner._boundary_capturer.capture.assert_called_once()
+    kwargs = runner._boundary_capturer.capture.call_args.kwargs
+    assert kwargs["session_id"] == "sess-old"
+    assert kwargs["boundary_reason"] == "reset"
+    assert kwargs["eligible"] is True
+    assert kwargs["messages"] == runner.session_store.load_transcript.return_value
 
 
 @pytest.mark.asyncio
-@patch("gateway.open_brain.save_session_summary", new_callable=AsyncMock)
 @patch("hermes_cli.plugins.invoke_hook")
-async def test_reset_skips_session_summary_when_nosave_enabled(mock_invoke_hook, mock_save_summary):
+async def test_reset_skips_session_summary_when_nosave_enabled(mock_invoke_hook):
     runner = _make_runner()
     runner.session_store.get_or_create_session.return_value.capture_nosave = True
     runner.session_store._entries[next(iter(runner.session_store._entries))].capture_nosave = True
 
     await runner._handle_reset_command(_make_event("/reset"))
 
-    mock_save_summary.assert_not_awaited()
+    runner._boundary_capturer.capture.assert_not_called()
 
 
 @pytest.mark.asyncio
-@patch("gateway.open_brain.save_session_summary", new_callable=AsyncMock)
 @patch("hermes_cli.plugins.invoke_hook")
-async def test_reset_skips_session_summary_when_private_enabled(mock_invoke_hook, mock_save_summary):
+async def test_reset_notifies_provider_ineligible_when_private(mock_invoke_hook):
+    # /private still notifies the provider (so it can track the boundary) but
+    # with eligible=False, so a flag-honoring provider performs no durable write.
     runner = _make_runner()
     runner.session_store.get_or_create_session.return_value.capture_private = True
     runner.session_store._entries[next(iter(runner.session_store._entries))].capture_private = True
 
     await runner._handle_reset_command(_make_event("/reset"))
 
-    mock_save_summary.assert_not_awaited()
+    runner._boundary_capturer.capture.assert_called_once()
+    assert runner._boundary_capturer.capture.call_args.kwargs["eligible"] is False
 
 
 @pytest.mark.asyncio
-@patch("gateway.open_brain.save_session_summary", new_callable=AsyncMock)
 @patch("hermes_cli.plugins.invoke_hook")
-async def test_reset_skips_session_summary_without_transcript(mock_invoke_hook, mock_save_summary):
+async def test_reset_skips_session_summary_without_transcript(mock_invoke_hook):
     runner = _make_runner()
     runner.session_store.load_transcript.return_value = []
 
     await runner._handle_reset_command(_make_event("/reset"))
 
-    mock_save_summary.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-@patch("gateway.open_brain.save_session_summary", new_callable=AsyncMock)
-@patch("hermes_cli.plugins.invoke_hook")
-async def test_reset_logs_debug_for_deduplicated_session_summary(mock_invoke_hook, mock_save_summary):
-    import logging
-
-    runner = _make_runner()
-    mock_save_summary.return_value = {"record_id": "sum-123", "message_count": 2, "deduplicated": True}
-
-    with patch("gateway.run.logger") as mock_logger:
-        await runner._handle_reset_command(_make_event("/reset"))
-
-    mock_save_summary.assert_awaited_once()
-    debug_calls = [str(call) for call in mock_logger.debug.call_args_list]
-    assert any("dedup" in call.lower() or "reused" in call.lower() for call in debug_calls)
-    info_calls = [str(call) for call in mock_logger.info.call_args_list]
-    assert not any("Captured session summary" in call for call in info_calls)
-
-
-@pytest.mark.asyncio
-@patch("gateway.open_brain.save_session_summary", new_callable=AsyncMock)
-@patch("hermes_cli.plugins.invoke_hook")
-async def test_reset_logs_info_for_new_session_summary(mock_invoke_hook, mock_save_summary):
-    runner = _make_runner()
-    mock_save_summary.return_value = {"record_id": "sum-456", "message_count": 3, "deduplicated": False}
-
-    with patch("gateway.run.logger") as mock_logger:
-        await runner._handle_reset_command(_make_event("/reset"))
-
-    mock_save_summary.assert_awaited_once()
-    info_calls = [str(call) for call in mock_logger.info.call_args_list]
-    assert any("Captured session summary" in call for call in info_calls)
+    runner._boundary_capturer.capture.assert_not_called()
 
 
 @pytest.mark.asyncio
