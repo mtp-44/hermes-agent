@@ -520,6 +520,9 @@ class TelegramAdapter(BasePlatformAdapter):
         self._feedback_entries: OrderedDict[str, dict] = OrderedDict()
         self._feedback_max_entries = 200
         self._staged_feedback: Dict[str, Any] = {}
+        # Generic message-action handler (Phase 5c seam 3); set via
+        # set_action_handler. None means no generic actions are dispatched.
+        self._action_handler = None
 
     def _notification_kwargs(
         self, metadata: Optional[Dict[str, Any]]
@@ -673,6 +676,82 @@ class TelegramAdapter(BasePlatformAdapter):
         except Exception as exc:
             logger.debug("[%s] Failed to attach Open Brain feedback buttons: %s", self.name, exc)
             return False
+
+    # -- Generic message actions (Phase 5c seam 3) ---------------------------
+    # Platform-agnostic interactive buttons. Feature code attaches
+    # ``metadata["actions"]`` / ``metadata["action_rows"]`` and registers a
+    # handler via ``set_action_handler``; no feature-specific knowledge lives
+    # here. See gateway/platforms/actions.py for the wire format.
+
+    def set_action_handler(self, handler) -> None:
+        """Register the generic action handler.
+
+        ``handler(action_id, token, context) -> str | None`` runs when a user
+        presses an ``act:`` button; a returned string is shown as the callback
+        acknowledgement. Sync or async.
+        """
+        self._action_handler = handler
+
+    def _actions_markup_from_metadata(
+        self,
+        metadata: Optional[Dict[str, Any]],
+        *,
+        enabled: bool = True,
+    ) -> Any:
+        if not enabled:
+            return None
+        from gateway.platforms.actions import action_rows_from_metadata
+
+        rows = action_rows_from_metadata(metadata)
+        if not rows:
+            return None
+        try:
+            keyboard = [
+                [
+                    InlineKeyboardButton(a.label, callback_data=a.callback_id())
+                    for a in row
+                ]
+                for row in rows
+            ]
+        except ValueError as exc:
+            logger.warning("[%s] Dropping malformed message actions: %s", self.name, exc)
+            return None
+        return InlineKeyboardMarkup(keyboard)
+
+    async def _dispatch_action_callback(self, query: Any, data: str) -> bool:
+        """Dispatch a generic ``act:`` callback to the registered handler.
+
+        Returns True when ``data`` was an action callback (whether or not a
+        handler was registered), so the caller stops further prefix matching.
+        """
+        from gateway.platforms.actions import decode_action_callback
+
+        decoded = decode_action_callback(data)
+        if decoded is None:
+            return False
+        action_id, token = decoded
+        handler = getattr(self, "_action_handler", None)
+        if handler is None:
+            await query.answer()
+            return True
+        message = getattr(query, "message", None)
+        ctx = {
+            "platform": self.name,
+            "chat_id": getattr(message, "chat_id", None),
+            "thread_id": getattr(message, "message_thread_id", None),
+            "user_id": str(getattr(query.from_user, "id", "")),
+            "token": token,
+        }
+        try:
+            result = handler(action_id, token, ctx)
+            if asyncio.iscoroutine(result):
+                result = await result
+        except Exception as exc:
+            logger.warning("[%s] action handler failed for %s: %s", self.name, action_id, exc)
+            await query.answer()
+            return True
+        await query.answer(text=str(result) if result else None)
+        return True
 
     @classmethod
     def _metadata_thread_id(cls, metadata: Optional[Dict[str, Any]]) -> Optional[str]:
@@ -2526,6 +2605,9 @@ class TelegramAdapter(BasePlatformAdapter):
                 reply_markup = self._feedback_markup_from_metadata(
                     metadata,
                     enabled=i == len(chunks) - 1,
+                ) or self._actions_markup_from_metadata(
+                    metadata,
+                    enabled=i == len(chunks) - 1,
                 )
 
                 msg = None
@@ -3994,6 +4076,13 @@ class TelegramAdapter(BasePlatformAdapter):
         query_chat_type = getattr(query_chat, "type", None)
         query_thread_id = getattr(query_message, "message_thread_id", None)
         query_user_name = getattr(query.from_user, "first_name", None)
+
+        # --- Generic message-action callbacks (act:<action_id>:<token>) ---
+        # Phase 5c seam 3: platform-agnostic buttons. Feature-specific callback
+        # families (obf:, prx:, …) keep their own branches below until they
+        # migrate onto this seam.
+        if await self._dispatch_action_callback(query, data):
+            return
 
         # --- Model picker callbacks ---
         if data.startswith(("mp:", "mpg:", "mm:", "mc:", "mb", "mx", "mg:")):
