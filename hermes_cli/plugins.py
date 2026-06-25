@@ -879,6 +879,85 @@ class PluginContext:
             action_id,
         )
 
+    def register_action_handler(
+        self,
+        action_id: str,
+        callback: Callable,
+    ) -> None:
+        """Register a generic platform message-action handler from a plugin.
+
+        This is the platform-agnostic counterpart to
+        :meth:`register_slack_action_handler`. Platform adapters that support
+        the generic ``act:`` seam (see ``gateway/platforms/actions.py``) route a
+        decoded button press whose ``action_id`` matches to ``callback``.
+
+        Callback signature::
+
+            def handler(action_id: str, token: str, context: dict) -> str | None:
+                ...  # returned text (if any) is shown as the press acknowledgement
+
+        ``token`` is the opaque correlation handle the producer minted (e.g. a
+        registry key the plugin owns); ``context`` carries platform/chat/user
+        metadata. Sync or async.
+
+        Args:
+            action_id: The action identifier to match (must be non-empty and
+                contain no ``:``; it travels in the bounded callback id).
+            callback: Callable receiving ``(action_id, token, context)``.
+
+        Raises:
+            ValueError: if ``callback`` is not callable, or ``action_id`` is
+                empty or contains ``:``.
+        """
+        if not callable(callback):
+            raise ValueError(
+                f"Plugin '{self.manifest.name}' tried to register an action "
+                f"handler with a non-callable callback."
+            )
+        clean = str(action_id or "").strip()
+        if not clean or ":" in clean:
+            raise ValueError(
+                f"Plugin '{self.manifest.name}' tried to register an action "
+                f"handler with an invalid action_id: {action_id!r}"
+            )
+        self._manager._action_handlers[clean] = (callback, self.manifest.name)
+        logger.debug(
+            "Plugin %s registered action handler: %s", self.manifest.name, clean
+        )
+
+    def register_outbound_decorator(self, callback: Callable) -> None:
+        """Register a generic outbound-message decorator from a plugin.
+
+        The gateway consults registered decorators just before an outbound
+        message is sent. A decorator may inspect the message context and return
+        interactive actions to attach (rendered natively per platform). It is
+        feature-neutral infrastructure — the gateway does not know what any
+        decorator attaches.
+
+        Callback signature::
+
+            def decorate(context: dict) -> list | None:
+                # return a list of MessageAction or {label, action_id, token}
+                # dicts to attach, or None / [] to attach nothing.
+
+        ``context`` carries (at least) ``session_id``, ``session_key``,
+        ``platform``, the response ``text``, and the outbound ``metadata``.
+        Decorators must be best-effort: an exception is swallowed by the caller
+        and never blocks delivery.
+
+        Raises:
+            ValueError: if ``callback`` is not callable.
+        """
+        if not callable(callback):
+            raise ValueError(
+                f"Plugin '{self.manifest.name}' tried to register an outbound "
+                f"decorator with a non-callable callback."
+            )
+        self._manager._outbound_decorators.append((callback, self.manifest.name))
+        logger.debug(
+            "Plugin %s registered outbound decorator", self.manifest.name
+        )
+
     # -- hook registration --------------------------------------------------
 
     # -- auxiliary task registration ---------------------------------------
@@ -1110,6 +1189,19 @@ class PluginManager:
         # ``re.Pattern``, or a constraint dict); ``callback`` is an async
         # function with the slack_bolt signature ``(ack, body, action)``.
         self._slack_action_handlers: List[tuple] = []
+        # Generic platform message-action handlers registered by plugins
+        # (the platform-agnostic ``act:`` seam — see gateway/platforms/actions.py).
+        # Maps ``action_id`` -> ``(callback, plugin_name)``. Platform adapters
+        # route a decoded action press to the matching callback
+        # ``callback(action_id, token, context) -> str | None``.
+        self._action_handlers: Dict[str, tuple] = {}
+        # Generic outbound-message decorators registered by plugins. Each entry
+        # is ``(callback, plugin_name)``; ``callback(context) -> actions | None``
+        # is consulted just before an outbound message is sent and may return a
+        # list of message actions (MessageAction or ``{label, action_id, token}``
+        # dicts) to attach. Feature-neutral: the gateway invokes them without
+        # knowing what any given plugin attaches.
+        self._outbound_decorators: List[tuple] = []
 
     # -----------------------------------------------------------------------
     # Public
@@ -1143,6 +1235,8 @@ class PluginManager:
             self._plugin_skills.clear()
             self._aux_tasks.clear()
             self._slack_action_handlers.clear()
+            self._action_handlers.clear()
+            self._outbound_decorators.clear()
             self._context_engine = None
         # Set the flag up front as a re-entrancy guard (a plugin's register()
         # can transitively trigger discovery again), but reset it if the sweep
@@ -1738,6 +1832,28 @@ class PluginManager:
         :meth:`PluginContext.register_slack_action_handler`.
         """
         return list(self._slack_action_handlers)
+
+    # -----------------------------------------------------------------------
+    # Generic action handler / outbound decorator accessors
+    # -----------------------------------------------------------------------
+
+    def get_action_handler(self, action_id: str) -> Optional[Callable]:
+        """Return the plugin callback registered for ``action_id``, or None.
+
+        Consumed by platform adapters supporting the generic ``act:`` seam to
+        route a decoded button press. Registered via
+        :meth:`PluginContext.register_action_handler`.
+        """
+        entry = self._action_handlers.get(str(action_id or "").strip())
+        return entry[0] if entry else None
+
+    def get_outbound_decorators(self) -> List[Callable]:
+        """Return plugin-registered outbound-message decorators (callables).
+
+        Consumed by the gateway just before sending an outbound message.
+        Registered via :meth:`PluginContext.register_outbound_decorator`.
+        """
+        return [cb for cb, _name in self._outbound_decorators]
 
     # -----------------------------------------------------------------------
     # Introspection

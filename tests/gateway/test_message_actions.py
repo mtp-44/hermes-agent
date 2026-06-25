@@ -175,3 +175,139 @@ async def test_dispatch_swallows_handler_error():
     )
     assert await a._dispatch_action_callback(query, "act:good:t") is True
     query.answer.assert_awaited_once_with()
+
+
+# --- Plugin registration seam (Phase 5c.3 step 2 / Stage A) -------------------
+
+def _plugin_ctx():
+    from hermes_cli.plugins import PluginManager, PluginContext, PluginManifest
+
+    mgr = PluginManager()
+    ctx = PluginContext(PluginManifest(name="test-adapter", path=None), mgr)
+    return mgr, ctx
+
+
+def test_register_action_handler_and_lookup():
+    mgr, ctx = _plugin_ctx()
+
+    def h(action_id, token, c):
+        return "ok"
+
+    ctx.register_action_handler("obg", h)
+    assert mgr.get_action_handler("obg") is h
+    assert mgr.get_action_handler("missing") is None
+
+
+def test_register_action_handler_validates():
+    _mgr, ctx = _plugin_ctx()
+    with pytest.raises(ValueError):
+        ctx.register_action_handler("obg", "not-callable")
+    with pytest.raises(ValueError):
+        ctx.register_action_handler("", lambda *a: None)
+    with pytest.raises(ValueError):
+        ctx.register_action_handler("has:colon", lambda *a: None)
+
+
+def test_register_outbound_decorator_and_list():
+    mgr, ctx = _plugin_ctx()
+
+    def deco(context):
+        return [{"label": "👍", "action_id": "obg", "token": "t"}]
+
+    ctx.register_outbound_decorator(deco)
+    decos = mgr.get_outbound_decorators()
+    assert decos == [deco]
+    assert decos[0]({}) == [{"label": "👍", "action_id": "obg", "token": "t"}]
+    with pytest.raises(ValueError):
+        ctx.register_outbound_decorator("nope")
+
+
+@pytest.mark.asyncio
+async def test_dispatch_routes_to_plugin_handler(monkeypatch):
+    # A plugin-registered handler for the action_id takes precedence over the
+    # single set_action_handler fallback.
+    import gateway.platforms.telegram as tg
+
+    seen = {}
+
+    def plugin_handler(action_id, token, ctx):
+        seen["plugin"] = (action_id, token)
+        return "from-plugin"
+
+    class _FakeMgr:
+        def get_action_handler(self, action_id):
+            return plugin_handler if action_id == "obg" else None
+
+    monkeypatch.setattr(tg, "get_plugin_manager", lambda: _FakeMgr(), raising=False)
+    # Also patch the import site used inside _dispatch_action_callback.
+    import hermes_cli.plugins as plugmod
+    monkeypatch.setattr(plugmod, "get_plugin_manager", lambda: _FakeMgr())
+
+    a = _adapter()
+    a.set_action_handler(AsyncMock(return_value="from-setter"))
+    query = SimpleNamespace(
+        answer=AsyncMock(),
+        message=SimpleNamespace(chat_id=1, message_thread_id=None),
+        from_user=SimpleNamespace(id=9),
+    )
+    handled = await a._dispatch_action_callback(query, "act:obg:tok")
+    assert handled is True
+    assert seen["plugin"] == ("obg", "tok")
+    query.answer.assert_awaited_once_with(text="from-plugin")
+
+
+# --- Generic stage/pop/attach actions (Stage A) -------------------------------
+
+def test_stage_and_pop_actions_generation_guarded():
+    a = _adapter()
+    a._staged_actions = {}
+    acts = [{"label": "👍", "action_id": "obg", "token": "t"}]
+    a.stage_actions("sess1", acts, generation=3)
+    # Wrong generation does not pop.
+    assert a.pop_staged_actions("sess1", generation=2) is None
+    # Right generation pops once.
+    assert a.pop_staged_actions("sess1", generation=3) == acts
+    assert a.pop_staged_actions("sess1", generation=3) is None
+
+
+def test_stage_actions_ignores_empty():
+    a = _adapter()
+    a._staged_actions = {}
+    a.stage_actions("s", [], generation=1)
+    a.stage_actions("", [{"label": "x", "action_id": "y"}])
+    assert a._staged_actions == {}
+
+
+@pytest.mark.asyncio
+async def test_attach_actions_edits_markup(monkeypatch):
+    import gateway.platforms.telegram as tg
+
+    class _FakeBtn:
+        def __init__(self, label, callback_data=None):
+            self.label = label
+            self.callback_data = callback_data
+
+    class _FakeMarkup:
+        def __init__(self, keyboard):
+            self.inline_keyboard = keyboard
+
+    a = _adapter()
+    monkeypatch.setattr(tg, "InlineKeyboardButton", _FakeBtn)
+    monkeypatch.setattr(tg, "InlineKeyboardMarkup", _FakeMarkup)
+    a._bot = SimpleNamespace(edit_message_reply_markup=AsyncMock())
+
+    ok = await a.attach_actions("100", "200", [
+        {"label": "👍", "action_id": "obg", "token": "tk"},
+    ])
+    assert ok is True
+    kwargs = a._bot.edit_message_reply_markup.await_args.kwargs
+    assert kwargs["chat_id"] == 100 and kwargs["message_id"] == 200
+    assert kwargs["reply_markup"].inline_keyboard[0][0].callback_data == "act:obg:tk"
+
+
+@pytest.mark.asyncio
+async def test_attach_actions_noop_without_actions():
+    a = _adapter()
+    a._bot = SimpleNamespace(edit_message_reply_markup=AsyncMock())
+    assert await a.attach_actions("1", "2", []) is False
+    a._bot.edit_message_reply_markup.assert_not_called()

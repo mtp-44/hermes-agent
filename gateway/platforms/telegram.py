@@ -523,6 +523,9 @@ class TelegramAdapter(BasePlatformAdapter):
         # Generic message-action handler (Phase 5c seam 3); set via
         # set_action_handler. None means no generic actions are dispatched.
         self._action_handler = None
+        # Generic staged actions keyed by session (Phase 5c seam 3); the generic
+        # counterpart of _staged_feedback. See stage_actions / pop_staged_actions.
+        self._staged_actions: Dict[str, Any] = {}
 
     def _notification_kwargs(
         self, metadata: Optional[Dict[str, Any]]
@@ -692,6 +695,84 @@ class TelegramAdapter(BasePlatformAdapter):
         """
         self._action_handler = handler
 
+    def _actions_keyboard(self, actions: Any) -> Any:
+        """Build an InlineKeyboardMarkup from a flat list of actions, or None.
+
+        ``actions`` is a list of MessageAction or ``{label, action_id, token}``
+        dicts. Malformed entries are dropped; an empty result returns None.
+        """
+        markup = self._actions_markup_from_metadata({"actions": actions})
+        return markup
+
+    def stage_actions(
+        self,
+        session_key: str,
+        actions: Any,
+        *,
+        generation: int | None = None,
+    ) -> None:
+        """Stage interactive actions for a session's next/streamed message.
+
+        Generic counterpart of the old ``stage_open_brain_feedback``: the send
+        path (or a post-stream attach) pops these and renders them. ``actions``
+        is a list of MessageAction / action-dicts.
+        """
+        if not session_key or not actions:
+            return
+        if generation is None:
+            self._staged_actions[session_key] = actions
+        else:
+            self._staged_actions[session_key] = (int(generation), actions)
+
+    def pop_staged_actions(
+        self,
+        session_key: str,
+        *,
+        generation: int | None = None,
+    ) -> Any:
+        """Pop actions staged via :meth:`stage_actions` (generation-guarded)."""
+        if not session_key:
+            return None
+        entry = self._staged_actions.get(session_key)
+        if entry is None:
+            return None
+        if isinstance(entry, tuple) and len(entry) == 2:
+            entry_generation, actions = entry
+            if generation is not None and int(entry_generation) != int(generation):
+                return None
+            self._staged_actions.pop(session_key, None)
+            return actions
+        if generation is not None:
+            return None
+        self._staged_actions.pop(session_key, None)
+        return entry
+
+    async def attach_actions(
+        self,
+        chat_id: str,
+        message_id: str,
+        actions: Any,
+    ) -> bool:
+        """Attach interactive actions to an already-sent message (edit markup).
+
+        Generic counterpart of the old ``attach_open_brain_feedback``.
+        """
+        if not self._bot or not chat_id or not message_id or not actions:
+            return False
+        markup = self._actions_keyboard(actions)
+        if markup is None:
+            return False
+        try:
+            await self._bot.edit_message_reply_markup(
+                chat_id=int(chat_id),
+                message_id=int(message_id),
+                reply_markup=markup,
+            )
+            return True
+        except Exception as exc:
+            logger.debug("[%s] Failed to attach message actions: %s", self.name, exc)
+            return False
+
     def _actions_markup_from_metadata(
         self,
         metadata: Optional[Dict[str, Any]],
@@ -730,7 +811,18 @@ class TelegramAdapter(BasePlatformAdapter):
         if decoded is None:
             return False
         action_id, token = decoded
-        handler = getattr(self, "_action_handler", None)
+        # Prefer a plugin-registered handler for this action_id (the generic
+        # seam most features use); fall back to a single handler set via
+        # set_action_handler (used by tests and simple in-process producers).
+        handler = None
+        try:
+            from hermes_cli.plugins import get_plugin_manager
+
+            handler = get_plugin_manager().get_action_handler(action_id)
+        except Exception:
+            handler = None
+        if handler is None:
+            handler = getattr(self, "_action_handler", None)
         if handler is None:
             await query.answer()
             return True
