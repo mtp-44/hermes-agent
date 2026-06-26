@@ -62,7 +62,7 @@ LOCAL_DELTA_PATHS = (
     "plugins/openbrain-commands/__init__.py",
     "gateway/open_brain.py",
     "gateway/open_brain_feedback.py",
-    "gateway/platforms/telegram.py",
+    "plugins/platforms/telegram/adapter.py",
     "gateway/run.py",
     "gateway/session.py",
     "gateway/slash_commands.py",
@@ -117,8 +117,11 @@ LOCAL_DELTA_PATTERNS: tuple[tuple[str, str | tuple[str, ...]], ...] = (
     # Generic message-action seam the feedback feature now rides: the core must
     # consult outbound decorators (producer) and the telegram adapter must
     # dispatch action presses (consumer). These survive the bespoke-code removal.
+    # The telegram adapter relocated to plugins/platforms/telegram/adapter.py in
+    # the 2026-06-26 upstream sync (upstream 560010547 bundled all platform
+    # adapters as plugins); the local seam delta moved with it intact.
     ("gateway/run.py", "get_outbound_decorators"),
-    ("gateway/platforms/telegram.py", "_dispatch_action_callback"),
+    ("plugins/platforms/telegram/adapter.py", "_dispatch_action_callback"),
     ("scripts/hermes_health_monitor.py", "_check_openbrain"),
 )
 
