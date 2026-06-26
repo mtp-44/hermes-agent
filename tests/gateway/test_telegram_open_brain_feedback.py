@@ -13,7 +13,7 @@ from gateway.open_brain_feedback import (
     clear_feedback_candidate,
     pop_feedback_candidate,
 )
-from gateway.platforms.telegram import TelegramAdapter
+from plugins.platforms.telegram.adapter import TelegramAdapter
 
 
 def _make_adapter() -> TelegramAdapter:

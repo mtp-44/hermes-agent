@@ -75,7 +75,7 @@ def _adapter():
     sibling test files that rely on the gateway conftest stub). The markup test
     monkeypatches the keyboard classes; the dispatch tests construct none.
     """
-    from gateway.platforms.telegram import TelegramAdapter
+    from plugins.platforms.telegram.adapter import TelegramAdapter
     from gateway.platforms.base import Platform
 
     a = object.__new__(TelegramAdapter)
@@ -91,7 +91,7 @@ def test_markup_builds_from_actions_metadata(monkeypatch):
     # The gateway test harness stubs the ``telegram`` module, so capture the
     # keyboard the builder assembles with simple fakes rather than relying on
     # the real InlineKeyboardMarkup internals.
-    import gateway.platforms.telegram as tg
+    import plugins.platforms.telegram.adapter as tg
 
     class _FakeBtn:
         def __init__(self, label, callback_data=None):
@@ -247,7 +247,7 @@ def test_register_outbound_decorator_and_list():
 async def test_dispatch_routes_to_plugin_handler(monkeypatch):
     # A plugin-registered handler for the action_id takes precedence over the
     # single set_action_handler fallback.
-    import gateway.platforms.telegram as tg
+    import plugins.platforms.telegram.adapter as tg
 
     seen = {}
 
@@ -301,7 +301,7 @@ def test_stage_actions_ignores_empty():
 
 @pytest.mark.asyncio
 async def test_attach_actions_edits_markup(monkeypatch):
-    import gateway.platforms.telegram as tg
+    import plugins.platforms.telegram.adapter as tg
 
     class _FakeBtn:
         def __init__(self, label, callback_data=None):
