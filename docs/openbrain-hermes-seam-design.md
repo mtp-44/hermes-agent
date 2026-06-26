@@ -234,3 +234,48 @@ by the 5c.4 update rehearsal.
 
 The consent commands `/nosave`, `/private`, `/capture-status` are **generic
 capture-consent controls, not Open Brain behavior** — they stay in core.
+
+## Phase 5c.3 steps 2–4 outcome (2026-06-26)
+
+**Step 2 (feedback → action seam) — DONE.** Built the generic plugin seams
+(`register_action_handler`, `register_outbound_decorator`, generic
+`stage/pop/attach_actions`), moved query 👍/👎 and proactive ✅/🙈 feedback onto the
+`act:` seam owned by the adapter plugins, and deleted every bespoke `obf:`/`prx:`
+branch + the `open_brain_feedback` staging from `gateway/run.py` /
+`gateway/platforms/{telegram,base}.py`. **No Open Brain feedback logic remains in
+Hermes core.** Proactive buttons are now minted cross-repo by the open_brain
+scripts as `act:prxa|prxd:<surface_id>` (a pinned 64-byte-budget contract).
+
+**Step 3 (`/ob`, `/note`) — DECIDED, both stay in core.**
+- `/ob` (`_handle_open_brain_capture_command`) is **provider-agnostic** — it commits
+  the conversation suffix to the *configured* memory provider
+  (`agent.commit_memory_session`) and imports nothing from `gateway.open_brain`.
+  It is generic session management, the same category as `/nosave` / `/private` /
+  `/capture-status`, and stays in core. (Name is historical.)
+- `/note` is the **one** Open Brain-specific command retained as documented core
+  glue: it needs the message `source` and the session `capture_private` flag, which
+  the thin `register_command(raw_args)` contract does not provide. A generic
+  richer-context command seam would be disproportionate for a single small command,
+  so we accept `/note` as a small, named, upstreamable fork delta rather than build
+  it (the design doc's option (a)). Revisit if a second session-aware plugin command
+  ever appears.
+
+**Step 4 (relocate core OB modules) — REVISED after reading the code.** The
+original plan ("relocate `gateway/open_brain.py` / `open_brain_feedback.py` under
+the adapter; delete `save_session_summary` / `distill_session_transcript` as dead
+after seam 1") rested on two assumptions that the code contradicts:
+- `save_session_summary` / `distill_session_transcript` are **not dead** —
+  `scripts/claude_code_stop_hook.py` calls `save_session_summary`. Keep them.
+- `gateway/open_brain.py` is a **shared OB client library** with consumers in core
+  (`/note`), a script (the Claude Code stop hook), and both adapter plugins.
+  Relocating it under a plugin package would force core and scripts to import *from*
+  `plugins/` — a backwards dependency. Keep it in `gateway/` as the documented
+  shared OB client (it is a thin MCP-call/builders library, not dispatch/product
+  logic in core).
+
+What step 4 **did** do: delete the genuinely-dead readback methods left in
+`gateway/run.py` after step-1's dispatch relocation — `_handle_brief_command`,
+`_handle_digest_command`, `_handle_stale_command`, `_handle_finance_check_command`,
+and the `_format_brief_timestamp` helper (−189 lines), plus their now-redundant
+direct tests (the behavior is covered by `tests/plugins/test_openbrain_commands_plugin.py`).
+NB: `_handle_jira_command` is interleaved in that region and is **live** (kept).

@@ -10396,6 +10396,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         return self._format_capture_status(session_entry)
 
     async def _handle_note_command(self, event: MessageEvent) -> str:
+        # Phase 5c.3 step 3 decision: /note is the one Open Brain-specific command
+        # retained as documented core glue. It needs the message source and the
+        # session's capture-private flag, which the thin plugin-command contract
+        # (raw_args only) doesn't provide; relocating it to the adapter would
+        # require a generic richer-context command seam — disproportionate for a
+        # single small command. Kept here as a small, named, upstreamable delta.
         note_text = event.get_command_args().strip()
         if not note_text:
             return "Usage: /note <text>"
@@ -10418,107 +10424,6 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         if record_id:
             return f"📝 {action} (`{record_id}`).{suffix}"
         return f"📝 {action}.{suffix}"
-
-    @staticmethod
-    def _format_brief_timestamp(raw_value: object) -> str:
-        text = str(raw_value or "").strip()
-        if not text:
-            return "unknown time"
-        try:
-            normalized = text.replace("Z", "+00:00")
-            parsed = datetime.fromisoformat(normalized)
-            return parsed.strftime("%Y-%m-%d %H:%M")
-        except ValueError:
-            return text
-
-    async def _handle_brief_command(self, event: MessageEvent) -> str:
-        query = event.get_command_args().strip()
-
-        try:
-            from gateway.open_brain import OpenBrainConfigError, fetch_briefing
-
-            items = await fetch_briefing(query=query or None, limit=3)
-        except OpenBrainConfigError as exc:
-            return f"Openbrain isn't configured for `/brief`: {exc}"
-        except Exception as exc:
-            logger.warning("Brief readback failed: %s", exc)
-            return f"⚠️ Brief readback failed: {exc}"
-
-        if not items:
-            if query:
-                return f"🧠 No Hermes captures matched `{query}`."
-            return "🧠 No recent Hermes captures found yet."
-
-        lines = ["🧠 **Brief**"]
-        if query:
-            lines.extend(["", f"Query: `{query}`"])
-        for item in items:
-            record_type = str(item.get("record_type") or "thought").replace("_", " ")
-            timestamp = self._format_brief_timestamp(item.get("created_at"))
-            excerpt = str(item.get("excerpt") or "").strip()
-            citation = str(item.get("citation") or "").strip()
-            source_id = str(item.get("source_id") or "").strip()
-            session_id = str(item.get("session_id") or "").strip()
-            cite_bits = [bit for bit in (citation, source_id or session_id) if bit]
-            cite_suffix = f" [{', '.join(cite_bits)}]" if cite_bits else ""
-            lines.append(f"- {timestamp} · {record_type}{cite_suffix}: {excerpt}")
-        return "\n".join(lines)
-
-    async def _handle_digest_command(self, event: MessageEvent) -> str:
-        query = event.get_command_args().strip()
-
-        try:
-            from gateway.open_brain import OpenBrainConfigError, fetch_digest
-
-            digest = await fetch_digest(query=query or None, days=7)
-        except OpenBrainConfigError as exc:
-            return f"Openbrain isn't configured for `/digest`: {exc}"
-        except Exception as exc:
-            logger.warning("Digest readback failed: %s", exc)
-            return f"⚠️ Digest readback failed: {exc}"
-
-        total_items = int(digest.get("total_items") or 0)
-        if total_items <= 0:
-            if query:
-                return f"🧠 No Hermes captures matched `{query}` for this week's digest."
-            return "🧠 No Hermes captures found for the last 7 days."
-
-        lines = ["🧠 **Digest**"]
-        if query:
-            lines.extend(["", f"Query: `{query}`"])
-        lines.extend(
-            [
-                "",
-                (
-                    f"Window: last 7 days · {total_items} captures "
-                    f"({int(digest.get('meeting_notes') or 0)} notes, "
-                    f"{int(digest.get('session_summaries') or 0)} summaries)"
-                ),
-            ]
-        )
-
-        decisions = digest.get("decisions") or []
-        if decisions:
-            lines.append("")
-            lines.append("Decisions & outcomes:")
-            for item in decisions:
-                lines.append(f"- {item['text']}{item.get('reference') or ''}")
-
-        actions = digest.get("actions") or []
-        if actions:
-            lines.append("")
-            lines.append("Open loops:")
-            for item in actions:
-                lines.append(f"- {item['text']}{item.get('reference') or ''}")
-
-        highlights = digest.get("highlights") or []
-        if highlights:
-            lines.append("")
-            lines.append("Highlights:")
-            for item in highlights:
-                lines.append(f"- {item['text']}{item.get('reference') or ''}")
-
-        return "\n".join(lines)
 
     async def _handle_jira_command(self, event: MessageEvent) -> str:
         query = event.get_command_args().strip()
@@ -10558,96 +10463,16 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         )
         return "\n".join(lines)
 
-    async def _handle_finance_check_command(self, event: MessageEvent) -> str:
-        try:
-            from gateway.open_brain import OpenBrainConfigError, fetch_finance_anomalies
-
-            report = await fetch_finance_anomalies()
-        except OpenBrainConfigError as exc:
-            return f"Openbrain isn't configured for `/finance-check`: {exc}"
-        except Exception as exc:
-            logger.warning("Finance check failed: %s", exc)
-            return f"⚠️ Finance check failed: {exc}"
-
-        if not report.get("has_anomalies"):
-            days = int(report.get("days") or 30)
-            current_total = report.get("current_total") or 0
-            return (
-                f"✅ No finance anomalies in the last {days} days. "
-                f"Total spend: {current_total:.0f}."
-            )
-
-        days = int(report.get("days") or 30)
-        current_total = float(report.get("current_total") or 0)
-        prior_total = float(report.get("prior_total") or 0)
-        lines = ["💰 **Finance check**", "", f"Period: last {days} days vs prior {days} days"]
-        if prior_total > 0:
-            overall_pct = (current_total - prior_total) / prior_total * 100
-            sign = "+" if overall_pct >= 0 else ""
-            lines.append(f"Total: {current_total:.0f} vs {prior_total:.0f} prior ({sign}{overall_pct:.0f}%)")
-        else:
-            lines.append(f"Total: {current_total:.0f} (no prior-period data)")
-
-        category_anomalies = report.get("category_anomalies") or []
-        if category_anomalies:
-            lines.extend(["", "Category anomalies:"])
-            for item in category_anomalies:
-                lines.append(f"- {item['category']}: {item['reason']}")
-
-        large_transactions = report.get("large_transactions") or []
-        if large_transactions:
-            lines.extend(["", "Large transactions:"])
-            for txn in large_transactions:
-                date_str = str(txn.get("date") or "").strip()
-                desc = str(txn.get("description") or txn.get("category") or "").strip()
-                amount = float(txn.get("amount") or 0)
-                date_prefix = f"{date_str}: " if date_str else ""
-                lines.append(f"- {date_prefix}{desc} ({amount:.0f})")
-
-        return "\n".join(lines)
-
-    async def _handle_stale_command(self, event: MessageEvent) -> str:
-        try:
-            from gateway.open_brain import OpenBrainConfigError, fetch_stale_items
-
-            report = await fetch_stale_items()
-        except OpenBrainConfigError as exc:
-            return f"Openbrain isn't configured for `/stale`: {exc}"
-        except Exception as exc:
-            logger.warning("Stale readback failed: %s", exc)
-            return f"⚠️ Stale readback failed: {exc}"
-
-        stale_actions = report.get("stale_actions") or []
-        stale_contacts = report.get("stale_contacts") or []
-        action_days = int(report.get("action_days") or 14)
-
-        if not stale_actions and not stale_contacts:
-            return f"✅ Nothing stale found in the last {action_days}+ days."
-
-        lines = ["🕰️ **Stale**"]
-
-        if stale_actions:
-            lines.extend(["", f"Open loops older than {action_days} days:"])
-            for item in stale_actions:
-                age = int(item.get("age_days") or 0)
-                text = str(item.get("text") or "").strip()
-                citation = str(item.get("citation") or "").strip()
-                cite_suffix = f" [{citation}]" if citation else ""
-                lines.append(f"- {age}d ago{cite_suffix}: {text}")
-
-        if stale_contacts:
-            lines.extend(["", "Contacts not mentioned recently:"])
-            for contact in stale_contacts:
-                name = str(contact.get("name") or "").strip()
-                excerpt = str(contact.get("excerpt") or "").strip()
-                citation = str(contact.get("citation") or "").strip()
-                cite_suffix = f" [{citation}]" if citation else ""
-                lines.append(f"- {name}{cite_suffix}: last seen in \"{excerpt}\"")
-
-        return "\n".join(lines)
-
     async def _handle_open_brain_capture_command(self, event: MessageEvent) -> Union[str, EphemeralReply]:
-        """Handle /ob command without resetting the live conversation."""
+        """Handle /ob command without resetting the live conversation.
+
+        Phase 5c.3 step 3 decision: despite the name, this is provider-agnostic
+        session management — it commits the conversation suffix to the *configured*
+        memory provider (``agent.commit_memory_session``) and imports nothing from
+        ``gateway.open_brain``. Like ``/nosave`` / ``/private`` / ``/capture-status``
+        it is a generic capture control and stays in core (it is not Open Brain
+        product logic, so it does not move to the adapter).
+        """
         source = event.source
         session_entry = self.session_store.get_or_create_session(source)
         history = self.session_store.load_transcript(session_entry.session_id)
