@@ -104,40 +104,10 @@ async def test_send_attaches_action_buttons_from_metadata():
     assert kwargs["reply_markup"] is not None
 
 
-@pytest.mark.asyncio
-async def test_feedback_callback_records_vote_and_clears_markup():
-    adapter = _make_adapter()
-    adapter._is_callback_user_authorized = MagicMock(return_value=True)
-    token = adapter._register_feedback_context({
-        "query_id": "q-2",
-        "query_text": "How far did I ride last month?",
-        "result_kind": "life_items",
-        "result_id": "ride-1",
-        "response_verdict": "answer",
-        "source": "hermes",
-    })
-
-    query = AsyncMock()
-    query.data = f"obf:g:{token}"
-    query.message = MagicMock()
-    query.message.chat_id = 12345
-    query.from_user = MagicMock()
-    query.from_user.id = "12345"
-    query.answer = AsyncMock()
-    query.edit_message_reply_markup = AsyncMock()
-
-    update = MagicMock()
-    update.callback_query = query
-    context = MagicMock()
-
-    with patch("gateway.platforms.telegram.record_query_feedback", new=AsyncMock(return_value={"id": "fb-1"})) as mock_record:
-        await adapter._handle_callback_query(update, context)
-
-    mock_record.assert_awaited_once()
-    kwargs = mock_record.await_args.kwargs
-    assert kwargs["verdict"] == "good"
-    assert kwargs["query_id"] == "q-2"
-    query.edit_message_reply_markup.assert_awaited_once_with(reply_markup=None)
+# NOTE: query-answer (👍/👎) feedback moved off the bespoke obf: branch onto the
+# generic act: message-action seam in Phase 5c.3 step 2. The recording behavior is
+# now covered by tests/plugins/test_openbrain_query_brain_format_plugin.py
+# (_handle_feedback) and the dispatch/auth by tests/gateway/test_message_actions.py.
 
 
 @pytest.mark.asyncio

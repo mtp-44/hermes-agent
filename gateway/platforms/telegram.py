@@ -8,7 +8,6 @@ Uses python-telegram-bot library for:
 """
 
 import asyncio
-from collections import OrderedDict
 import dataclasses
 import inspect
 import json
@@ -19,7 +18,6 @@ import html as _html
 import re
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Set, Any
-from uuid import uuid4
 
 logger = logging.getLogger(__name__)
 
@@ -90,7 +88,7 @@ from gateway.platforms.telegram_network import (
     parse_fallback_ip_env,
 )
 from utils import atomic_replace
-from gateway.open_brain import record_proactive_feedback, record_query_feedback
+from gateway.open_brain import record_proactive_feedback
 
 _TELEGRAM_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
 _TELEGRAM_IMAGE_MIME_TO_EXT = {
@@ -516,15 +514,12 @@ class TelegramAdapter(BasePlatformAdapter):
         # Tracks status bubbles owned by this adapter so subsequent calls with the
         # same key edit the same message instead of appending new ones (#30045).
         self._status_message_ids: Dict[tuple, str] = {}
-        # Query feedback callback contexts keyed by short token
-        self._feedback_entries: OrderedDict[str, dict] = OrderedDict()
-        self._feedback_max_entries = 200
-        self._staged_feedback: Dict[str, Any] = {}
         # Generic message-action handler (Phase 5c seam 3); set via
         # set_action_handler. None means no generic actions are dispatched.
         self._action_handler = None
-        # Generic staged actions keyed by session (Phase 5c seam 3); the generic
-        # counterpart of _staged_feedback. See stage_actions / pop_staged_actions.
+        # Generic staged actions keyed by session (Phase 5c seam 3). Feature code
+        # (e.g. the Open Brain feedback adapter) stages actions here for the
+        # send/attach paths. See stage_actions / pop_staged_actions.
         self._staged_actions: Dict[str, Any] = {}
 
     def _notification_kwargs(
@@ -593,92 +588,6 @@ class TelegramAdapter(BasePlatformAdapter):
             return os.getenv("GATEWAY_ALLOW_ALL_USERS", "").lower() in {"true", "1", "yes"}
         allowed_ids = {uid.strip() for uid in allowed_csv.split(",") if uid.strip()}
         return "*" in allowed_ids or normalized_user_id in allowed_ids
-
-    def _register_feedback_context(self, context: dict[str, Any]) -> str:
-        token = uuid4().hex[:12]
-        self._feedback_entries[token] = context
-        while len(self._feedback_entries) > self._feedback_max_entries:
-            self._feedback_entries.popitem(last=False)
-        return token
-
-    def _feedback_context(self, token: str) -> dict[str, Any] | None:
-        return self._feedback_entries.get(token)
-
-    def _build_feedback_keyboard(self, token: str) -> InlineKeyboardMarkup:
-        return InlineKeyboardMarkup([[
-            InlineKeyboardButton("👍 Good", callback_data=f"obf:g:{token}"),
-            InlineKeyboardButton("👎 Bad", callback_data=f"obf:b:{token}"),
-        ]])
-
-    def _feedback_markup_from_metadata(
-        self,
-        metadata: Optional[Dict[str, Any]],
-        *,
-        enabled: bool = True,
-    ) -> Any:
-        if not enabled or not metadata:
-            return None
-        context = metadata.get("open_brain_feedback")
-        if not isinstance(context, dict):
-            return None
-        token = self._register_feedback_context(context)
-        return self._build_feedback_keyboard(token)
-
-    def stage_open_brain_feedback(
-        self,
-        session_key: str,
-        context: dict[str, Any],
-        *,
-        generation: int | None = None,
-    ) -> None:
-        if not session_key or not isinstance(context, dict):
-            return
-        if generation is None:
-            self._staged_feedback[session_key] = context
-        else:
-            self._staged_feedback[session_key] = (int(generation), context)
-
-    def pop_staged_open_brain_feedback(
-        self,
-        session_key: str,
-        *,
-        generation: int | None = None,
-    ) -> dict[str, Any] | None:
-        if not session_key:
-            return None
-        entry = self._staged_feedback.get(session_key)
-        if entry is None:
-            return None
-        if isinstance(entry, tuple) and len(entry) == 2:
-            entry_generation, context = entry
-            if generation is not None and int(entry_generation) != int(generation):
-                return None
-            self._staged_feedback.pop(session_key, None)
-            return context if isinstance(context, dict) else None
-        if generation is not None:
-            return None
-        self._staged_feedback.pop(session_key, None)
-        return entry if isinstance(entry, dict) else None
-
-    async def attach_open_brain_feedback(
-        self,
-        chat_id: str,
-        message_id: str,
-        context: dict[str, Any],
-    ) -> bool:
-        if not self._bot or not chat_id or not message_id or not isinstance(context, dict):
-            return False
-        try:
-            token = self._register_feedback_context(context)
-            await self._bot.edit_message_reply_markup(
-                chat_id=int(chat_id),
-                message_id=int(message_id),
-                reply_markup=self._build_feedback_keyboard(token),
-            )
-            return True
-        except Exception as exc:
-            logger.debug("[%s] Failed to attach Open Brain feedback buttons: %s", self.name, exc)
-            return False
 
     # -- Generic message actions (Phase 5c seam 3) ---------------------------
     # Platform-agnostic interactive buttons. Feature code attaches
@@ -4187,9 +4096,9 @@ class TelegramAdapter(BasePlatformAdapter):
         query_user_name = getattr(query.from_user, "first_name", None)
 
         # --- Generic message-action callbacks (act:<action_id>:<token>) ---
-        # Phase 5c seam 3: platform-agnostic buttons. Feature-specific callback
-        # families (obf:, prx:, …) keep their own branches below until they
-        # migrate onto this seam.
+        # Phase 5c seam 3: platform-agnostic buttons. Open Brain query feedback
+        # rides this seam; prx: proactive feedback still has its own branch below
+        # (migrates in Stage C).
         if await self._dispatch_action_callback(query, data):
             return
 
@@ -4488,57 +4397,9 @@ class TelegramAdapter(BasePlatformAdapter):
                     )
             return
 
-        # --- Open Brain feedback callbacks (obf:verdict:token) ---
-        if data.startswith("obf:"):
-            parts = data.split(":", 2)
-            if len(parts) != 3:
-                await query.answer(text="Invalid feedback data.")
-                return
-
-            verdict_code = parts[1]
-            token = parts[2]
-            caller_id = str(getattr(query.from_user, "id", ""))
-            if not self._is_callback_user_authorized(
-                caller_id,
-                chat_id=query_chat_id,
-                chat_type=str(query_chat_type) if query_chat_type is not None else None,
-                thread_id=str(query_thread_id) if query_thread_id is not None else None,
-                user_name=query_user_name,
-            ):
-                await query.answer(text="⛔ You are not authorized to rate responses.")
-                return
-
-            context = self._feedback_context(token)
-            if not context:
-                await query.answer(text="This feedback prompt expired.")
-                return
-
-            verdict = "good" if verdict_code == "g" else "bad" if verdict_code == "b" else None
-            if verdict is None:
-                await query.answer(text="Unknown feedback choice.")
-                return
-
-            try:
-                await record_query_feedback(
-                    query_id=str(context.get("query_id") or ""),
-                    query_text=str(context.get("query_text") or ""),
-                    verdict=verdict,
-                    source=str(context.get("source") or "hermes"),
-                    result_kind=context.get("result_kind"),
-                    result_id=context.get("result_id"),
-                    response_verdict=context.get("response_verdict"),
-                )
-            except Exception as exc:
-                logger.warning("[%s] Failed to record Open Brain feedback: %s", self.name, exc)
-                await query.answer(text="⚠️ Couldn't save feedback.")
-                return
-
-            try:
-                await query.edit_message_reply_markup(reply_markup=None)
-            except Exception:
-                pass
-            await query.answer(text="Logged 👍" if verdict == "good" else "Logged 👎")
-            return
+        # Open Brain query-answer feedback (formerly the obf: branch) now rides
+        # the generic act: message-action seam, owned by the
+        # openbrain-query-brain-format adapter plugin (Phase 5c.3 step 2).
 
         # --- Open Brain proactive feedback callbacks (prx:a|d:surface_id) ---
         if data.startswith("prx:"):
