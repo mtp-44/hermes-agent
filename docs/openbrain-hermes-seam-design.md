@@ -279,3 +279,64 @@ What step 4 **did** do: delete the genuinely-dead readback methods left in
 and the `_format_brief_timestamp` helper (−189 lines), plus their now-redundant
 direct tests (the behavior is covered by `tests/plugins/test_openbrain_commands_plugin.py`).
 NB: `_handle_jira_command` is interleaved in that region and is **live** (kept).
+
+## Phase 5c.5 fork-delta audit (2026-06-26)
+
+Swept the Hermes fork's **core** (`gateway/`, `hermes_cli/`, `agent/`, `scripts/`,
+`tools/`) for every remaining Open Brain reference and classified it. Verdict:
+**for everything in 5c.3's declared scope — capture, retrieval, feedback, slash
+commands, MCP glue — no Open Brain *product logic* remains in core.** The fork
+delta is now generic seams + a small, named, documented glue surface, with one
+out-of-scope exception (the Strava tool).
+
+**A. Generic extension seams (Open-Brain-free; the upstreamable delta):**
+- `gateway/platforms/actions.py` — the `act:` message-action wire format.
+- `gateway/platforms/telegram.py` — generic action render/dispatch/auth +
+  `stage/pop/attach_actions`. Remaining OB strings are *comments* only.
+- `gateway/platforms/base.py` — generic staged-actions pop (comment only).
+- `gateway/boundary_capture.py` — generic session-boundary capture (seam 1).
+- `hermes_cli/plugins.py` — `register_action_handler` / `register_outbound_decorator`.
+- `gateway/run.py` — generic outbound-decorator consultation; generic boundary
+  capture. `/ob` (`_handle_open_brain_capture_command`) lives here but is
+  **provider-agnostic** (drives `commit_memory_session`, no `gateway.open_brain`
+  import) — generic, like `/nosave`. `gateway/slash_commands.py` `/reset`/`/new`
+  capture is likewise generic (a comment name-drops Open Brain; the code does not).
+
+**B. Documented minimal OB glue retained in core (small, named, upstreamable):**
+- `/note` — `gateway/run.py:_handle_note_command` + its `CommandDef` in
+  `hermes_cli/commands.py`. The one OB-specific slash command kept in core (needs
+  source + `capture_private`); see step-3 decision above.
+- `gateway/open_brain.py` — the shared OB **client library** (MCP-call helpers +
+  report builders). Consumed by `/note`, the Claude Code stop-hook script, and both
+  adapter plugins; kept in `gateway/` to avoid a core→`plugins/` back-dependency.
+- `gateway/open_brain_feedback.py` — feedback-candidate capture, consumed by the
+  query-format plugin's `post_tool_call` hook.
+
+**C. Operational / non-product (legitimately reference OB):**
+- `scripts/hermes_health_monitor.py` (OB health check),
+  `scripts/hermes_update_guard.py` (guards these very deltas),
+  `scripts/claude_code_stop_hook.py` (a *separate* Claude Code → Open Brain adapter
+  script that uses the shared client — not gateway core).
+
+**D. Adapter (where OB behavior correctly lives):**
+- `plugins/openbrain-query-brain-format/` (result formatting + query 👍/👎 feedback),
+  `plugins/openbrain-commands/` (read commands + proactive ✅/🙈 feedback),
+  `plugins/memory/openbrain/` (memory provider).
+
+**E. Out-of-scope finding — `tools/strava_tool.py`.** This is the **one** piece of
+genuine Open Brain product logic still in the Hermes fork: it writes activities
+**directly** to the open-brain Supabase (service-role REST) and **re-implements the
+embedding logic** (its own copy of `open_brain/core/embeddings.py`, kept in sync by
+hand). It bypasses the canonical hosted MCP — exactly the divergent capture path the
+9+ plan's Phase 1 set out to unify. It was never in the 5c.3 inventory (5c.3 scoped
+capture/retrieval/feedback/commands, not tools), so it does not block the 5c.6 gate,
+but it is the natural next target if "zero OB product logic in the fork" is desired:
+route Strava capture through the canonical `capture` contract / hosted MCP instead of
+direct DB writes + a duplicated embedder. Tracked separately.
+
+**5c.6 gate status:** met for the declared scope — a fresh upstream checkout + the
+Open Brain adapter (the two plugins + memory provider) restores `/ob`, session
+capture, feedback buttons, proactive callbacks, and hosted MCP access; the remaining
+core delta is generic seams + the documented `/note`/`/ob`/shared-client surface,
+all guarded by `hermes_update_guard.py`. The Strava tool (E) is the one named,
+out-of-scope product-logic delta still to adapter-ize.
