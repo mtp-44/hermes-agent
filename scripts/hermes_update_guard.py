@@ -59,6 +59,7 @@ LOCAL_DELTA_PATHS = (
     "agent/session_capture.py",
     "plugins/memory/openbrain/__init__.py",
     "plugins/openbrain-query-brain-format/__init__.py",
+    "plugins/openbrain-commands/__init__.py",
     "gateway/open_brain.py",
     "gateway/open_brain_feedback.py",
     "gateway/platforms/telegram.py",
@@ -103,6 +104,16 @@ LOCAL_DELTA_PATTERNS: tuple[tuple[str, str | tuple[str, ...]], ...] = (
     ),
     ("gateway/open_brain.py", "record_query_feedback"),
     ("gateway/open_brain_feedback.py", "capture_query_brain_feedback_candidate"),
+    # Proactive-surface ✅/🙈 feedback also rides the action seam, owned by the
+    # openbrain-commands adapter plugin: assert both the registration and the
+    # record call (Phase 5c.3 step 2, Stage C).
+    (
+        "plugins/openbrain-commands/__init__.py",
+        (
+            "register_action_handler(",
+            "record_proactive_feedback(",
+        ),
+    ),
     # Generic message-action seam the feedback feature now rides: the core must
     # consult outbound decorators (producer) and the telegram adapter must
     # dispatch action presses (consumer). These survive the bespoke-code removal.

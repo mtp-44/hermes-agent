@@ -140,3 +140,53 @@ def test_manager_skips_commands_when_not_enabled():
     # gateway restart).
     mgr = _load_manager_with_enabled(set())
     assert _OB_COMMANDS.isdisjoint(set(mgr._plugin_commands))
+
+
+# --- Proactive-surface feedback via the generic action seam (5c.3 Stage C) ----
+
+@pytest.mark.asyncio
+async def test_proactive_feedback_records_useful(monkeypatch):
+    import gateway.open_brain as ob
+    seen = {}
+
+    async def _record(**kwargs):
+        seen.update(kwargs)
+
+    monkeypatch.setattr(ob, "record_proactive_feedback", _record)
+    msg = await obc._handle_proactive_feedback("prxa", "surface-1", {})
+    assert msg == "Marked useful"
+    assert seen == {"surface_id": "surface-1", "status": "acted_on"}
+
+
+@pytest.mark.asyncio
+async def test_proactive_feedback_records_dismissed(monkeypatch):
+    import gateway.open_brain as ob
+    seen = {}
+
+    async def _record(**kwargs):
+        seen.update(kwargs)
+
+    monkeypatch.setattr(ob, "record_proactive_feedback", _record)
+    msg = await obc._handle_proactive_feedback("prxd", "surface-2", {})
+    assert msg == "Dismissed"
+    assert seen == {"surface_id": "surface-2", "status": "dismissed"}
+
+
+@pytest.mark.asyncio
+async def test_proactive_feedback_empty_token():
+    assert await obc._handle_proactive_feedback("prxa", "", {}) == "This proactive prompt expired."
+
+
+def test_register_wires_proactive_action_handlers():
+    class RichCtx(_Ctx):
+        def __init__(self):
+            super().__init__()
+            self.action_handlers = {}
+
+        def register_action_handler(self, action_id, handler):
+            self.action_handlers[action_id] = handler
+
+    ctx = RichCtx()
+    obc.register(ctx)
+    assert set(ctx.action_handlers) == {"prxa", "prxd"}
+    assert ctx.action_handlers["prxa"] is obc._handle_proactive_feedback

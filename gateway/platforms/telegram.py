@@ -88,7 +88,6 @@ from gateway.platforms.telegram_network import (
     parse_fallback_ip_env,
 )
 from utils import atomic_replace
-from gateway.open_brain import record_proactive_feedback
 
 _TELEGRAM_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
 _TELEGRAM_IMAGE_MIME_TO_EXT = {
@@ -4096,9 +4095,9 @@ class TelegramAdapter(BasePlatformAdapter):
         query_user_name = getattr(query.from_user, "first_name", None)
 
         # --- Generic message-action callbacks (act:<action_id>:<token>) ---
-        # Phase 5c seam 3: platform-agnostic buttons. Open Brain query feedback
-        # rides this seam; prx: proactive feedback still has its own branch below
-        # (migrates in Stage C).
+        # Phase 5c seam 3: platform-agnostic buttons. All Open Brain feedback
+        # (query 👍/👎 and proactive ✅/🙈) rides this seam, handled by the Open
+        # Brain adapter plugins — no feature-specific branches remain in core.
         if await self._dispatch_action_callback(query, data):
             return
 
@@ -4397,42 +4396,10 @@ class TelegramAdapter(BasePlatformAdapter):
                     )
             return
 
-        # Open Brain query-answer feedback (formerly the obf: branch) now rides
-        # the generic act: message-action seam, owned by the
-        # openbrain-query-brain-format adapter plugin (Phase 5c.3 step 2).
-
-        # --- Open Brain proactive feedback callbacks (prx:a|d:surface_id) ---
-        if data.startswith("prx:"):
-            parts = data.split(":", 2)
-            if len(parts) != 3:
-                await query.answer(text="Invalid proactive feedback data.")
-                return
-
-            action = parts[1]
-            surface_id = parts[2]
-            caller_id = str(getattr(query.from_user, "id", ""))
-            if not self._is_callback_user_authorized(caller_id):
-                await query.answer(text="⛔ You are not authorized to rate proactive surfaces.")
-                return
-
-            status = "acted_on" if action == "a" else "dismissed" if action == "d" else None
-            if status is None:
-                await query.answer(text="Unknown proactive feedback choice.")
-                return
-
-            try:
-                await record_proactive_feedback(surface_id=surface_id, status=status)
-            except Exception as exc:
-                logger.warning("[%s] Failed to record Open Brain proactive feedback: %s", self.name, exc)
-                await query.answer(text="⚠️ Couldn't save feedback.")
-                return
-
-            try:
-                await query.edit_message_reply_markup(reply_markup=None)
-            except Exception:
-                pass
-            await query.answer(text="Marked useful" if status == "acted_on" else "Dismissed")
-            return
+        # Open Brain feedback — query-answer 👍/👎 and proactive ✅/🙈 — now rides
+        # the generic act: message-action seam, owned by the Open Brain adapter
+        # plugins (openbrain-query-brain-format / openbrain-commands). No bespoke
+        # obf:/prx: branches remain in core (Phase 5c.3 step 2).
 
         # --- Update prompt callbacks ---
         if not data.startswith("update_prompt:"):

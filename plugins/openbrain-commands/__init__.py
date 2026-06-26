@@ -198,6 +198,31 @@ async def _handle_finance_check(raw_args: str) -> str:
     return "\n".join(lines)
 
 
+# Proactive-surface feedback (the ✅ Useful / 🙈 Dismiss buttons on daily-digest
+# and weekly-review nudges) rides the generic message-action seam. The buttons are
+# minted cross-repo by the open_brain scripts as ``act:prxa|prxd:<surface_id>``;
+# Hermes consumes the press here (Phase 5c.3 step 2, Stage C). action_id carries
+# the verdict, token carries the surface id.
+_PROACTIVE_USEFUL = "prxa"
+_PROACTIVE_DISMISS = "prxd"
+
+
+async def _handle_proactive_feedback(action_id: str, token: str, _context) -> str:
+    """Record a ✅ Useful / 🙈 Dismiss press on a proactive surface."""
+    surface_id = (token or "").strip()
+    if not surface_id:
+        return "This proactive prompt expired."
+    status = "acted_on" if action_id == _PROACTIVE_USEFUL else "dismissed"
+    try:
+        from gateway.open_brain import record_proactive_feedback
+
+        await record_proactive_feedback(surface_id=surface_id, status=status)
+    except Exception as exc:
+        logger.warning("Failed to record proactive feedback: %s", exc)
+        return "⚠️ Couldn't save feedback."
+    return "Marked useful" if status == "acted_on" else "Dismissed"
+
+
 def register(ctx) -> None:
     ctx.register_command(
         "brief", handler=_handle_brief,
@@ -215,3 +240,7 @@ def register(ctx) -> None:
         "finance-check", handler=_handle_finance_check,
         description="Check for finance anomalies against the prior period",
     )
+    # Proactive-surface ✅/🙈 feedback on the generic action seam (Stage C).
+    if hasattr(ctx, "register_action_handler"):
+        ctx.register_action_handler(_PROACTIVE_USEFUL, _handle_proactive_feedback)
+        ctx.register_action_handler(_PROACTIVE_DISMISS, _handle_proactive_feedback)
