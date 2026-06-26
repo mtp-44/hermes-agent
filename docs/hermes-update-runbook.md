@@ -51,6 +51,13 @@ cd /Users/mh/ai/agents/hermes-agent
 /Users/mh/ai/agents/hermes-agent/.venv/bin/python scripts/hermes_update_guard.py --post
 ```
 
+For the focused Hermes/Open Brain conformance suite, run:
+
+```bash
+cd /Users/mh/ai/agents/hermes-agent
+/Users/mh/ai/agents/hermes-agent/.venv/bin/python scripts/openbrain_conformance_smoke.py
+```
+
 This box runs 24/7 with network access, so `--live-smoke` is the default
 post-update expectation. Only drop it when running offline or in a sandbox that
 cannot reach Open Brain:
@@ -121,6 +128,10 @@ git push origin <tag-name>
   `.venv/bin/python -m pytest tests/plugins/test_openbrain_commands_plugin.py`
   exercises the real `PluginManager` and asserts the four commands load only
   when the plugin is enabled.
+- The broader local conformance wrapper is
+  `.venv/bin/python scripts/openbrain_conformance_smoke.py`. Use `--live-smoke`
+  when network access is available, and `--allow-dirty` only when auditing an
+  intentional local worktree change.
 - Keep the Open Brain hosted MCP as canonical. Do not point Hermes at the local
   experimental Open Brain MCP prototype.
 
@@ -185,6 +196,9 @@ Remotes:
 After dependencies, merge/replay, and restart:
 
 1. Run `scripts/hermes_update_guard.py --post`.
+   For the full local adapter smoke, run
+   `scripts/openbrain_conformance_smoke.py --phase post`; add `--live-smoke`
+   when Open Brain network access is available.
 2. Confirm `health-monitor.jsonl` has fresh healthy rows for:
    - `ollama`
    - `gateway`

@@ -528,6 +528,33 @@ _LIVE_SYSTEM_GUARD_BYPASS_MARK = "live_system_guard_bypass"
 
 def pytest_configure(config):  # noqa: D401 — pytest hook
     """Register markers used by hermetic conftest."""
+    # ── Session-wide HERMES_HOME isolation (before collection) ────────────
+    # The per-test ``_hermetic_environment`` fixture redirects HERMES_HOME
+    # to a tempdir, but that runs at test *setup* — too late for code that
+    # captures ``get_hermes_home()`` into a module-level global at *import*
+    # time. ``run_agent._hermes_home`` (run_agent.py) is the load-bearing
+    # example: it is frozen when ``run_agent`` is first imported, which
+    # happens during collection (e.g. test_message_timestamps.py imports it
+    # at module level). With a developer's HERMES_HOME unset, that global
+    # freezes to the real ``~/.hermes``. ``agent_init`` then feeds the
+    # frozen path straight into ``setup_logging()`` on the first
+    # ``AIAgent(...)`` construction, attaching RotatingFileHandlers for the
+    # *production* ``~/.hermes/logs/agent.log`` and ``errors.log`` onto the
+    # root logger for the rest of the process — so every later test's
+    # records pollute the real logs (and the import-time dotenv load could
+    # leak real credentials too).
+    #
+    # ``pytest_configure`` runs once per process *before* collection, so
+    # pinning HERMES_HOME here makes those import-time captures — and the
+    # file log handlers — land in a throwaway session tempdir. The per-test
+    # fixture still overrides this per test for normal isolation.
+    if not getattr(config, "_hermes_session_home", None):
+        import tempfile
+
+        session_home = tempfile.mkdtemp(prefix="hermes-pytest-session-")
+        os.environ["HERMES_HOME"] = session_home
+        config._hermes_session_home = session_home
+
     config.addinivalue_line(
         "markers",
         f"{_LIVE_SYSTEM_GUARD_BYPASS_MARK}: bypass the live-system guard "
@@ -542,6 +569,15 @@ def pytest_configure(config):  # noqa: D401 — pytest hook
     # suite runs natively there (POSIX keeps the more reliable signal method).
     if sys.platform == "win32" and getattr(config.option, "timeout_method", None) == "signal":
         config.option.timeout_method = "thread"
+
+
+def pytest_unconfigure(config):  # noqa: D401 — pytest hook
+    """Remove the throwaway session HERMES_HOME created in pytest_configure."""
+    session_home = getattr(config, "_hermes_session_home", None)
+    if session_home:
+        import shutil
+
+        shutil.rmtree(session_home, ignore_errors=True)
 
 
 @pytest.fixture(autouse=True)
