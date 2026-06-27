@@ -131,15 +131,6 @@ dependencies = [
   # above it ships in core rather than behind an extra + mid-session lazy
   # install (which deadlocked the CLI under prompt_toolkit — see #40490).
   "pypdf==6.14.2",
-  # Layout-aware PDF text + ruled-table extraction (tools/read_extract.py),
-  # the primary PDF engine ahead of pypdf. Its extract_text keeps each logical
-  # row (e.g. a bank-statement transaction with its amount) on one line, which
-  # pypdf's reading-order dump does not, and it pulls bordered tables as
-  # structured rows. Pulls pdfminer.six (pure-Python) + pypdfium2 (a single
-  # self-contained PDFium wheel); permissive licences throughout (unlike the
-  # AGPL PyMuPDF alternative). pypdf stays as the fallback for files pdfplumber
-  # chokes on.
-  "pdfplumber==0.11.10",
   # Windows log rotation. Stdlib ``RotatingFileHandler.doRollover()`` uses
   # ``os.rename()`` which fails with ``PermissionError [WinError 32]`` on
   # Windows whenever any other process holds an append-mode handle on

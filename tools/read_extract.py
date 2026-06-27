@@ -2,11 +2,10 @@
 
 Supports Jupyter notebooks, DOCX, XLSX, and PDF. The notebook/Office formats are
 parsed with the stdlib only (``zipfile`` + XML), no third-party deps. PDF uses
-``pdfplumber`` (layout-aware text + ruled-table extraction) with ``pypdf`` as a
-fallback — both core dependencies. A PDF's compressed content streams and
-font-encoding maps can't be decoded reliably without a real parser; a naive
-stdlib attempt silently produces garbage on exactly the documents that matter
-(e.g. financial statements with custom font encodings).
+``pypdf`` (a core dependency) because a PDF's compressed content streams and
+font-encoding maps can't be decoded reliably without it — a naive stdlib parser
+silently produces garbage on exactly the documents that matter (e.g. financial
+statements with custom font encodings).
 
 Malformed or unextractable documents raise :class:`ExtractionError`; callers can
 then fall back to normal text/binary handling.
@@ -107,24 +106,13 @@ def _extract_notebook(path: str) -> str:
 
 
 def _extract_pdf(path: str) -> str:
-    """Extract text (and ruled tables) from a PDF, one labelled block per page.
+    """Extract text from a PDF, one labelled block per page.
 
-    Primary engine is ``pdfplumber``: its layout-aware ``extract_text`` keeps
-    each logical row on one line (e.g. a bank-statement transaction with its
-    amount attached), which pypdf's reading-order dump does not, and it can
-    additionally pull *ruled* tables (bordered invoices/statements) as
-    structured rows. ``pypdf`` is the fallback when pdfplumber is unavailable or
-    chokes on a particular file.
-
-    Scanned / image-only PDFs have no text layer, so extraction yields nothing —
-    we raise :class:`ExtractionError` so the caller falls back to the
-    binary/vision hint rather than returning an empty document. (OCR of scanned
-    PDFs is the remaining Phase 8.1 follow-up.)
-
-    Note on tables: only the default ("lines") strategy is used, so we emit a
-    rendered table only when real ruled borders exist. The text-based table
-    strategy was evaluated and rejected — on whitespace-aligned bank statements
-    it splits words mid-token and is worse than the plain text.
+    Uses ``pypdf`` for the text layer. Scanned / image-only PDFs have no text
+    layer, so extraction yields nothing — we raise :class:`ExtractionError` in
+    that case so the caller falls back to the binary/vision hint rather than
+    returning an empty document. (OCR of scanned PDFs is the Phase 8.1 upgrade;
+    table-structure-aware extraction via ``pdfplumber`` is the other follow-up.)
     """
     try:
         size = Path(path).stat().st_size
@@ -135,82 +123,6 @@ def _extract_pdf(path: str) -> str:
             f"PDF is {size:,} bytes, over the {MAX_PDF_BYTES:,}-byte extraction limit"
         )
 
-    # Prefer pdfplumber; fall back to pypdf. A genuine "no text layer" result
-    # (ExtractionError) is re-raised — pypdf won't do better on a scanned PDF —
-    # but an unexpected pdfplumber failure on a parseable file falls through.
-    try:
-        import pdfplumber  # noqa: F401
-    except ImportError:
-        pass
-    else:
-        try:
-            return _extract_pdf_pdfplumber(path)
-        except ExtractionError:
-            raise
-        except Exception:  # noqa: BLE001 - malformed for pdfplumber; try pypdf
-            pass
-    return _extract_pdf_pypdf(path)
-
-
-def _render_table(rows: list) -> str:
-    """Render a pdfplumber table (list of rows of optional cells) as Markdown."""
-    cleaned = [
-        [(cell or "").replace("\n", " ").strip() for cell in row]
-        for row in rows
-    ]
-    cleaned = [row for row in cleaned if any(row)]
-    if not cleaned:
-        return ""
-    width = max(len(row) for row in cleaned)
-    cleaned = [row + [""] * (width - len(row)) for row in cleaned]
-    lines = ["| " + " | ".join(row) + " |" for row in cleaned]
-    if len(lines) > 1:
-        sep = "| " + " | ".join(["---"] * width) + " |"
-        lines.insert(1, sep)
-    return "\n".join(lines)
-
-
-def _extract_pdf_pdfplumber(path: str) -> str:
-    import pdfplumber
-
-    out: list[str] = []
-    found_text = False
-    with pdfplumber.open(path) as pdf:
-        total = len(pdf.pages)
-        for i, page in enumerate(pdf.pages[:_MAX_PDF_PAGES], start=1):
-            out.append(f"# ── Page {i} ──")
-            try:
-                text = page.extract_text() or ""
-            except Exception:  # noqa: BLE001 - one bad page shouldn't sink the doc
-                text = ""
-            if text.strip():
-                found_text = True
-                out.append(text.rstrip("\n"))
-            else:
-                out.append("(no extractable text — page may be scanned or image-only)")
-            # Ruled tables only (default strategy); skip on any failure.
-            try:
-                tables = page.extract_tables() or []
-            except Exception:  # noqa: BLE001
-                tables = []
-            for tnum, table in enumerate(tables, start=1):
-                rendered = _render_table(table)
-                if rendered:
-                    found_text = True
-                    out.append(f"\n[Table {i}.{tnum}]\n{rendered}")
-            out.append("")
-        if total > _MAX_PDF_PAGES:
-            out.append(f"(truncated: showing first {_MAX_PDF_PAGES} of {total} pages)")
-
-    if not found_text:
-        raise ExtractionError(
-            "PDF contains no extractable text (likely scanned or image-only); "
-            "use vision_analyze on rendered pages instead"
-        )
-    return "\n".join(out).rstrip("\n") + "\n"
-
-
-def _extract_pdf_pypdf(path: str) -> str:
     try:
         from pypdf import PdfReader
         from pypdf.errors import PyPdfError

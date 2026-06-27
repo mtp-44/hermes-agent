@@ -413,37 +413,6 @@ class TestPdfExtraction(unittest.TestCase):
         finally:
             read_extract.MAX_PDF_BYTES = original
 
-    def test_pypdf_fallback_when_pdfplumber_missing(self):
-        # Force `import pdfplumber` to raise ImportError so the pypdf fallback
-        # path runs; extraction must still succeed.
-        import sys
-        p = os.path.join(self.tmp, "fallback.pdf")
-        _write_pdf(p, ["Fallback figure 777"])
-        sentinel = object()
-        saved = sys.modules.get("pdfplumber", sentinel)
-        sys.modules["pdfplumber"] = None  # `import pdfplumber` -> ImportError
-        try:
-            text = extract_document_text(p)
-        finally:
-            if saved is sentinel:
-                sys.modules.pop("pdfplumber", None)
-            else:
-                sys.modules["pdfplumber"] = saved
-        self.assertIn("Fallback figure 777", text)
-
-    def test_render_table_markdown(self):
-        from tools.read_extract import _render_table
-        md = _render_table([["Date", "Amount"], ["2026-01-02", "+100"], [None, ""]])
-        self.assertIn("| Date | Amount |", md)
-        self.assertIn("| --- | --- |", md)        # header separator
-        self.assertIn("| 2026-01-02 | +100 |", md)
-        # Fully-empty rows are dropped.
-        self.assertNotIn("|  |  |", md)
-
-    def test_render_table_empty(self):
-        from tools.read_extract import _render_table
-        self.assertEqual(_render_table([[None, ""], ["", None]]), "")
-
     def test_read_file_tool_extracts_pdf(self):
         p = os.path.join(self.tmp, "report.pdf")
         _write_pdf(p, ["Quarterly revenue 9876"])
