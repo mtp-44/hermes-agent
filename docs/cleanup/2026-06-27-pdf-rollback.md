@@ -37,3 +37,18 @@ git cherry-pick 1df853da5 161bd917b   # or: git revert 5d6735fb6 2784adb09
 The proper Phase 8.1 must route extraction through **capture → retrieve** (chunk + store,
 answered via `query_brain`) so a document adds ~O(1) tokens to live context, not O(document).
 Full analysis: `open_brain/docs/perf_hermes_prompt_budget_2026-06-27.md`.
+
+## Follow-up same day: background skill-review disabled (GPU contention)
+
+The `background_review.py` self-improvement loop forks a second agent that replays the whole
+conversation (100K+ ctx) on the same single local GPU after sessions, starving interactive
+chat. ROI was poor (67 skills tracked, 80% never used). **Disabled via config** (no code change):
+
+- `~/.hermes/config.yaml` `skills.creation_nudge_interval: 0` (gate: `agent/turn_finalizer.py:377`,
+  source: `agent/agent_init.py:1213`; re-enable = `10`).
+- `~/.hermes/config.yaml` `agent.gateway_auto_continue_freshness: 0` (stop heavy interrupted
+  sessions auto-resurrecting on restart).
+
+The lighter `memory.nudge_interval` review (feeds open_brain memory) was left on. Rule going
+forward: any autonomous/background model pass must be idle-gated or off by default on this
+single-GPU host. See `open_brain/docs/perf_hermes_prompt_budget_2026-06-27.md` §"Follow-up".
