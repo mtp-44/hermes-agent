@@ -1765,13 +1765,6 @@ def _build_document_context_note(display_name: str, agent_path: str, mtype: str)
     wording ("Ask the user what they'd like you to do with it") steered the
     model into punting back to the user, which is why attached PDFs/DOCX looked
     "unreadable" to the agent even though it has the tools to read them.
-
-    read_file extracts PDF/DOCX/XLSX/notebook text directly (tools/read_extract.py),
-    so it is the simplest reliable path — point the agent there first rather than
-    at the terminal (which assumes pdftotext-style tools are installed) or a skill.
-    Those remain fallbacks for the cases read_file can't handle (scanned/image-only
-    PDFs with no text layer, where read_file returns a binary error and OCR/vision
-    is needed).
     """
     if mtype.startswith("text/"):
         return (
@@ -1782,11 +1775,9 @@ def _build_document_context_note(display_name: str, agent_path: str, mtype: str)
     return (
         f"[The user sent a document: '{display_name}'. It is saved at: {agent_path}. "
         f"Its text is not inlined here (it's a binary format such as PDF or DOCX). "
-        f"To read it, call read_file on that path — it extracts the text from "
-        f"PDF/DOCX/XLSX directly. Do that before answering, instead of asking the "
-        f"user to paste the contents. Only if read_file reports the file is binary "
-        f"with no extractable text (e.g. a scanned/image-only PDF) fall back to OCR "
-        f"via vision_analyze or the ocr-and-documents skill.]"
+        f"To read it, extract the document's text yourself — for example with the "
+        f"terminal tool or the ocr-and-documents skill — before answering, instead "
+        f"of asking the user to paste the contents.]"
     )
 
 

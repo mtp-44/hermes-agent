@@ -44,9 +44,6 @@ class TestBinaryDocumentNote:
         assert "/cache/doc_contract.pdf" in note
         # Tells the agent to read it by extracting the text...
         assert "extract" in note.lower()
-        # ...via read_file first (the simple reliable path; read_extract.py
-        # extracts PDF/DOCX/XLSX directly), not the terminal/skill long way.
-        assert "read_file" in note
         # ...and does NOT steer it into punting back to the user (the bug).
         assert "ask the user" not in note.lower()
         assert "paste" in note.lower()

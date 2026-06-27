@@ -121,16 +121,6 @@ dependencies = [
   # install rather than gating it behind an extra + a mid-session lazy install
   # (which deadlocked the CLI under prompt_toolkit — see #40490).
   "Pillow==12.2.0",
-  # PDF text extraction for read_file (tools/read_extract.py). A PDF's
-  # compressed content streams and custom font-encoding maps can't be decoded
-  # reliably without a real parser — the stdlib-only fallback silently produces
-  # garbage on exactly the documents that matter (financial statements with
-  # embedded font encodings). Reading documents is a general capability, not
-  # provider-specific, and pypdf is a pure-Python py3-none-any wheel (no
-  # compiled extensions), so by the same reasoning as Pillow/Markdown/packaging
-  # above it ships in core rather than behind an extra + mid-session lazy
-  # install (which deadlocked the CLI under prompt_toolkit — see #40490).
-  "pypdf==6.14.2",
   # Windows log rotation. Stdlib ``RotatingFileHandler.doRollover()`` uses
   # ``os.rename()`` which fails with ``PermissionError [WinError 32]`` on
   # Windows whenever any other process holds an append-mode handle on
