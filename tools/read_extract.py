@@ -1,8 +1,14 @@
-"""Stdlib document-to-text extraction for ``read_file``.
+"""Document-to-text extraction for ``read_file``.
 
-Supports Jupyter notebooks, DOCX, and XLSX without adding hard dependencies.
-Malformed documents raise :class:`ExtractionError`; callers can then fall back to
-normal text/binary handling.
+Supports Jupyter notebooks, DOCX, XLSX, and PDF. The notebook/Office formats are
+parsed with the stdlib only (``zipfile`` + XML), no third-party deps. PDF uses
+``pypdf`` (a core dependency) because a PDF's compressed content streams and
+font-encoding maps can't be decoded reliably without it — a naive stdlib parser
+silently produces garbage on exactly the documents that matter (e.g. financial
+statements with custom font encodings).
+
+Malformed or unextractable documents raise :class:`ExtractionError`; callers can
+then fall back to normal text/binary handling.
 """
 
 from __future__ import annotations
@@ -15,10 +21,12 @@ from xml.etree import ElementTree as ET
 
 __all__ = ["EXTRACTABLE_EXTENSIONS", "ExtractionError", "extract_document_text", "is_extractable_document"]
 
-EXTRACTABLE_EXTENSIONS = frozenset({".ipynb", ".docx", ".xlsx"})
+EXTRACTABLE_EXTENSIONS = frozenset({".ipynb", ".docx", ".xlsx", ".pdf"})
 MAX_XLSX_BYTES = 50 * 1024 * 1024
 _MAX_XLSX_ROWS_PER_SHEET = 5000
 _MAX_XLSX_COLS = 256
+MAX_PDF_BYTES = 100 * 1024 * 1024
+_MAX_PDF_PAGES = 300
 
 _NS_W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 _NS_S = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
@@ -47,6 +55,8 @@ def extract_document_text(path: str) -> str:
         return _extract_docx(path)
     if ext == ".xlsx":
         return _extract_xlsx(path)
+    if ext == ".pdf":
+        return _extract_pdf(path)
     raise ExtractionError(f"Unsupported document type: {path!r}")
 
 
@@ -92,6 +102,74 @@ def _extract_notebook(path: str) -> str:
         out.extend((f"# ── {labels[typ]} cell{suffix} ──", _source_text(cell.get("source", "")).rstrip("\n"), ""))
     if not out:
         raise ExtractionError("Notebook contains no readable cells")
+    return "\n".join(out).rstrip("\n") + "\n"
+
+
+def _extract_pdf(path: str) -> str:
+    """Extract text from a PDF, one labelled block per page.
+
+    Uses ``pypdf`` for the text layer. Scanned / image-only PDFs have no text
+    layer, so extraction yields nothing — we raise :class:`ExtractionError` in
+    that case so the caller falls back to the binary/vision hint rather than
+    returning an empty document. (OCR of scanned PDFs is the Phase 8.1 upgrade;
+    table-structure-aware extraction via ``pdfplumber`` is the other follow-up.)
+    """
+    try:
+        size = Path(path).stat().st_size
+    except OSError as exc:
+        raise ExtractionError(str(exc)) from exc
+    if size > MAX_PDF_BYTES:
+        raise ExtractionError(
+            f"PDF is {size:,} bytes, over the {MAX_PDF_BYTES:,}-byte extraction limit"
+        )
+
+    try:
+        from pypdf import PdfReader
+        from pypdf.errors import PyPdfError
+    except ImportError as exc:  # pragma: no cover - pypdf is a core dependency
+        raise ExtractionError("PDF extraction requires the 'pypdf' package") from exc
+
+    try:
+        reader = PdfReader(path)
+        if reader.is_encrypted:
+            # Many PDFs are encrypted only with an empty owner password
+            # (permission flags, not real access control); try that before
+            # giving up.
+            try:
+                reader.decrypt("")
+            except Exception as exc:  # noqa: BLE001 - pypdf raises various types
+                raise ExtractionError("PDF is password-protected") from exc
+        pages = reader.pages
+    except ExtractionError:
+        raise
+    except (PyPdfError, OSError, ValueError) as exc:
+        raise ExtractionError(f"Not a valid PDF: {exc}") from exc
+    except Exception as exc:  # noqa: BLE001 - pypdf can raise undocumented errors
+        raise ExtractionError(f"Could not parse PDF: {exc}") from exc
+
+    total = len(pages)
+    out: list[str] = []
+    found_text = False
+    for i, page in enumerate(pages[:_MAX_PDF_PAGES], start=1):
+        try:
+            text = page.extract_text() or ""
+        except Exception:  # noqa: BLE001 - one bad page shouldn't sink the doc
+            text = ""
+        out.append(f"# ── Page {i} ──")
+        if text.strip():
+            found_text = True
+            out.append(text.rstrip("\n"))
+        else:
+            out.append("(no extractable text — page may be scanned or image-only)")
+        out.append("")
+    if total > _MAX_PDF_PAGES:
+        out.append(f"(truncated: showing first {_MAX_PDF_PAGES} of {total} pages)")
+
+    if not found_text:
+        raise ExtractionError(
+            "PDF contains no extractable text (likely scanned or image-only); "
+            "use vision_analyze on rendered pages instead"
+        )
     return "\n".join(out).rstrip("\n") + "\n"
 
 

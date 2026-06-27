@@ -51,6 +51,71 @@ def _write_xlsx(path, *, workbook, rels, shared, sheets):
             z.writestr(part, xml)
 
 
+def _write_pdf(path, page_texts):
+    """Write a minimal valid PDF with one text-bearing page per string.
+
+    Builds the object table by hand with correct byte offsets so pypdf reads it
+    without needing its xref-repair path. Text is drawn with the standard
+    Helvetica font (no embedded font program), so the glyphs map straight back
+    to the source characters on extraction.
+    """
+    objects = []  # each entry is raw object body bytes (without "N 0 obj")
+
+    # 1: Catalog, 2: Pages — filled in after we know the page object numbers.
+    page_obj_nums = []
+    body_obj_nums = []
+    font_obj_num = 3 + 2 * len(page_texts)  # pages/contents occupy 3..N, font last
+
+    obj_bodies = {}
+    obj_bodies[1] = b"<< /Type /Catalog /Pages 2 0 R >>"
+
+    next_num = 3
+    for text in page_texts:
+        page_num = next_num
+        content_num = next_num + 1
+        page_obj_nums.append(page_num)
+        body_obj_nums.append(content_num)
+        obj_bodies[page_num] = (
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
+            b"/Contents %d 0 R /Resources << /Font << /F1 %d 0 R >> >> >>"
+            % (content_num, font_obj_num)
+        )
+        stream = (
+            b"BT /F1 18 Tf 72 700 Td (" + text.encode("latin-1") + b") Tj ET"
+        )
+        obj_bodies[content_num] = (
+            b"<< /Length %d >>\nstream\n%s\nendstream" % (len(stream), stream)
+        )
+        next_num += 2
+
+    kids = b" ".join(b"%d 0 R" % n for n in page_obj_nums)
+    obj_bodies[2] = (
+        b"<< /Type /Pages /Kids [%s] /Count %d >>" % (kids, len(page_obj_nums))
+    )
+    obj_bodies[font_obj_num] = (
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"
+    )
+
+    total_objs = font_obj_num
+    out = bytearray(b"%PDF-1.4\n")
+    offsets = {}
+    for num in range(1, total_objs + 1):
+        offsets[num] = len(out)
+        out += b"%d 0 obj\n" % num + obj_bodies[num] + b"\nendobj\n"
+
+    xref_pos = len(out)
+    out += b"xref\n0 %d\n" % (total_objs + 1)
+    out += b"0000000000 65535 f \n"
+    for num in range(1, total_objs + 1):
+        out += b"%010d 00000 n \n" % offsets[num]
+    out += (
+        b"trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF"
+        % (total_objs + 1, xref_pos)
+    )
+    with open(path, "wb") as fh:
+        fh.write(out)
+
+
 _NS_W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 _NS_S = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 
@@ -64,10 +129,11 @@ class TestIsExtractable(unittest.TestCase):
         self.assertTrue(is_extractable_document("a.ipynb"))
         self.assertTrue(is_extractable_document("/x/B.DOCX"))
         self.assertTrue(is_extractable_document("report.xlsx"))
+        self.assertTrue(is_extractable_document("statement.pdf"))
+        self.assertTrue(is_extractable_document("/x/Q4.PDF"))
 
     def test_unrecognized_extensions(self):
         self.assertFalse(is_extractable_document("a.py"))
-        self.assertFalse(is_extractable_document("a.pdf"))
         self.assertFalse(is_extractable_document("a.txt"))
 
 
@@ -289,6 +355,80 @@ class TestReadFileToolIntegration(unittest.TestCase):
         res = json.loads(read_file_tool(p))
         self.assertTrue(res.get("extracted_document"))
         self.assertIn("Report body", res["content"])
+
+
+# ---------------------------------------------------------------------------
+# PDF documents (.pdf)
+# ---------------------------------------------------------------------------
+
+class TestPdfExtraction(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="rex_pdf_")
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_single_page_text(self):
+        p = os.path.join(self.tmp, "stmt.pdf")
+        _write_pdf(p, ["Net income 1234.56 USD"])
+        text = extract_document_text(p)
+        self.assertIn("Net income 1234.56 USD", text)
+        self.assertIn("# ── Page 1 ──", text)
+
+    def test_multi_page_order_and_labels(self):
+        p = os.path.join(self.tmp, "multi.pdf")
+        _write_pdf(p, ["First page total 100", "Second page total 200"])
+        text = extract_document_text(p)
+        self.assertIn("First page total 100", text)
+        self.assertIn("Second page total 200", text)
+        self.assertIn("# ── Page 2 ──", text)
+        # Page order preserved.
+        self.assertLess(text.index("First page"), text.index("Second page"))
+
+    def test_not_a_pdf_raises(self):
+        p = os.path.join(self.tmp, "bad.pdf")
+        with open(p, "wb") as fh:
+            fh.write(b"this is plainly not a pdf at all")
+        with self.assertRaises(ExtractionError):
+            extract_document_text(p)
+
+    def test_scanned_pdf_no_text_raises(self):
+        # A page with no text-drawing operators stands in for a scanned /
+        # image-only PDF: there is no text layer to extract.
+        p = os.path.join(self.tmp, "scanned.pdf")
+        _write_pdf(p, [""])
+        with self.assertRaises(ExtractionError):
+            extract_document_text(p)
+
+    def test_oversize_pdf_raises(self):
+        from tools import read_extract
+        p = os.path.join(self.tmp, "huge.pdf")
+        _write_pdf(p, ["small"])
+        original = read_extract.MAX_PDF_BYTES
+        read_extract.MAX_PDF_BYTES = 10  # force the size guard
+        try:
+            with self.assertRaises(ExtractionError):
+                extract_document_text(p)
+        finally:
+            read_extract.MAX_PDF_BYTES = original
+
+    def test_read_file_tool_extracts_pdf(self):
+        p = os.path.join(self.tmp, "report.pdf")
+        _write_pdf(p, ["Quarterly revenue 9876"])
+        res = json.loads(read_file_tool(p))
+        self.assertTrue(res.get("extracted_document"))
+        self.assertIn("Quarterly revenue 9876", res["content"])
+        self.assertIn("1|", res["content"])  # line-number gutter
+
+    def test_read_file_tool_scanned_pdf_falls_through_to_binary_guard(self):
+        p = os.path.join(self.tmp, "scan.pdf")
+        _write_pdf(p, [""])
+        res = json.loads(read_file_tool(p))
+        # No text layer -> ExtractionError -> binary-extension guard (now lists
+        # .pdf) -> clean error rather than gibberish.
+        self.assertIn("error", res)
+        self.assertIn("binary", res["error"].lower())
 
 
 if __name__ == "__main__":

@@ -16,7 +16,12 @@ BINARY_EXTENSIONS = frozenset({
     # Executables/binaries
     ".exe", ".dll", ".so", ".dylib", ".bin", ".o", ".a", ".obj", ".lib",
     ".app", ".msi", ".deb", ".rpm",
-    # Documents (exclude .pdf — text-based, agents may want to inspect)
+    # Documents. These are binary containers, NOT text — reading the raw bytes
+    # as a string yields gibberish. read_file routes the extractable ones
+    # (.pdf/.docx/.xlsx) through tools/read_extract.py BEFORE this guard, so
+    # listing them here only catches the fallback (e.g. a scanned PDF with no
+    # text layer), which then returns a clean "binary file" error.
+    ".pdf",
     ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx",
     ".odt", ".ods", ".odp",
     # Fonts
