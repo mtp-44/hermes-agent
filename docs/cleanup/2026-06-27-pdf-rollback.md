@@ -60,7 +60,9 @@ While verifying the above was still aligned, found the local model had been swap
 ollama-serve mechanisms racing for port 11434 (`homebrew.mxcl.ollama`, custom `com.mh.ollama`,
 and the Electron `Ollama.app` logging 47,941 bind errors/day). Consolidated to `com.mh.ollama`
 (has `KEEP_ALIVE=-1` → warm model → big KV-cache-reuse win) as sole port owner; retired the
-homebrew plist; killed the Electron app (still need manual "Launch at login" off in its settings).
+homebrew plist; killed the Electron app. **No further action needed (corrected 2026-06-28):** the
+app's login item is already disabled in btm; the only enabled login agent is the Squirrel updater,
+which never binds the port. Just don't manually open the Ollama.app GUI.
 Re-baselined the MLX prefill curve (cold ~800–1,560 tok/s, hard knee → 110s at 82K; warm cache
 hits ~0s). **No hermes-agent code involved — system/launchd + config only.** Full analysis +
 numbers + bench harness in `open_brain/docs/perf_hermes_prompt_budget_2026-06-27.md`
