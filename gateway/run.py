@@ -16644,6 +16644,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         _notify_task = asyncio.create_task(_notify_long_running())
 
         try:
+            # Bind early so the `finally` below can always reference it.  The
+            # real population happens after the agent run (see ~16850), but an
+            # interrupt/cancellation or exception before that point would jump
+            # straight to the finally and raise UnboundLocalError, masking the
+            # original error and orphaning cleanup (e.g. the typing refresh).
+            _outbound_actions: list = []
             # Run in thread pool to not block.  Use an *inactivity*-based
             # timeout instead of a wall-clock limit: the agent can run for
             # hours if it's actively calling tools / receiving stream tokens,
