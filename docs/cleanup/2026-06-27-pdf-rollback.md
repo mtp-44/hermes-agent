@@ -52,3 +52,16 @@ chat. ROI was poor (67 skills tracked, 80% never used). **Disabled via config** 
 The lighter `memory.nudge_interval` review (feeds open_brain memory) was left on. Rule going
 forward: any autonomous/background model pass must be idle-gated or off by default on this
 single-GPU host. See `open_brain/docs/perf_hermes_prompt_budget_2026-06-27.md` §"Follow-up".
+
+## 2026-06-28: model swap surfaced + ollama server consolidation
+
+While verifying the above was still aligned, found the local model had been swapped to
+`qwen3.6:35b-mlx` (MLX engine) — none of the perf docs reflected it. Also found **three**
+ollama-serve mechanisms racing for port 11434 (`homebrew.mxcl.ollama`, custom `com.mh.ollama`,
+and the Electron `Ollama.app` logging 47,941 bind errors/day). Consolidated to `com.mh.ollama`
+(has `KEEP_ALIVE=-1` → warm model → big KV-cache-reuse win) as sole port owner; retired the
+homebrew plist; killed the Electron app (still need manual "Launch at login" off in its settings).
+Re-baselined the MLX prefill curve (cold ~800–1,560 tok/s, hard knee → 110s at 82K; warm cache
+hits ~0s). **No hermes-agent code involved — system/launchd + config only.** Full analysis +
+numbers + bench harness in `open_brain/docs/perf_hermes_prompt_budget_2026-06-27.md`
+§"Model swap + re-baseline on qwen3.6-mlx".
