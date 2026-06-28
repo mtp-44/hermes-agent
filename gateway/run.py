@@ -5226,6 +5226,57 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             return False
         return True
 
+    # Upper bound on off-loop agent-resource cleanup invoked from coroutines
+    # running on the gateway's event loop (session-expiry sweep, in-turn
+    # cache-hygiene re-eviction). _cleanup_agent_resources is synchronous and
+    # can block for a long time (agent.close() does subprocess teardown;
+    # shutdown_memory_provider() may do network/SQLite IO via a memory plugin).
+    # Calling it inline wedges the whole loop — the bot goes silent, the
+    # runtime-status updated_at heartbeat freezes, and SIGTERM cannot be
+    # serviced (#53175). Offload to a worker thread under this timeout so the
+    # loop is never blocked; mirrors the /new reset path's fix (#35994).
+    _CLEANUP_TIMEOUT_S = 30.0
+
+    async def _cleanup_agent_resources_off_loop(
+        self, agent: Any, *, context: str = ""
+    ) -> None:
+        """Run _cleanup_agent_resources in a worker thread with a bounded wait.
+
+        Safe to await from coroutines on the gateway event loop: a slow or
+        wedged teardown (memory provider IO, subprocess close) can no longer
+        block message processing. On timeout the await is cancelled and the
+        worker thread is left to finish (or leak) on its own — the caller
+        proceeds regardless, exactly as the /new reset path does (#35994).
+        """
+        if agent is None:
+            return
+        if context.startswith("shutdown"):
+            try:
+                agent._end_session_on_close = False
+            except Exception:
+                pass
+        try:
+            await asyncio.wait_for(
+                self._run_in_executor_with_context(
+                    self._cleanup_agent_resources, agent
+                ),
+                timeout=self._CLEANUP_TIMEOUT_S,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Agent resource cleanup%s exceeded %ss; proceeding without "
+                "blocking the event loop (the worker thread is left to finish "
+                "on its own). (#53175)",
+                f" ({context})" if context else "",
+                self._CLEANUP_TIMEOUT_S,
+            )
+        except Exception as cleanup_exc:
+            logger.warning(
+                "Agent resource cleanup%s failed: %s (#53175)",
+                f" ({context})" if context else "",
+                cleanup_exc,
+            )
+
     def _cleanup_agent_resources(self, agent: Any) -> None:
         """Best-effort cleanup for temporary or cached agent instances."""
         if agent is None:
