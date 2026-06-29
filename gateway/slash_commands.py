@@ -290,7 +290,7 @@ class GatewaySlashCommandsMixin:
                 _title_note = t("gateway.reset.title_rejected", error=str(e))
             if sanitized:
                 try:
-                    self._session_db.set_session_title(new_entry.session_id, sanitized)
+                    await self._session_db.set_session_title(new_entry.session_id, sanitized)
                     header = t("gateway.reset.header_titled", title=sanitized)
                 except ValueError as e:
                     _title_note = t("gateway.reset.title_error_untitled", error=str(e))
@@ -542,11 +542,11 @@ class GatewaySlashCommandsMixin:
         db_total_tokens = 0
         if self._session_db:
             try:
-                title = self._session_db.get_session_title(session_entry.session_id)
+                title = await self._session_db.get_session_title(session_entry.session_id)
             except Exception:
                 title = None
             try:
-                row = self._session_db.get_session(session_entry.session_id)
+                row = await self._session_db.get_session(session_entry.session_id)
                 if isinstance(row, dict):
                     session_row = row
                     db_total_tokens = (
@@ -3186,7 +3186,7 @@ class GatewaySlashCommandsMixin:
 
         # /topic off — clean disable path so users don't have to edit the DB.
         if args.lower() in {"off", "disable", "stop"}:
-            return self._disable_telegram_topic_mode_for_chat(source)
+            return await self._disable_telegram_topic_mode_for_chat(source)
 
         if args:
             if not source.thread_id:
@@ -3207,7 +3207,7 @@ class GatewaySlashCommandsMixin:
                 return t("gateway.topic.topics_user_disallowed")
 
         try:
-            self._session_db.enable_telegram_topic_mode(
+            await self._session_db.enable_telegram_topic_mode(
                 chat_id=str(source.chat_id),
                 user_id=str(source.user_id),
                 has_topics_enabled=capabilities.get("has_topics_enabled"),
@@ -3222,7 +3222,7 @@ class GatewaySlashCommandsMixin:
 
         if source.thread_id:
             try:
-                binding = self._session_db.get_telegram_topic_binding(
+                binding = await self._session_db.get_telegram_topic_binding(
                     chat_id=str(source.chat_id),
                     thread_id=str(source.thread_id),
                 )
@@ -3233,7 +3233,7 @@ class GatewaySlashCommandsMixin:
                 session_id = str(binding.get("session_id") or "")
                 title = None
                 try:
-                    title = self._session_db.get_session_title(session_id)
+                    title = await self._session_db.get_session_title(session_id)
                 except Exception:
                     title = None
                 session_label = title or t("gateway.topic.untitled_session")
@@ -3244,7 +3244,7 @@ class GatewaySlashCommandsMixin:
                 )
             return t("gateway.topic.thread_ready")
 
-        return self._telegram_topic_root_status_message(source)
+        return await self._telegram_topic_root_status_message(source)
 
     async def _handle_title_command(self, event: MessageEvent) -> str:
         """Handle /title command — set or show the current session's title."""
@@ -3258,11 +3258,11 @@ class GatewaySlashCommandsMixin:
 
         # Ensure session exists in SQLite DB (it may only exist in session_store
         # if this is the first command in a new session)
-        existing_title = self._session_db.get_session_title(session_id)
+        existing_title = await self._session_db.get_session_title(session_id)
         if existing_title is None:
             # Session doesn't exist in DB yet — create it
             try:
-                self._session_db.create_session(
+                await self._session_db.create_session(
                     session_id=session_id,
                     source=source.platform.value if source.platform else "unknown",
                     user_id=source.user_id,
@@ -3274,14 +3274,15 @@ class GatewaySlashCommandsMixin:
         if title_arg:
             # Sanitize the title before setting
             try:
-                sanitized = self._session_db.sanitize_title(title_arg)
+                from hermes_state import SessionDB
+                sanitized = SessionDB.sanitize_title(title_arg)
             except ValueError as e:
                 return t("gateway.shared.warn_passthrough", error=e)
             if not sanitized:
                 return t("gateway.title.empty_after_clean")
             # Set the title
             try:
-                if self._session_db.set_session_title(session_id, sanitized):
+                if await self._session_db.set_session_title(session_id, sanitized):
                     # Propagate the user-chosen title to the visible Telegram
                     # forum topic name too. Auto-generated titles already rename
                     # the topic; without this, /title only updated the DB title
@@ -3305,7 +3306,7 @@ class GatewaySlashCommandsMixin:
                 return t("gateway.shared.warn_passthrough", error=e)
         else:
             # Show the current title and session ID
-            title = self._session_db.get_session_title(session_id)
+            title = await self._session_db.get_session_title(session_id)
             if title:
                 return t("gateway.title.current_with_title", session_id=session_id, title=title)
             else:
@@ -3338,15 +3339,15 @@ class GatewaySlashCommandsMixin:
         ):
             name = name[1:-1].strip()
 
-        def _list_titled_sessions() -> list[dict]:
+        async def _list_titled_sessions() -> list[dict]:
             user_source = source.platform.value if source.platform else None
-            sessions = self._session_db.list_sessions_rich(source=user_source, limit=10)
+            sessions = await self._session_db.list_sessions_rich(source=user_source, limit=10)
             return [s for s in sessions if s.get("title")][:10]
 
         if not name:
             # List recent titled sessions for this user/platform
             try:
-                titled = _list_titled_sessions()
+                titled = await _list_titled_sessions()
                 titled = [
                     s for s in titled
                     if await self._resume_row_visible(source, s, allow_all)
@@ -3374,7 +3375,7 @@ class GatewaySlashCommandsMixin:
         # Resolve a numbered choice or a title to a session ID.
         if name.isdigit():
             try:
-                titled = _list_titled_sessions()
+                titled = await _list_titled_sessions()
                 titled = [
                     s for s in titled
                     if await self._resume_row_visible(source, s, allow_all)
@@ -3391,17 +3392,17 @@ class GatewaySlashCommandsMixin:
         else:
             # Try direct session ID lookup first (so `/resume <session_id>`
             # works in the gateway, not just `/resume <title>`).
-            session = self._session_db.get_session(name)
+            session = await self._session_db.get_session(name)
             if session:
                 target_id = session["id"]
             else:
-                target_id = self._session_db.resolve_session_by_title(name)
+                target_id = await self._session_db.resolve_session_by_title(name)
         if not target_id:
             return t("gateway.resume.not_found", name=name)
         # Compression creates child continuations that hold the live transcript.
         # Follow that chain so gateway /resume matches CLI behavior (#15000).
         try:
-            target_id = self._session_db.resolve_resume_session_id(target_id)
+            target_id = await self._session_db.resolve_resume_session_id(target_id)
         except Exception as e:
             logger.debug("Failed to resolve resume continuation for %s: %s", target_id, e)
 
@@ -3446,7 +3447,7 @@ class GatewaySlashCommandsMixin:
         self._evict_cached_agent(session_key)
 
         # Get the title for confirmation
-        title = self._session_db.get_session_title(target_id) or name
+        title = await self._session_db.get_session_title(target_id) or name
 
         # Count messages for context
         history = self.session_store.load_transcript(target_id)
@@ -3553,9 +3554,9 @@ class GatewaySlashCommandsMixin:
         if branch_name:
             branch_title = branch_name
         else:
-            current_title = self._session_db.get_session_title(current_entry.session_id)
+            current_title = await self._session_db.get_session_title(current_entry.session_id)
             base = current_title or "branch"
-            branch_title = self._session_db.get_next_title_in_lineage(base)
+            branch_title = await self._session_db.get_next_title_in_lineage(base)
 
         parent_session_id = current_entry.session_id
 
@@ -3565,7 +3566,7 @@ class GatewaySlashCommandsMixin:
         # /sessions even after the parent is reopened and re-ended with a
         # different end_reason (e.g. tui_shutdown overwriting 'branched').
         try:
-            self._session_db.create_session(
+            await self._session_db.create_session(
                 session_id=new_session_id,
                 source=source.platform.value if source.platform else "gateway",
                 model=(self.config.get("model", {}) or {}).get("default") if isinstance(self.config, dict) else None,
@@ -3579,7 +3580,7 @@ class GatewaySlashCommandsMixin:
         # Copy conversation history to the new session
         for msg in history:
             try:
-                self._session_db.append_message(
+                await self._session_db.append_message(
                     session_id=new_session_id,
                     role=msg.get("role", "user"),
                     content=msg.get("content"),
@@ -3598,7 +3599,7 @@ class GatewaySlashCommandsMixin:
 
         # Set title
         try:
-            self._session_db.set_session_title(new_session_id, branch_title)
+            await self._session_db.set_session_title(new_session_id, branch_title)
         except Exception:
             pass
 
@@ -3681,7 +3682,7 @@ class GatewaySlashCommandsMixin:
         if not provider and getattr(self, "_session_db", None) is not None:
             try:
                 _entry_for_billing = self.session_store.get_or_create_session(source)
-                persisted = self._session_db.get_session(_entry_for_billing.session_id) or {}
+                persisted = await self._session_db.get_session(_entry_for_billing.session_id) or {}
             except Exception:
                 persisted = {}
             provider = provider or persisted.get("billing_provider")
