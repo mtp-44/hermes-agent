@@ -174,6 +174,40 @@ class TestHandleResumeCommand:
         db.close()
 
     @pytest.mark.asyncio
+    async def test_resume_clears_session_model_overrides(self, tmp_path):
+        """Resume must not carry a previous session's /model override into the
+        restored conversation, while leaving other chats' overrides intact (#10702)."""
+        from hermes_state import SessionDB
+        db = SessionDB(db_path=tmp_path / "state.db")
+        db.create_session("old_session_abc", "telegram", user_id="12345", chat_id="67890")
+        db.set_session_title("old_session_abc", "My Project")
+        db.create_session("current_session_001", "telegram", user_id="12345", chat_id="67890")
+
+        event = _make_event(text="/resume My Project")
+        runner = _make_runner(session_db=db, current_session_id="current_session_001",
+                              event=event)
+        key = _session_key_for_event(event)
+        runner._session_model_overrides = {
+            key: {"model": "gpt-5", "provider": "openai"},
+            "agent:main:telegram:dm:other": {"model": "keep-me"},
+        }
+        runner._pending_model_notes = {
+            key: "[Note: switched to gpt-5]",
+            "agent:main:telegram:dm:other": "[Note: keep-me]",
+        }
+
+        result = await runner._handle_resume_command(event)
+
+        assert "Resumed" in result
+        # The resumed chat's override + pending note are cleared...
+        assert key not in runner._session_model_overrides
+        assert key not in runner._pending_model_notes
+        # ...but an unrelated chat's state is untouched.
+        assert runner._session_model_overrides["agent:main:telegram:dm:other"] == {"model": "keep-me"}
+        assert runner._pending_model_notes["agent:main:telegram:dm:other"] == "[Note: keep-me]"
+        db.close()
+
+    @pytest.mark.asyncio
     async def test_resume_nonexistent_name(self, tmp_path):
         """Returns error for unknown session name."""
         from hermes_state import SessionDB
@@ -525,7 +559,8 @@ class TestHandleSessionsCommand:
             assert "Resumed" not in result, name
         db.close()
 
-    def test_resume_target_allowed_chat_scope(self, tmp_path):
+    @pytest.mark.asyncio
+    async def test_resume_target_allowed_chat_scope(self, tmp_path):
         """Unit-level: identity-bearing persisted fallback requires the row's
         origin chat (and thread) to match the caller's."""
         from hermes_state import SessionDB
@@ -540,9 +575,33 @@ class TestHandleSessionsCommand:
         caller = SessionSource(platform=Platform.TELEGRAM, chat_id="chat-a",
                                chat_type="group", user_id="12345")
         # Same chat → allowed; different chat → blocked; legacy NULL-chat → blocked.
-        assert runner._resume_target_allowed(caller, "row_chat_a", allow_override=False) is True
-        assert runner._resume_target_allowed(caller, "row_chat_b", allow_override=False) is False
-        assert runner._resume_target_allowed(caller, "row_legacy_nochat", allow_override=False) is False
+        assert await runner._resume_target_allowed(caller, "row_chat_a", allow_override=False) is True
+        assert await runner._resume_target_allowed(caller, "row_chat_b", allow_override=False) is False
+        assert await runner._resume_target_allowed(caller, "row_legacy_nochat", allow_override=False) is False
+        # egilewski/CodeRabbit probe: a GROUP caller that itself has no chat_id
+        # must NOT resume a legacy NULL-chat row just because both normalize to
+        # "" — a non-DM session is keyed by chat_id, so blank == no provenance.
+        blank_caller = SessionSource(platform=Platform.TELEGRAM, chat_id=None,
+                                     chat_type="group", user_id="12345")
+        assert await runner._resume_target_allowed(blank_caller, "row_legacy_nochat",
+                                             allow_override=False) is False
+        db.close()
+
+    @pytest.mark.asyncio
+    async def test_resume_target_allowed_dm_no_chat_id_scopes_by_user(self, tmp_path):
+        """A DM is keyed on user_id; a no-chat_id DM row is resumable by the same
+        user (chat_id legitimately absent on both sides), unlike a group row."""
+        from hermes_state import SessionDB
+        db = SessionDB(db_path=tmp_path / "state.db")
+        db.create_session("dm_row", "telegram", user_id="12345")  # DM, no chat_id
+        runner = _make_runner(session_db=db)
+        runner._gateway_session_origin_for_id = lambda sid: None  # persisted-only
+        same = SessionSource(platform=Platform.TELEGRAM, chat_id=None,
+                             chat_type="dm", user_id="12345")
+        other = SessionSource(platform=Platform.TELEGRAM, chat_id=None,
+                              chat_type="dm", user_id="99999")
+        assert await runner._resume_target_allowed(same, "dm_row", allow_override=False) is True
+        assert await runner._resume_target_allowed(other, "dm_row", allow_override=False) is False
         db.close()
 
     @pytest.mark.asyncio
