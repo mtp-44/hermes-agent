@@ -2987,6 +2987,38 @@ def test_complete_slash_includes_tui_mouse_command():
     assert any(item["text"] == "/mouse" for item in resp["result"]["items"])
 
 
+def test_complete_slash_includes_plugin_commands(monkeypatch):
+    import hermes_cli.plugins as _plugins
+
+    monkeypatch.setattr(
+        _plugins,
+        "get_plugin_commands",
+        lambda: {"session": {"description": "Durable work sessions", "args_hint": ""}},
+    )
+    resp = server.handle_request(
+        {"id": "1", "method": "complete.slash", "params": {"text": "/ses"}}
+    )
+    item = next((i for i in resp["result"]["items"] if i["text"] == "/session"), None)
+    assert item is not None
+    assert item["meta"] == "Durable work sessions"
+
+
+def test_commands_catalog_includes_plugin_commands(monkeypatch):
+    import hermes_cli.plugins as _plugins
+
+    monkeypatch.setattr(
+        _plugins,
+        "get_plugin_commands",
+        lambda: {"session": {"description": "Durable work sessions", "args_hint": ""}},
+    )
+    resp = server.handle_request({"id": "1", "method": "commands.catalog", "params": {}})
+    result = resp["result"]
+    assert any(pair[0] == "/session" for pair in result["pairs"])
+    plugins_cat = next((c for c in result["categories"] if c["name"] == "Plugins"), None)
+    assert plugins_cat is not None
+    assert any(pair[0] == "/session" for pair in plugins_cat["pairs"])
+
+
 def test_complete_slash_details_args():
     resp_root = server.handle_request(
         {"id": "0", "method": "complete.slash", "params": {"text": "/details"}}

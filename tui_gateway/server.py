@@ -8580,6 +8580,26 @@ def _(rid, params: dict) -> dict:
             if not warning:
                 warning = f"quick_commands discovery unavailable: {e}"
 
+        try:
+            from hermes_cli.plugins import get_plugin_commands
+
+            pcmds = get_plugin_commands()
+            if pcmds:
+                bucket = "Plugins"
+                if bucket not in cat_map:
+                    cat_map[bucket] = []
+                    cat_order.append(bucket)
+                for pname, pinfo in sorted(pcmds.items()):
+                    key = f"/{pname}"
+                    canon[key.lower()] = key
+                    pdesc = str(pinfo.get("description") or "Plugin command")
+                    pdesc = pdesc[:120] + ("…" if len(pdesc) > 120 else "")
+                    all_pairs.append([key, pdesc])
+                    cat_map[bucket].append([key, pdesc])
+        except Exception as e:
+            if not warning:
+                warning = f"plugin command discovery unavailable: {e}"
+
         skill_count = 0
         try:
             from agent.skill_commands import scan_skill_commands
@@ -9498,6 +9518,27 @@ def _(rid, params: dict) -> dict:
                 item["text"] == extra["text"] for item in items
             ):
                 items.append(extra)
+
+        # Plugin-registered slash commands (e.g. /session, /brief). The completer
+        # above only knows built-ins, skills, and bundles, so plugin commands
+        # would otherwise never appear in the desktop/TUI popover.
+        try:
+            from hermes_cli.plugins import get_plugin_commands
+
+            for pname, pinfo in get_plugin_commands().items():
+                ptext = f"/{pname}"
+                if ptext.lower().startswith(text_lower) and not any(
+                    item["text"] == ptext for item in items
+                ):
+                    items.append(
+                        {
+                            "text": ptext,
+                            "display": ptext,
+                            "meta": str(pinfo.get("description") or "Plugin command"),
+                        }
+                    )
+        except Exception:
+            pass
 
         details_items = _details_completions(text)
         if details_items is not None:
