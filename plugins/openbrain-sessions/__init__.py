@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 
 _VALID_STATUSES = {"active", "paused", "archived"}
 _DEFAULT_USER_ID = "mark"
-_SESSION_USAGE = "Usage: /session new|resume|status|checkpoint|pin|archive ..."
+_SESSION_USAGE = "Usage: /session list|new|resume|status|checkpoint|pin|archive ..."
 
 
 def _surface() -> tuple[str, str]:
@@ -98,9 +98,15 @@ async def _handle_sessions(raw_args: str) -> str:
 
 async def _handle_session(raw_args: str) -> str:
     args = [a for a in (raw_args or "").split() if a]
+    # No-arg and `/session list [status]` show the work-session list. (The plural
+    # `/sessions` is a built-in Hermes command for *conversation* sessions, so we
+    # keep work sessions entirely under the `/session` namespace to avoid the
+    # collision and the "which sessions?" ambiguity.)
     if not args:
-        return _SESSION_USAGE
+        return await _handle_sessions("active")
     action = args[0].lower()
+    if action == "list":
+        return await _handle_sessions(" ".join(args[1:]))
     client, user_id = _surface()
 
     try:
@@ -170,15 +176,12 @@ async def _handle_session(raw_args: str) -> str:
 
 
 def register(ctx) -> None:
-    ctx.register_command(
-        "sessions",
-        handler=_handle_sessions,
-        description="List durable Hermes work sessions",
-        args_hint="[active|paused|archived|all]",
-    )
+    # Only `/session` — `/sessions` (plural) is a built-in for conversation
+    # sessions and registering it is rejected as a conflict. `/session` with no
+    # args (or `list`) lists durable work sessions.
     ctx.register_command(
         "session",
         handler=_handle_session,
-        description="Manage the current durable work session",
-        args_hint="new|resume|status|checkpoint|pin|archive ...",
+        description="Durable work sessions: list, new, resume, status, checkpoint, pin, archive",
+        args_hint="[list|new|resume|status|checkpoint|pin|archive] ...",
     )

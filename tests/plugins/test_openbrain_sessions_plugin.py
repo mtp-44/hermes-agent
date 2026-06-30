@@ -28,12 +28,30 @@ class _Ctx:
         self.commands[name] = {"handler": handler, "description": description, "args_hint": args_hint}
 
 
-def test_register_adds_two_commands():
+def test_register_adds_only_session_command():
+    # `/sessions` (plural) is a built-in for conversation sessions; work sessions
+    # live entirely under `/session` to avoid that collision.
     ctx = _Ctx()
     obs.register(ctx)
-    assert set(ctx.commands) == {"sessions", "session"}
-    for entry in ctx.commands.values():
-        assert callable(entry["handler"])
+    assert set(ctx.commands) == {"session"}
+    assert callable(ctx.commands["session"]["handler"])
+
+
+@pytest.mark.asyncio
+async def test_session_no_arg_lists_active():
+    with patch("gateway.open_brain.session_list", new_callable=AsyncMock) as m:
+        m.return_value = []
+        out = await obs._handle_session("")
+        assert "No active work sessions." in out
+        m.assert_awaited_once_with(status="active", limit=20)
+
+
+@pytest.mark.asyncio
+async def test_session_list_subcommand_passes_status():
+    with patch("gateway.open_brain.session_list", new_callable=AsyncMock) as m:
+        m.return_value = []
+        await obs._handle_session("list archived")
+        m.assert_awaited_once_with(status="archived", limit=20)
 
 
 @pytest.mark.asyncio
@@ -137,8 +155,8 @@ async def test_session_pin_and_archive():
 
 
 @pytest.mark.asyncio
-async def test_session_no_args_shows_usage():
-    assert await obs._handle_session("") == obs._SESSION_USAGE
+async def test_session_unknown_action_shows_usage():
+    assert await obs._handle_session("frobnicate") == obs._SESSION_USAGE
 
 
 @pytest.mark.asyncio
