@@ -258,11 +258,36 @@ class OpenBrainMemoryProvider(MemoryProvider):
         return sha256(_json_dumps(stable).encode("utf-8")).hexdigest()[:32]
 
     def _capture_record(self, record: Dict[str, Any], context: Dict[str, Any]) -> None:
+        # capture_thought only accepts content/metadata/embedding/contact_id
+        # (see its MCP schema) — record_type/source_app must live under
+        # `metadata`, matching the contract gateway/open_brain.py's
+        # _is_hermes_brief_candidate() reads for /brief, /digest, and /stale.
+        # Previously this sent domain/category/subcategory as top-level args,
+        # which the server silently drops, so these captures never carried
+        # the record_type/source_app the read-side filters require.
+        from gateway.open_brain import _HERMES_CAPTURE_SOURCE_APP, _HERMES_CAPTURE_SCHEMA_VERSION
+
+        record_type = str(record.get("type") or "hermes_capture")
+        platform = str(context.get("platform") or "")
+        session_id = str(context.get("session_id") or "")
+        metadata = {
+            "record_type": record_type,
+            "source": platform or None,
+            "source_app": _HERMES_CAPTURE_SOURCE_APP,
+            "session_id": session_id or None,
+            "domain": "brain",
+            "category": record_type,
+            "subcategory": str(record.get("routing") or "canonical"),
+            "provenance": (
+                f"Hermes {context.get('boundary_reason', '')} capture "
+                f"({record_type}) from {platform} session {session_id}."
+            ),
+            "schema_version": _HERMES_CAPTURE_SCHEMA_VERSION,
+        }
+        metadata = {k: v for k, v in metadata.items() if v is not None}
         args = {
             "content": self._render_record_content(record, context),
-            "domain": "brain",
-            "category": str(record.get("type") or "hermes_capture"),
-            "subcategory": str(record.get("routing") or "canonical"),
+            "metadata": metadata,
         }
         result = self._call_mcp_tool("capture_thought", args)
         if result.get("error"):
