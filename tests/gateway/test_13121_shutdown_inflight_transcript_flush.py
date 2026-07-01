@@ -33,6 +33,7 @@ real ``SessionStore.load_transcript``).
 from __future__ import annotations
 
 import sys
+import asyncio
 import types
 from unittest.mock import MagicMock
 
@@ -84,7 +85,7 @@ class TestFinalizeShutdownFlushesInflightTranscript:
         ]
         agent = _FakeAgent(session_messages=inflight)
 
-        runner._finalize_shutdown_agents({"agent:main:discord:dm:42": agent})
+        asyncio.run(runner._finalize_shutdown_agents({"agent:main:discord:dm:42": agent}))
 
         agent._flush_messages_to_session_db.assert_called_once_with(inflight)
         # Cleanup still happens after the flush.
@@ -96,7 +97,7 @@ class TestFinalizeShutdownFlushesInflightTranscript:
         runner = _make_runner()
         agent = _FakeAgent(session_messages=[])
 
-        runner._finalize_shutdown_agents({"k": agent})
+        asyncio.run(runner._finalize_shutdown_agents({"k": agent}))
 
         agent._flush_messages_to_session_db.assert_not_called()
         agent.close.assert_called_once()
@@ -108,7 +109,7 @@ class TestFinalizeShutdownFlushesInflightTranscript:
         agent = _FakeAgent(session_messages=[{"role": "user", "content": "x"}],
                            has_flush=False)
 
-        runner._finalize_shutdown_agents({"k": agent})
+        asyncio.run(runner._finalize_shutdown_agents({"k": agent}))
 
         agent.close.assert_called_once()
 
@@ -119,7 +120,7 @@ class TestFinalizeShutdownFlushesInflightTranscript:
         agent = _FakeAgent(session_messages=[{"role": "user", "content": "x"}])
         agent._flush_messages_to_session_db.side_effect = RuntimeError("db locked")
 
-        runner._finalize_shutdown_agents({"k": agent})
+        asyncio.run(runner._finalize_shutdown_agents({"k": agent}))
 
         agent.close.assert_called_once()
 
@@ -186,7 +187,7 @@ class TestShutdownTranscriptSurvivesResumeE2E:
         # Drive the gateway shutdown finalization with this real agent.
         from gateway.run import GatewayRunner
         runner = object.__new__(GatewayRunner)
-        runner._finalize_shutdown_agents({"agent:main:discord:dm:7": agent})
+        asyncio.run(runner._finalize_shutdown_agents({"agent:main:discord:dm:7": agent}))
 
         # The in-flight turn must now be durable and readable via the SAME
         # path the resume logic uses (SessionStore.load_transcript → DB).
@@ -237,7 +238,7 @@ class TestShutdownTranscriptSurvivesResumeE2E:
         # Shutdown re-flush of the SAME list identity must add nothing.
         from gateway.run import GatewayRunner
         runner = object.__new__(GatewayRunner)
-        runner._finalize_shutdown_agents({"k": agent})
+        asyncio.run(runner._finalize_shutdown_agents({"k": agent}))
 
         after = db.get_messages_as_conversation(session_id)
         assert len(after) == 2, after
