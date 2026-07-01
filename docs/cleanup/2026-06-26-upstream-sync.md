@@ -5,46 +5,76 @@
 > once the remaining steps are done and the post-smoke has passed for a day.
 > Standing process: `docs/hermes-update-runbook.md` / `UPDATING.md`.
 
-## ★ PICK UP HERE — resume state
+## ★ PICK UP HERE — resume state (2026-07-01)
 
-**Conflict resolution is DONE and committed on a sync branch in an isolated
-worktree. Production `main` and the live gateway are UNTOUCHED.** What remains is
-the live tail: PR → green CI → merge to `main` → gateway restart → post-smoke.
+**DONE through post-smoke. Production `main` and the live gateway are UPDATED
+and verified.** Only the Cleanup Window (bottom of this doc) remains, and it is
+deliberately held for a burn-in period — see "Remaining" below.
 
-- Worktree: `/Users/mh/ai/agents/hermes-sync-2026-06-26`
-- Sync branch: `sync/unified-retrieval-main-2026-06-26`
-  - `f0d67e677` test(telegram): repoint OB-seam tests to relocated adapter
-  - `18c6a6635` Merge reference/main (858 upstream commits) — conflicts resolved
-  - branched off `29e6e7093` (production `main` HEAD, the unpushed `UPDATING.md`)
-- Upstream merged: `reference/main` @ `e3db1ef92` (was merge-base `c06898098`,
-  2026-06-19). 858 commits, ~1473 files.
-- Rollback tag on production: `archive/pre-hermes-update-20260626-151029` → `main`.
-- Pre-guard before work: PASS except `git-origin-match` (the known unpushed
-  `UPDATING.md`). Post-merge guard delta checks: **15/15 files + 16/16 markers PASS.**
-- `uv sync --extra dev` clean (skip `--all-extras`: the `matrix` extra's
-  `python-olm` native build fails — unrelated to this sync).
-- Targeted tests green: `test_openbrain_commands_plugin` + `test_message_actions`
-  (33) + `test_telegram_open_brain_feedback` (4). Module import smoke OK.
+- PR: [mtp-44/hermes-agent#2](https://github.com/mtp-44/hermes-agent/pull/2) —
+  merged `2026-07-01T09:36:30Z` after 33/33 CI checks green, merge commit
+  `8e681874b`.
+- Production `main` fast-forwarded to `8e681874b`, then again to `7dd212b34`
+  (see the follow-on fix below). Gateway restarted twice (once per merge);
+  currently running clean since `2026-07-01 12:16:46`.
+- Full test verification used `scripts/run_tests_parallel.py` (the actual
+  per-file-isolated runner CI uses — **do not** trust a raw `pytest -q` full-repo
+  run for this kind of check: single-process cross-file module-state leakage
+  produced ~1300 false failures before switching runners). One real regression
+  was found and fixed on the sync branch: `tests/gateway/test_13121_shutdown_inflight_transcript_flush.py`
+  called `_finalize_shutdown_agents` synchronously, but the merge's conflict
+  resolution kept it `async` — the coroutine was created but never awaited, so
+  the flush silently never ran in the test (commit `4af797348`). Everything else
+  divergent from unmerged `main` was pre-existing macOS-only environment noise
+  (confirmed identical on `main`): sensitive-path guard false positives on
+  `/var/folders/...`, AF_UNIX path-length limits, systemd/WSL-only tests, a
+  blocked model-catalog network endpoint (403), and one order-dependent flake in
+  `test_ignore_user_config_flags.py` (reproduces on `main` too — worse there,
+  deterministic 5/5). CI's contributor-attribution check also caught 4 upstream
+  emails missing from `scripts/release.py` `AUTHOR_MAP` — added (commit
+  `922fcbc4d`).
+- **Accidental production package pruning, caught and fixed live:** ran
+  `uv sync --locked --extra all --extra dev` directly in
+  `/Users/mh/ai/agents/hermes-agent` (not a worktree) to diff test failures
+  against `main` — this pruned lazy-installed packages not in the `all`/`dev`
+  extras, including the live Telegram bot's `python-telegram-bot[webhooks]`.
+  Restored immediately via `uv pip install "python-telegram-bot[webhooks]==22.6"`
+  before the next gateway restart; confirmed via `gateway.log` that Telegram is
+  the only active platform (discord/slack/matrix never appear), so nothing else
+  was actually load-bearing among the other pruned (orphaned, undeclared-anywhere)
+  packages. **Lesson: never run `uv sync` against the live production repo dir —
+  always do dependency-install diffs in a disposable worktree/venv.**
+- **Separate bug found + fixed during manual `/brief` verification** (unrelated
+  to this sync — confirmed via `git log` that the file was untouched across the
+  858-commit merge): `plugins/memory/openbrain/__init__.py`'s `_capture_record`
+  sent `domain`/`category`/`subcategory` as top-level `capture_thought` args,
+  which the tool's real schema (`content`/`metadata`/`embedding`/`contact_id`)
+  silently drops — so every session-end auto-capture landed with only the
+  server's default metadata, never the `record_type`/`source_app` that
+  `gateway/open_brain.py`'s `_is_hermes_brief_candidate()` requires for
+  `/brief`, `/digest`, `/stale` to find it. Fixed in
+  [PR #3](https://github.com/mtp-44/hermes-agent/pull/3) (merged
+  `2026-07-01T10:14:58Z`, commit `d1a0620b2` → `7dd212b34` on `main`), with a
+  regression test. **This only fixes captures going forward — old
+  already-stored session summaries still carry the wrong metadata and won't
+  retroactively surface; a metadata backfill would be a separate follow-up if
+  wanted.**
+- **Unrelated loose end, preserved not lost:** production `main` had a
+  pre-existing uncommitted edit to `package-lock.json` (present before this
+  session started). It conflicted with upstream's own lockfile changes during
+  the fast-forward, so it's sitting safely in
+  `git -C /Users/mh/ai/agents/hermes-agent stash list` → `stash@{0}` (message:
+  "pre-existing uncommitted package-lock.json change (unrelated to upstream
+  sync)"), not applied, not dropped. Needs a human decision on what that edit
+  was for.
 
-### Remaining steps (do in a FRESH session with context headroom)
+### Remaining
 
-1. `cd /Users/mh/ai/agents/hermes-sync-2026-06-26`
-2. Run the broader suite (not just the targeted files) to confirm the 858-commit
-   merge didn't break anything outside the conflict surface:
-   `.venv/bin/python -m pytest -q` (or the project's CI subset).
-3. **Prereq for merge to `main`:** production `main` must equal `origin/main`
-   first — push the pending `29e6e7093` `UPDATING.md` commit:
-   `git -C /Users/mh/ai/agents/hermes-agent push origin main`.
-4. Push the sync branch, open a PR into `main`, merge **only on green CI** (mirrors PR #1).
-5. `HERMES_HOME=/Users/mh/.hermes hermes gateway restart`
-6. Post-smoke (box is online 24/7 → `--live-smoke` is the default):
-   - `.venv/bin/python scripts/hermes_update_guard.py --post --live-smoke`
-   - `.venv/bin/python scripts/openbrain_conformance_smoke.py --phase post --live-smoke`
-   - Manual: health-monitor.jsonl fresh healthy rows (ollama/gateway/telegram/
-     openbrain/disk/memory); OB tool floor ≥30; real Telegram reply; recall Q →
-     `query_brain`, analytical Q → `analyze_brain_query`; **`/brief` responds**
-     (proves `openbrain-commands` plugin loaded).
-7. Then the Cleanup Window (below).
+Only the Cleanup Window (below). **Deliberately held** — user said "hold off"
+on 2026-07-01 pending a burn-in period of real Telegram traffic, doubly
+warranted since a second live-affecting fix (PR #3) landed shortly after
+restart. Revisit and run the Cleanup Window once there's been a day of normal
+use with no new issues.
 
 ## How the 7 conflicts were resolved
 
