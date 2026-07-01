@@ -57,6 +57,44 @@ def test_render_record_content_includes_structured_metadata():
     assert '"boundary_id": "b1"' in content
 
 
+def test_capture_record_metadata_satisfies_brief_digest_stale_filters():
+    """#regression: capture_thought only accepts content/metadata/embedding/
+    contact_id — domain/category/subcategory as top-level args are silently
+    dropped by the server, so /brief, /digest, and /stale (which filter on
+    metadata.record_type / metadata.source_app) never found these captures.
+    """
+    module = _load_openbrain_module()
+    provider = module.OpenBrainMemoryProvider()
+    record = {
+        "type": "session_summary",
+        "summary_text": "Objective: test Outcome: it worked",
+        "topics": ["memory", "openbrain"],
+        "routing": "canonical",
+    }
+    context = {
+        "session_id": "sess-1",
+        "platform": "telegram",
+        "boundary_reason": "gateway_shutdown",
+        "boundary_id": "b1",
+    }
+
+    with patch.object(provider, "_call_mcp_tool", return_value={"result": {}}) as mock_call:
+        provider._capture_record(record, context)
+
+    tool_name, args = mock_call.call_args[0]
+    assert tool_name == "capture_thought"
+    assert "domain" not in args
+    assert "category" not in args
+    assert "subcategory" not in args
+    metadata = args["metadata"]
+
+    from gateway.open_brain import _is_hermes_brief_candidate
+
+    assert _is_hermes_brief_candidate(metadata) is True
+    assert metadata["session_id"] == "sess-1"
+    assert metadata["source_app"] == "hermes_gateway"
+
+
 def test_sync_ledger_round_trip():
     module = _load_openbrain_module()
     provider = module.OpenBrainMemoryProvider()
