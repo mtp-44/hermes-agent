@@ -1,0 +1,5 @@
+name: routing-classifier
+version: 1.0.0
+kind: backend
+description: "Local-by-default task routing classifier. Exposes /route in observe/propose mode; does not spend frontier calls."
+author: "Hermes local/frontier routing"
