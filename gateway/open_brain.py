@@ -209,6 +209,124 @@ async def record_proactive_feedback(
     )
 
 
+# ── Durable work sessions (Phase 5d) ─────────────────────────────────────────
+# Thin wrappers over the hosted ``session_*`` MCP tools. These let any Hermes
+# surface (Telegram, Desktop, TUI) share one durable work-session layer. The
+# session logic lives in open_brain (tools/sessions.ts over Supabase); Hermes
+# only calls the contract. The ``openbrain-sessions`` plugin maps the current
+# surface -> ``client`` and user -> ``user_id`` and renders the results.
+
+
+async def session_create(
+    *,
+    title: str,
+    goal: str = "",
+    tags: list[str] | None = None,
+    repos: list[str] | None = None,
+    client: str | None = None,
+    user_id: str | None = None,
+    set_current: bool = True,
+) -> dict[str, Any]:
+    """Create a work session, optionally pointing the client surface at it."""
+    return await call_open_brain_tool(
+        "session_create",
+        {
+            "title": title,
+            **({"goal": goal} if goal else {}),
+            **({"tags": tags} if tags else {}),
+            **({"repos": repos} if repos else {}),
+            **({"client": client} if client else {}),
+            **({"user_id": user_id} if user_id else {}),
+            "set_current": set_current,
+        },
+    )
+
+
+async def session_list(*, status: str | None = "active", limit: int = 20) -> list[dict[str, Any]]:
+    """List work sessions (pinned first, most recent next)."""
+    payload = await call_open_brain_tool(
+        "session_list",
+        {
+            **({"status": status} if status else {}),
+            "limit": limit,
+        },
+    )
+    sessions = payload.get("sessions")
+    return sessions if isinstance(sessions, list) else []
+
+
+async def session_current(*, client: str, user_id: str | None = None) -> dict[str, Any]:
+    """Return the current session for a surface/user, with its latest checkpoint."""
+    return await call_open_brain_tool(
+        "session_current",
+        {
+            "client": client,
+            **({"user_id": user_id} if user_id else {}),
+        },
+    )
+
+
+async def session_resume(*, session_ref: str, client: str, user_id: str | None = None) -> dict[str, Any]:
+    """Make a session current for a surface and return it with its latest checkpoint."""
+    return await call_open_brain_tool(
+        "session_resume",
+        {
+            "session_ref": session_ref,
+            "client": client,
+            **({"user_id": user_id} if user_id else {}),
+        },
+    )
+
+
+async def session_checkpoint(
+    *,
+    session_ref: str,
+    summary: str,
+    source: str,
+    next_action: str = "",
+    decisions: list[str] | None = None,
+    files_touched: list[str] | None = None,
+    pending_tasks: list[str] | None = None,
+    related_commits: list[str] | None = None,
+    related_frontier_call_ids: list[str] | None = None,
+) -> dict[str, Any]:
+    """Save a compact checkpoint for a work session."""
+    return await call_open_brain_tool(
+        "session_checkpoint",
+        {
+            "session_ref": session_ref,
+            "summary": summary,
+            "source": source,
+            **({"next_action": next_action} if next_action else {}),
+            **({"decisions": decisions} if decisions else {}),
+            **({"files_touched": files_touched} if files_touched else {}),
+            **({"pending_tasks": pending_tasks} if pending_tasks else {}),
+            **({"related_commits": related_commits} if related_commits else {}),
+            **(
+                {"related_frontier_call_ids": related_frontier_call_ids}
+                if related_frontier_call_ids
+                else {}
+            ),
+        },
+    )
+
+
+async def session_set_status(*, session_ref: str, status: str) -> dict[str, Any]:
+    """Set a work session's lifecycle status (active | paused | archived)."""
+    return await call_open_brain_tool(
+        "session_set_status",
+        {"session_ref": session_ref, "status": status},
+    )
+
+
+async def session_set_pinned(*, session_ref: str, pinned: bool) -> dict[str, Any]:
+    """Pin or unpin a work session."""
+    return await call_open_brain_tool(
+        "session_set_pinned",
+        {"session_ref": session_ref, "pinned": pinned},
+    )
+
+
 async def capture_meeting_note(
     note_text: str,
     *,

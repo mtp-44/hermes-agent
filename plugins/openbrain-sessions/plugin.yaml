@@ -1,0 +1,4 @@
+name: openbrain-sessions
+version: 1.0.0
+description: "Durable Hermes work sessions (/sessions, /session new|resume|status|checkpoint|pin|archive) over the hosted open-brain-mcp session_* tools. One durable work-session layer shared across Telegram, Hermes Desktop, and future surfaces (Phase 5d)."
+author: "Open Brain adapter"
