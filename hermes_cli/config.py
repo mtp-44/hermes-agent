@@ -7084,6 +7084,99 @@ def set_config_value(key: str, value: str):
     print(f"✓ Set {key} = {_display_value} in {config_path}")
 
 
+def add_telegram_free_response_chat(chat_id: str, comment: Optional[str] = None) -> None:
+    """Safely append a chat_id to ``telegram.free_response_chats`` in config.yaml.
+
+    Hand-editing this list broke config.yaml three times in one day
+    (2026-07-01) — a single stray space of indentation collapses YAML parsing
+    for the *whole file*, silently dropping every user override (auxiliary
+    providers, fallback chain, model settings) until someone notices. This is
+    the supported way to extend the list: it round-trips through
+    ``yaml.safe_load`` / ``atomic_yaml_write`` instead of raw text edits, so
+    it cannot reproduce that indentation bug.
+    """
+    if is_managed():
+        managed_error("set configuration values")
+        return
+    from hermes_cli import managed_scope
+
+    if managed_scope.is_key_managed("telegram.free_response_chats"):
+        managed_dir = managed_scope.get_managed_dir()
+        src = (managed_dir / "config.yaml") if managed_dir else "the managed scope"
+        print(
+            f"Cannot set 'telegram.free_response_chats': it is managed by your "
+            f"administrator ({src}) and cannot be changed.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    chat_id = str(chat_id).strip()
+    if not chat_id:
+        print("Usage: hermes config add-telegram-chat <chat_id> [comment]", file=sys.stderr)
+        sys.exit(1)
+
+    config_path = get_config_path()
+    user_config: Dict[str, Any] = {}
+    if config_path.exists():
+        try:
+            with open(config_path, encoding="utf-8") as f:
+                user_config = yaml.safe_load(f) or {}
+        except Exception as e:
+            print(
+                f"Refusing to edit: {config_path} does not currently parse as valid "
+                f"YAML ({e}). Fix the existing syntax error first — see "
+                f"'hermes config path' and the gateway logs for details.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+    if not isinstance(user_config, dict):
+        user_config = {}
+
+    telegram_cfg = user_config.setdefault("telegram", {})
+    if not isinstance(telegram_cfg, dict):
+        print(f"Refusing to edit: 'telegram' section in {config_path} is not a mapping.", file=sys.stderr)
+        sys.exit(1)
+
+    chats = telegram_cfg.setdefault("free_response_chats", [])
+    if not isinstance(chats, list):
+        print(
+            f"Refusing to edit: 'telegram.free_response_chats' in {config_path} is not a list.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    if chat_id in [str(c) for c in chats]:
+        print(f"{chat_id} is already in telegram.free_response_chats — nothing to do.")
+        return
+
+    chats.append(chat_id)
+
+    ensure_hermes_home()
+    from utils import atomic_yaml_write
+
+    atomic_yaml_write(config_path, user_config, sort_keys=False)
+
+    # Cosmetic label, applied as a comment suffix on the exact line we just
+    # wrote (comments don't affect YAML structure) — PyYAML's dumper can't
+    # carry per-item comments through the round-trip, so this is a targeted
+    # single-line edit after the safe write, not a hand-edit of the file.
+    if comment:
+        text = config_path.read_text(encoding="utf-8")
+        needle = f"- '{chat_id}'\n"
+        if needle in text:
+            text = text.replace(needle, f"- '{chat_id}'  # {comment}\n", 1)
+            config_path.write_text(text, encoding="utf-8")
+
+    # The whole point of this helper is that the file it just wrote must
+    # parse — fail loudly if it somehow doesn't instead of leaving a silent
+    # trap for the next gateway reload.
+    with open(config_path, encoding="utf-8") as f:
+        yaml.safe_load(f)
+
+    print(f"✓ Added {chat_id} to telegram.free_response_chats in {config_path}")
+    print("  Restart the gateway to load it: launchctl kickstart -k gui/$(id -u)/ai.hermes.gateway")
+
+
 # =============================================================================
 # Command handler
 # =============================================================================
@@ -7110,7 +7203,15 @@ def config_command(args):
             print("  hermes config set OPENROUTER_API_KEY sk-or-...")
             sys.exit(1)
         set_config_value(key, value)
-    
+
+    elif subcmd == "add-telegram-chat":
+        chat_id = getattr(args, 'chat_id', None)
+        comment = getattr(args, 'comment', None)
+        if not chat_id:
+            print("Usage: hermes config add-telegram-chat <chat_id> [comment]")
+            sys.exit(1)
+        add_telegram_free_response_chat(chat_id, comment)
+
     elif subcmd == "path":
         print(get_config_path())
     
@@ -7218,6 +7319,7 @@ def config_command(args):
         print("  hermes config           Show current configuration")
         print("  hermes config edit      Open config in editor")
         print("  hermes config set <key> <value>   Set a config value")
+        print("  hermes config add-telegram-chat <chat_id> [comment]   Extend the Telegram free-response allowlist")
         print("  hermes config check     Check for missing/outdated config")
         print("  hermes config migrate   Update config with new options")
         print("  hermes config path      Show config file path")

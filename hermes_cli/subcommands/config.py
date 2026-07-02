@@ -34,6 +34,16 @@ def build_config_parser(subparsers, *, cmd_config: Callable) -> None:
     )
     config_set.add_argument("value", nargs="?", help="Value to set")
 
+    # config add-telegram-chat
+    config_add_tg_chat = config_subparsers.add_parser(
+        "add-telegram-chat",
+        help="Safely append a chat_id to telegram.free_response_chats",
+    )
+    config_add_tg_chat.add_argument("chat_id", help="Telegram chat_id (e.g. -5433465714)")
+    config_add_tg_chat.add_argument(
+        "comment", nargs="?", help="Optional label comment (e.g. the group's name)"
+    )
+
     # config path
     config_subparsers.add_parser("path", help="Print config file path")
 
