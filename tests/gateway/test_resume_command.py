@@ -485,7 +485,8 @@ class TestHandleSessionsCommand:
             assert "Resumed" not in result, name
         db.close()
 
-    def test_resume_target_allowed_blocks_no_identity_persisted(self, tmp_path):
+    @pytest.mark.asyncio
+    async def test_resume_target_allowed_blocks_no_identity_persisted(self, tmp_path):
         """Unit-level: the persisted-row fallback fails closed for an
         identity-less caller (no live origin resolvable)."""
         from hermes_state import SessionDB
@@ -495,7 +496,7 @@ class TestHandleSessionsCommand:
         runner._gateway_session_origin_for_id = lambda sid: None  # inactive/persisted-only
         caller = SessionSource(platform=Platform.TELEGRAM, chat_id="chat-a",
                                chat_type="group", user_id=None)
-        assert runner._resume_target_allowed(caller, "victim_chat_b_uid",
+        assert await runner._resume_target_allowed(caller, "victim_chat_b_uid",
                                              allow_override=False) is False
         db.close()
 
@@ -548,13 +549,14 @@ class TestSameOriginChatGroupScoping:
         b = self._src("bob", chat_type="dm", chat_id="dm-1")
         assert runner._same_origin_chat(a, b) is False
 
-    def test_resume_target_allowed_blocks_cross_user_live_group(self):
+    @pytest.mark.asyncio
+    async def test_resume_target_allowed_blocks_cross_user_live_group(self):
         """End-to-end via the live-origin branch: Alice cannot resume Bob's
         active group session in the same chat."""
         runner = _make_runner()
         bob = self._src("bob")
         runner._gateway_session_origin_for_id = lambda sid: bob
-        assert runner._resume_target_allowed(
+        assert await runner._resume_target_allowed(
             self._src("alice"), "bobs_live_sid", allow_override=False
         ) is False
 
@@ -605,7 +607,8 @@ class TestResumeRowVisibleMatrixAllScoping:
         return SessionSource(platform=Platform.MATRIX, chat_id=chat_id,
                              chat_type="group", user_id=user_id)
 
-    def test_non_admin_all_does_not_expose_other_room(self):
+    @pytest.mark.asyncio
+    async def test_non_admin_all_does_not_expose_other_room(self):
         runner = _make_runner()
         runner._resume_caller_is_admin = lambda src: False
         # Titled row whose live origin is a DIFFERENT Matrix room.
@@ -613,32 +616,35 @@ class TestResumeRowVisibleMatrixAllScoping:
                                    chat_type="group", user_id="@bob:hs")
         runner._gateway_session_origin_for_id = lambda sid: other_room
         row = {"id": "sid_other_room"}
-        assert runner._resume_row_visible(self._matrix_src(), row, allow_all=True) is False
+        assert await runner._resume_row_visible(self._matrix_src(), row, allow_all=True) is False
 
-    def test_non_admin_all_still_shows_same_room(self):
+    @pytest.mark.asyncio
+    async def test_non_admin_all_still_shows_same_room(self):
         runner = _make_runner()
         runner._resume_caller_is_admin = lambda src: False
         same_room = SessionSource(platform=Platform.MATRIX, chat_id="!room-a:hs",
                                   chat_type="group", user_id="@bob:hs")
         runner._gateway_session_origin_for_id = lambda sid: same_room
         row = {"id": "sid_same_room"}
-        assert runner._resume_row_visible(self._matrix_src(), row, allow_all=True) is True
+        assert await runner._resume_row_visible(self._matrix_src(), row, allow_all=True) is True
 
-    def test_admin_all_exposes_cross_room(self):
+    @pytest.mark.asyncio
+    async def test_admin_all_exposes_cross_room(self):
         runner = _make_runner()
         runner._resume_caller_is_admin = lambda src: True
         other_room = SessionSource(platform=Platform.MATRIX, chat_id="!room-b:hs",
                                    chat_type="group", user_id="@bob:hs")
         runner._gateway_session_origin_for_id = lambda sid: other_room
         row = {"id": "sid_other_room"}
-        assert runner._resume_row_visible(self._matrix_src(), row, allow_all=True) is True
+        assert await runner._resume_row_visible(self._matrix_src(), row, allow_all=True) is True
 
-    def test_non_admin_all_fails_closed_on_unknown_origin(self):
+    @pytest.mark.asyncio
+    async def test_non_admin_all_fails_closed_on_unknown_origin(self):
         runner = _make_runner()
         runner._resume_caller_is_admin = lambda src: False
         runner._gateway_session_origin_for_id = lambda sid: None
         row = {"id": "sid_unknown"}
-        assert runner._resume_row_visible(self._matrix_src(), row, allow_all=True) is False
+        assert await runner._resume_row_visible(self._matrix_src(), row, allow_all=True) is False
 
 
 class TestSameMatrixRoomThreadScoping:
@@ -680,7 +686,8 @@ class TestSameMatrixRoomThreadScoping:
         assert runner._same_matrix_room(threaded, room_level) is False
         assert runner._same_matrix_room(room_level, threaded) is False
 
-    def test_resume_row_visible_blocks_cross_thread(self):
+    @pytest.mark.asyncio
+    async def test_resume_row_visible_blocks_cross_thread(self):
         """End-to-end through the Matrix listing guard."""
         runner = _make_runner()
         runner._resume_caller_is_admin = lambda src: False
@@ -688,4 +695,4 @@ class TestSameMatrixRoomThreadScoping:
         runner._gateway_session_origin_for_id = lambda sid: origin_thread_b
         row = {"id": "sid_thread_b"}
         caller_thread_a = self._msrc(thread_id="thread-a")
-        assert runner._resume_row_visible(caller_thread_a, row, allow_all=False) is False
+        assert await runner._resume_row_visible(caller_thread_a, row, allow_all=False) is False
