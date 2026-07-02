@@ -1108,7 +1108,8 @@ class TestDiscordSkillCmdKeyDispatch:
 
         with patch("agent.skill_commands.get_skill_commands", return_value=fake_cmds), \
              patch("tools.skills_tool.SKILLS_DIR", fake_skills_dir), \
-             patch("agent.skill_utils.get_external_skills_dirs", return_value=[]):
+             patch("agent.skill_utils.get_external_skills_dirs", return_value=[]), \
+             patch("hermes_cli.plugins.get_plugin_commands", return_value={}):
             entries, hidden = discord_skill_commands(
                 max_slots=100, reserved_names=set(),
             )
@@ -1578,6 +1579,7 @@ class TestDiscordSkillCommands:
         with (
             patch("agent.skill_commands.get_skill_commands", return_value=fake_cmds),
             patch("tools.skills_tool.SKILLS_DIR", tmp_path / "skills"),
+            patch("hermes_cli.plugins.get_plugin_commands", return_value={}),
         ):
             entries, _ = discord_skill_commands(
                 max_slots=50, reserved_names=set(),
@@ -1604,6 +1606,7 @@ class TestDiscordSkillCommands:
         with (
             patch("agent.skill_commands.get_skill_commands", return_value=fake_cmds),
             patch("tools.skills_tool.SKILLS_DIR", tmp_path / "skills"),
+            patch("hermes_cli.plugins.get_plugin_commands", return_value={}),
         ):
             entries, hidden = discord_skill_commands(
                 max_slots=5, reserved_names=set(),
@@ -1698,6 +1701,7 @@ class TestDiscordSkillCommands:
         with (
             patch("agent.skill_commands.get_skill_commands", return_value=fake_cmds),
             patch("tools.skills_tool.SKILLS_DIR", tmp_path / "skills"),
+            patch("hermes_cli.plugins.get_plugin_commands", return_value={}),
         ):
             entries, _ = discord_skill_commands(
                 max_slots=50, reserved_names=set(),

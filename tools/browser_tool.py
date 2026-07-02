@@ -65,6 +65,11 @@ import requests
 from typing import Dict, Any, Optional, List, Tuple, Union
 from pathlib import Path
 from agent.auxiliary_client import call_llm
+from agent.redact import (
+    redact_sensitive_text,
+    _redact_url_query_params,
+    _redact_url_userinfo,
+)
 from hermes_constants import agent_browser_runnable, get_hermes_home
 from utils import env_int, is_truthy_value
 from hermes_cli.config import DEFAULT_CONFIG, cfg_get
@@ -198,6 +203,26 @@ _cached_command_timeout: Optional[int] = None
 _command_timeout_resolved = False
 
 
+def _sanitize_url_for_logs(value: object) -> str:
+    """Mask secrets in logged browser endpoint URLs and URL-like errors.
+
+    The global ``redact_sensitive_text`` deliberately passes web-URL query
+    params and ``user:pass@`` userinfo through unmasked (OAuth callbacks,
+    magic-link / pre-signed URLs the agent is meant to follow — see the
+    web-URL note in ``agent/redact.py``). CDP discovery endpoints are NOT
+    such a workflow: their query-string tokens and userinfo passwords are
+    pure credentials that must never reach the logs. So at these log sites
+    we opt INTO the URL redactors that the global pass leaves off, reusing
+    the shared ``redact.py`` helpers rather than a second regex.
+    """
+    text = redact_sensitive_text(value)
+    if not text:
+        return text
+    text = _redact_url_query_params(text)
+    text = _redact_url_userinfo(text)
+    return text
+
+
 def _get_command_timeout() -> int:
     """Return the configured browser command timeout from config.yaml.
 
@@ -270,15 +295,27 @@ def _resolve_cdp_override(cdp_url: str) -> str:
         response.raise_for_status()
         payload = response.json()
     except Exception as exc:
-        logger.warning("Failed to resolve CDP endpoint %s via %s: %s", raw, version_url, exc)
+        logger.warning(
+            "Failed to resolve CDP endpoint %s via %s: %s",
+            _sanitize_url_for_logs(raw),
+            _sanitize_url_for_logs(version_url),
+            _sanitize_url_for_logs(exc),
+        )
         return raw
 
     ws_url = str(payload.get("webSocketDebuggerUrl") or "").strip()
     if ws_url:
-        logger.info("Resolved CDP endpoint %s -> %s", raw, ws_url)
+        logger.info(
+            "Resolved CDP endpoint %s -> %s",
+            _sanitize_url_for_logs(raw),
+            _sanitize_url_for_logs(ws_url),
+        )
         return ws_url
 
-    logger.warning("CDP discovery at %s did not return webSocketDebuggerUrl; using raw endpoint", version_url)
+    logger.warning(
+        "CDP discovery at %s did not return webSocketDebuggerUrl; using raw endpoint",
+        _sanitize_url_for_logs(version_url),
+    )
     return raw
 
 
@@ -634,6 +671,20 @@ def _is_local_backend() -> bool:
     that the terminal cannot.  In this case, SSRF protection should be
     enabled even though the browser is technically "local".
     """
+    # A CDP override points the browser at a separate Chrome process whose
+    # network position is not guaranteed to match the terminal (it may live
+    # off-host). Don't treat it as a trusted local backend — otherwise a
+    # model-driven navigate could reach internal/metadata services reachable
+    # from the CDP host but not the terminal. This MUST be checked before the
+    # camofox short-circuit below so a Camofox backend combined with a CDP
+    # override still fails the local check instead of returning local and
+    # skipping the private/internal SSRF gate. The override is honored from
+    # either the BROWSER_CDP_URL env var or a persistent `browser.cdp_url`
+    # config (both via _get_cdp_override(), and both now suppress camofox in
+    # browser_camofox.py). _is_local_mode() already treats any CDP override as
+    # non-local; keep the two helpers in agreement.
+    if _get_cdp_override():
+        return False
     if _is_camofox_mode():
         return True
     if _get_cloud_provider() is not None:
@@ -1768,7 +1819,7 @@ def _create_cdp_session(task_id: str, cdp_url: str) -> Dict[str, str]:
     import uuid
     session_name = f"cdp_{uuid.uuid4().hex[:10]}"
     logger.info("Created CDP browser session %s → %s for task %s",
-                session_name, cdp_url, task_id)
+                session_name, _sanitize_url_for_logs(cdp_url), task_id)
     return {
         "session_name": session_name,
         "bb_session_id": None,
@@ -2470,7 +2521,10 @@ def browser_navigate(url: str, task_id: Optional[str] = None) -> str:
     # 169.254.169.254 / metadata.google.internal / ECS task metadata
     # via a browser, and routing those to a local Chromium sidecar
     # on an EC2/GCP/Azure host exfiltrates IAM credentials (#16234).
-    if not _is_local_backend() and _is_always_blocked_url(url):
+    # The floor is UNCONDITIONAL — it must fire for every backend,
+    # including the pure-local headless Chromium and off-host CDP cases
+    # (a local Chromium on a cloud VM still reaches the host IMDS).
+    if _is_always_blocked_url(url):
         return json.dumps({
             "success": False,
             "error": "Blocked: URL targets a cloud metadata endpoint",
@@ -2538,12 +2592,11 @@ def browser_navigate(url: str, task_id: Optional[str] = None) -> str:
         # Skipped for local backends (same rationale as the pre-nav check),
         # and for the hybrid local sidecar (we're already on a local browser
         # hitting a private URL by design).
-        # Always-blocked floor (cloud metadata / IMDS) is enforced even
-        # when auto_local_this_nav is true — see pre-nav check for
-        # rationale (#16234).
+        # Always-blocked floor (cloud metadata / IMDS) is enforced for every
+        # backend and even when auto_local_this_nav is true — see pre-nav
+        # check for rationale (#16234).
         if (
-            not _is_local_backend()
-            and final_url
+            final_url
             and final_url != url
             and _is_always_blocked_url(final_url)
         ):
@@ -2712,6 +2765,9 @@ def browser_click(ref: str, task_id: Optional[str] = None) -> str:
         return camofox_click(ref, task_id)
 
     effective_task_id = _last_session_key(task_id or "default")
+    blocked = _blocked_private_page_action(effective_task_id, "click")
+    if blocked is not None:
+        return blocked
 
     # Ensure ref starts with @
     if not ref.startswith("@"):
@@ -2750,6 +2806,9 @@ def browser_type(ref: str, text: str, task_id: Optional[str] = None) -> str:
         return camofox_type(ref, text, task_id)
 
     effective_task_id = _last_session_key(task_id or "default")
+    blocked = _blocked_private_page_action(effective_task_id, "type")
+    if blocked is not None:
+        return blocked
 
     # Ensure ref starts with @
     if not ref.startswith("@"):
@@ -2855,6 +2914,25 @@ def browser_back(task_id: Optional[str] = None) -> str:
     result = _run_browser_command(effective_task_id, "back", [])
 
     if result.get("success"):
+        # Browser history can land on a private/internal/cloud-metadata
+        # address that the browser_navigate preflight never saw (e.g. a
+        # redirect chain from an earlier legitimate navigation touched an
+        # internal host, or client-side history was otherwise manipulated).
+        # Re-check post-navigation, matching every other content-returning
+        # entry point (browser_snapshot/vision/console/eval, and click/type/
+        # press via _blocked_private_page_action) — the floor must fire for
+        # every backend, not just the initial navigate.
+        if _eval_ssrf_guard_active(effective_task_id):
+            _blocked_url = _current_page_private_url(effective_task_id)
+            if _blocked_url:
+                return json.dumps({
+                    "success": False,
+                    "error": (
+                        "Blocked: page URL targets a private or internal address "
+                        f"({_blocked_url}). Browser history navigation (back) "
+                        "landed on this address."
+                    ),
+                }, ensure_ascii=False)
         data = result.get("data", {})
         response = {
             "success": True,
@@ -2885,6 +2963,9 @@ def browser_press(key: str, task_id: Optional[str] = None) -> str:
         return camofox_press(key, task_id)
 
     effective_task_id = _last_session_key(task_id or "default")
+    blocked = _blocked_private_page_action(effective_task_id, "press")
+    if blocked is not None:
+        return blocked
     result = _run_browser_command(effective_task_id, "press", [key])
 
     if result.get("success"):
@@ -2901,7 +2982,21 @@ def browser_press(key: str, task_id: Optional[str] = None) -> str:
         return json.dumps(_copy_fallback_warning(response, result), ensure_ascii=False)
 
 
-
+def _blocked_private_page_action(effective_task_id: str, action: str) -> Optional[str]:
+    """Return a blocked payload when an unsafe cloud page would receive input."""
+    if not _eval_ssrf_guard_active(effective_task_id):
+        return None
+    blocked_url = _current_page_private_url(effective_task_id)
+    if not blocked_url:
+        return None
+    return json.dumps({
+        "success": False,
+        "error": (
+            "Blocked: page URL targets a private or internal address "
+            f"({blocked_url}). Refusing to {action} on this page in this "
+            "browser mode."
+        ),
+    }, ensure_ascii=False)
 
 
 def browser_console(clear: bool = False, expression: Optional[str] = None, task_id: Optional[str] = None) -> str:
@@ -2929,6 +3024,18 @@ def browser_console(clear: bool = False, expression: Optional[str] = None, task_
         return camofox_console(clear, task_id)
 
     effective_task_id = _last_session_key(task_id or "default")
+
+    if _eval_ssrf_guard_active(effective_task_id):
+        _blocked_url = _current_page_private_url(effective_task_id)
+        if _blocked_url:
+            return json.dumps({
+                "success": False,
+                "error": (
+                    "Blocked: page URL targets a private or internal address "
+                    f"({_blocked_url}). This may have been caused by a "
+                    "JavaScript navigation via browser_console."
+                ),
+            }, ensure_ascii=False)
 
     console_args = ["--clear"] if clear else []
     error_args = ["--clear"] if clear else []
@@ -2966,12 +3073,101 @@ def browser_console(clear: bool = False, expression: Optional[str] = None, task_
     return json.dumps(response, ensure_ascii=False)
 
 
+def _eval_ssrf_guard_active(effective_task_id: str) -> bool:
+    """Return True when eval-driven private-network access must be guarded.
+
+    Matches the gating used by ``browser_navigate`` / ``browser_snapshot`` /
+    ``browser_vision``: the SSRF guard is only meaningful for non-local
+    backends (cloud browser, or a containerized terminal whose browser-on-host
+    can reach internal networks the terminal can't), and is skipped for local
+    sidecar sessions and when ``allow_private_urls`` is set.
+    """
+    return (
+        not _is_local_backend()
+        and not _is_local_sidecar_key(effective_task_id)
+        and not _allow_private_urls()
+    )
+
+
+# URL-shaped literals embedded in a JS expression (http/https only).  Used to
+# pre-screen ``browser_console(expression=...)`` calls that fetch/XHR/navigate
+# to a private host directly — that path never updates ``location.href`` so the
+# post-eval page-URL recheck below can't see it.
+_JS_URL_LITERAL_RE = re.compile(r"""https?://[^\s'"`)\]<>]+""", re.IGNORECASE)
+
+
+def _expression_targets_private_url(expression: str) -> Optional[str]:
+    """Return the first private/always-blocked URL literal in a JS expression.
+
+    Best-effort: scans for ``http(s)://...`` literals (fetch/XHR/navigation
+    targets the agent may have embedded) and returns the first one that targets
+    a private/internal address or the always-blocked cloud-metadata floor.
+    Returns ``None`` when no such literal is found.
+    """
+    if not isinstance(expression, str):
+        return None
+    for match in _JS_URL_LITERAL_RE.findall(expression):
+        candidate = match.rstrip(".,;")
+        if _is_always_blocked_url(candidate) or not _is_safe_url(candidate):
+            return candidate
+    return None
+
+
+def _current_page_private_url(effective_task_id: str) -> Optional[str]:
+    """Return the current page URL when it targets a private/internal address.
+
+    Reads ``window.location.href`` via a low-cost eval and returns it when the
+    page has been navigated (e.g. via ``location.href = '...'`` in a prior
+    eval) to an address the SSRF guard would reject.  Returns ``None`` when the
+    page is public, the URL can't be determined, or the check errors (fail-open
+    on probe failure, matching the snapshot/vision guards).
+    """
+    try:
+        url_result = _run_browser_command(
+            effective_task_id, "eval", ["window.location.href"],
+            timeout=5, _engine_override="auto",
+        )
+        if url_result.get("success"):
+            current_url = (
+                url_result.get("data", {}).get("result", "")
+                .strip().strip('"').strip("'")
+            )
+            if current_url and (
+                _is_always_blocked_url(current_url) or not _is_safe_url(current_url)
+            ):
+                return current_url
+    except Exception as exc:
+        logger.debug("_current_page_private_url: probe failed (%s)", exc)
+    return None
+
+
 def _browser_eval(expression: str, task_id: Optional[str] = None) -> str:
     """Evaluate a JavaScript expression in the page context and return the result."""
     if _is_camofox_mode():
         return _camofox_eval(expression, task_id)
 
     effective_task_id = _last_session_key(task_id or "default")
+
+    # ── Private-network guard (eval return-value path) ──────────────────────
+    # browser_snapshot / browser_vision re-check the page URL before returning
+    # content, but eval returns arbitrary JS results directly — an attacker can
+    # read a private page via `fetch('http://127.0.0.1/secret')` or by reading
+    # the DOM after `location.href = 'http://127.0.0.1/'`, never touching
+    # snapshot/vision.  Close both sub-paths on the same gating condition:
+    #   1. Pre-scan the expression for private-host URL literals (direct fetch).
+    #   2. After eval, re-check the page URL (navigate-then-read).
+    if _eval_ssrf_guard_active(effective_task_id):
+        blocked_literal = _expression_targets_private_url(expression)
+        if blocked_literal:
+            return json.dumps({
+                "success": False,
+                "error": (
+                    "Blocked: JavaScript expression targets a private or "
+                    f"internal address ({blocked_literal}). Reading internal "
+                    "endpoints via browser_console is not permitted in this "
+                    "browser mode."
+                ),
+            }, ensure_ascii=False)
 
     # --- Fast path: route through the supervisor's persistent CDP WS ---------
     # When a CDPSupervisor is alive for this task_id, ``Runtime.evaluate`` runs
@@ -2994,6 +3190,20 @@ def _browser_eval(expression: str, task_id: Optional[str] = None) -> str:
                         parsed = json.loads(raw_result)
                     except (json.JSONDecodeError, ValueError):
                         pass  # keep as string
+                # Post-eval page-URL recheck: if this (or a prior) eval
+                # navigated the page to a private address, withhold the result.
+                if _eval_ssrf_guard_active(effective_task_id):
+                    _blocked_url = _current_page_private_url(effective_task_id)
+                    if _blocked_url:
+                        return json.dumps({
+                            "success": False,
+                            "error": (
+                                "Blocked: page URL targets a private or internal "
+                                f"address ({_blocked_url}). This may have been "
+                                "caused by a JavaScript navigation via "
+                                "browser_console."
+                            ),
+                        }, ensure_ascii=False)
                 response = {
                     "success": True,
                     "result": parsed,
@@ -3069,6 +3279,19 @@ def _browser_eval(expression: str, task_id: Optional[str] = None) -> str:
         "result": parsed,
         "result_type": type(parsed).__name__,
     }
+    # Post-eval page-URL recheck: if this (or a prior) eval navigated the page
+    # to a private address, withhold the result (mirrors the supervisor path).
+    if _eval_ssrf_guard_active(effective_task_id):
+        _blocked_url = _current_page_private_url(effective_task_id)
+        if _blocked_url:
+            return json.dumps({
+                "success": False,
+                "error": (
+                    "Blocked: page URL targets a private or internal address "
+                    f"({_blocked_url}). This may have been caused by a "
+                    "JavaScript navigation via browser_console."
+                ),
+            }, ensure_ascii=False)
     return json.dumps(_copy_fallback_warning(response, result), ensure_ascii=False, default=str)
 
 
@@ -3184,6 +3407,19 @@ def browser_get_images(task_id: Optional[str] = None) -> str:
     result = _run_browser_command(effective_task_id, "eval", [js_code])
 
     if result.get("success"):
+        # ── Private-network guard (sibling of snapshot/vision/eval guards) ──
+        if _eval_ssrf_guard_active(effective_task_id):
+            _blocked_url = _current_page_private_url(effective_task_id)
+            if _blocked_url:
+                return json.dumps({
+                    "success": False,
+                    "error": (
+                        "Blocked: page URL targets a private or internal address "
+                        f"({_blocked_url}). This may have been caused by a "
+                        "JavaScript navigation via browser_console."
+                    ),
+                }, ensure_ascii=False)
+
         data = result.get("data", {})
         raw_result = data.get("result", "[]")
 

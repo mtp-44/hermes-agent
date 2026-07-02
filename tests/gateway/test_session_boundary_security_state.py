@@ -86,8 +86,24 @@ def _make_resume_runner():
     runner.session_store.get_or_create_session.return_value = current_entry
     runner.session_store.switch_session.return_value = resumed_entry
     runner.session_store.load_transcript.return_value = []
+    # _gateway_session_origin_for_id falls back to session_store._entries for
+    # test doubles whose class doesn't define lookup_by_session_id (see
+    # gateway/slash_commands.py) — the /resume IDOR guard needs this to
+    # resolve the live origin and confirm the caller owns the target session.
+    runner.session_store._entries = {
+        "current-session": current_entry,
+        "resumed-session": resumed_entry,
+    }
     runner._session_db = MagicMock()
+    # get_session(name) is tried first as a direct-session-id lookup before
+    # falling back to title resolution; a title string is never a real
+    # session id, so this must be falsy or the title-resolution path below
+    # never runs.
+    runner._session_db.get_session.return_value = None
     runner._session_db.resolve_session_by_title.return_value = "resumed-session"
+    # Compression-continuation follow-up; must be a no-op passthrough or it
+    # overwrites the resolved target_id with an unconfigured mock value.
+    runner._session_db.resolve_resume_session_id.side_effect = lambda sid: sid
     runner._session_db.get_session_title.return_value = "Resumed Work"
     return runner, session_key
 

@@ -46,6 +46,9 @@ ACP_REGISTRY_MANIFEST = REPO_ROOT / "acp_registry" / "agent.json"
 # Auto-extracted from noreply emails + manual overrides
 AUTHOR_MAP = {
     "mark@mtp44.net": "mtp-44",
+    "arthur.zhang@ingenico.com": "arthurzhang",  # 2026-07-02 security sync (Slack xapp- token redaction; c4f278c02 chain)
+    "claudlos@agentmail.to": "claudlos",  # 2026-07-02 security sync (/resume IDOR + cloud-metadata floor + cron base_url exfil guard)
+    "huangsen365@gmail.com": "huangsen365",  # 2026-07-02 security sync (aiohttp CVE floor across lazy messaging deps)
     "piyrw9754@gmail.com": "rlaope",  # PR #35075 salvage (align cron invisible-unicode set with install-time scanner; #35075)
     "rebel@rebels-Mac-Studio-2.local": "rebel0789",  # PR #47308 salvage (redact browser_type typed text across display surfaces; #47197)
     "267614622+agt-user@users.noreply.github.com": "agt-user",  # PR #48496 salvage (telegram CLOSE-WAIT polling heartbeat, #48495)
