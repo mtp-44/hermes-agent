@@ -499,12 +499,15 @@ async def test_matrix_resume_lists_only_current_room_by_default():
 
 @pytest.mark.asyncio
 async def test_matrix_resume_all_lists_room_names():
+    """--all cross-room listing is admin-only (see _resume_row_visible); a
+    configured admin caller still sees every room's named sessions."""
     source_a = _make_matrix_source(PROJECT_A_ROOM_ID, PROJECT_A_NAME, PROJECT_A_TOPIC)
     source_b = _make_matrix_source(PROJECT_B_ROOM_ID, PROJECT_B_NAME, PROJECT_B_TOPIC)
     runner = _make_runner(
         source_b,
         [_entry(source_a, "session-a", "Project A Plan"), _entry(source_b, "session-b", "Project B Plan")],
     )
+    runner._resume_caller_is_admin = lambda src: True
 
     result = await runner._handle_resume_command(_event("/resume --all", source_b))
 
