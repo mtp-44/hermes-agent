@@ -4,7 +4,7 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-from scripts.hermes_health_monitor import CheckResult, HealthMonitor, RestartResult
+from scripts.hermes_health_monitor import CheckResult, HealthMonitor, RestartResult, _check_config
 
 
 def _now() -> datetime:
@@ -101,3 +101,48 @@ def test_monitor_exits_zero_when_all_services_healthy(tmp_path):
     state = _read_json(state_path)
     assert state["services"]["gateway"]["failure_count"] == 0
     assert state["services"]["ollama"]["failure_count"] == 0
+
+
+def test_check_config_reports_unhealthy_on_bad_yaml(tmp_path, monkeypatch):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "telegram:\n"
+        "  free_response_chats:\n"
+        "  - '-5433465714'\n"
+        "   - '-5240111863'\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("hermes_cli.config.get_config_path", lambda: config_path)
+
+    result = _check_config()
+
+    assert result.ok is False
+    assert result.fingerprint == "parse:ParserError"
+    assert "config.yaml" in result.detail
+
+
+def test_check_config_ok_on_valid_yaml(tmp_path, monkeypatch):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "telegram:\n"
+        "  free_response_chats:\n"
+        "  - '-5433465714'\n"
+        "  - '-5240111863'\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("hermes_cli.config.get_config_path", lambda: config_path)
+
+    result = _check_config()
+
+    assert result.ok is True
+    assert result.fingerprint == "ok"
+
+
+def test_check_config_skips_when_file_missing(tmp_path, monkeypatch):
+    config_path = tmp_path / "config.yaml"
+    monkeypatch.setattr("hermes_cli.config.get_config_path", lambda: config_path)
+
+    result = _check_config()
+
+    assert result.ok is True
+    assert result.skipped is True

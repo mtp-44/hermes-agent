@@ -29,7 +29,7 @@ DEFAULT_HTTP_TIMEOUT_SECONDS = 2.0
 DEFAULT_MIN_DISK_BYTES = 10 * 1024 * 1024 * 1024
 DEFAULT_MIN_MEMORY_BYTES = 2 * 1024 * 1024 * 1024
 DEFAULT_RESTART_BACKOFF_SECONDS = 300
-DEFAULT_SERVICES = ("ollama", "gateway", "telegram", "openbrain", "disk", "memory")
+DEFAULT_SERVICES = ("ollama", "gateway", "config", "telegram", "openbrain", "disk", "memory")
 
 
 def _utc_now() -> datetime:
@@ -496,6 +496,45 @@ def _check_openbrain() -> CheckResult:
     return CheckResult("openbrain", True, f"ok ({len(tools)} tool(s))", "ok", {"tool_count": len(tools)})
 
 
+def _check_config() -> CheckResult:
+    """Verify ~/.hermes/config.yaml still parses.
+
+    A syntax error here (e.g. a bad list indent) makes ``load_gateway_config()``
+    silently fall back to defaults — every user override (auxiliary providers,
+    fallback chain, model settings) is dropped with no visible symptom besides
+    a WARNING that scrolls off in the logs. That happened for ~12 hours
+    undetected on 2026-07-01 before surfacing as opaque "model provider failed"
+    replies in Telegram. This check makes that failure mode loud instead of
+    silent.
+    """
+    from hermes_cli.config import get_config_path
+
+    config_path = get_config_path()
+    if not config_path.exists():
+        return CheckResult("config", True, "config.yaml not present (defaults only)", "skip", skipped=True)
+    try:
+        import yaml
+        with open(config_path, encoding="utf-8") as f:
+            data = yaml.safe_load(f)
+    except Exception as exc:
+        return CheckResult(
+            "config",
+            False,
+            f"{config_path} failed to parse ({type(exc).__name__}): {exc}. "
+            f"Every user override (auxiliary providers, fallback chain, model settings) "
+            f"is being silently ignored until this is fixed.",
+            f"parse:{type(exc).__name__}",
+        )
+    if not isinstance(data, dict):
+        return CheckResult(
+            "config",
+            False,
+            f"{config_path} did not parse to a mapping (got {type(data).__name__})",
+            "parse:not-a-mapping",
+        )
+    return CheckResult("config", True, "ok", "ok")
+
+
 def _check_disk() -> CheckResult:
     minimum_bytes = _parse_int_env("HERMES_HEALTH_MIN_DISK_BYTES", DEFAULT_MIN_DISK_BYTES)
     usage = shutil.disk_usage(Path.home())
@@ -574,6 +613,7 @@ def _build_monitor(*, state_path: Path, log_path: Path) -> HealthMonitor:
         checkers={
             "ollama": _check_ollama,
             "gateway": _check_gateway,
+            "config": _check_config,
             "telegram": _check_telegram,
             "openbrain": _check_openbrain,
             "disk": _check_disk,
