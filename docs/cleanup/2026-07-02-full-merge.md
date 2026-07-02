@@ -43,8 +43,10 @@ Cleanup Window below for what's left.
 - Rollback tags: `archive/pre-hermes-update-20260702-121602` (pre-merge, on
   the old `115b72a58` tip) and `archive/pre-hermes-update-20260702-135442`
   (post-fast-forward, pre-restart, on `e430f809b`).
-- Still needed: a real Telegram smoke message from a human (the one
-  post-update-smoke step this session can't self-trigger).
+- Real Telegram smoke: user message at 13:56:42 UTC ("define the word:
+  malnutrition") logged as inbound, response delivered 63.9s later (714
+  chars, 1 api_call), no errors. Full post-update-smoke checklist is now
+  complete.
 
 ## Conflict resolutions
 

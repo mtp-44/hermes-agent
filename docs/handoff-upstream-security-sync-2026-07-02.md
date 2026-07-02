@@ -124,8 +124,8 @@ what tripped us up."
      already-stale worktree's venv rather than the one just synced. Caught
      via routine `readlink`, fixed before touching production. See the
      sharpened gotcha note below.
-   - **Still needed**: a real Telegram smoke message from a human (the one
-     post-update-smoke step that can't self-trigger).
+   - Real Telegram smoke confirmed: user message at 13:56:42 UTC, response
+     delivered 63.9s later, no errors. Post-update-smoke checklist complete.
 
 **3. Consider scheduling `upstream_digest.py`** (e.g. via Hermes's own
    scheduled-tasks) to run every 1–2 days and report via Telegram, so drift
