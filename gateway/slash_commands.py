@@ -1511,6 +1511,7 @@ class GatewaySlashCommandsMixin:
                         user_providers=user_provs,
                         custom_providers=custom_provs,
                         max_models=50,
+                        include_moa=True,
                     )
                 except Exception:
                     providers = []
@@ -1532,7 +1533,12 @@ class GatewaySlashCommandsMixin:
                         skew_error = _model_switch_skew_guard()
                         if skew_error:
                             return skew_error
-                        result = _switch_model(
+                        # Offload the switch off the event loop — switch_model()
+                        # can fall through to a synchronous models.dev HTTP fetch
+                        # (requests.get, 15s timeout) on a cold/expired cache,
+                        # which freezes the gateway otherwise. See #20525, #41289.
+                        result = await asyncio.to_thread(
+                            _switch_model,
                             raw_input=model_id,
                             current_provider=_cur_provider,
                             current_model=_cur_model,
@@ -1660,7 +1666,7 @@ class GatewaySlashCommandsMixin:
                                 if result.base_url:
                                     _persist_model_cfg["base_url"] = result.base_url
                                 if str(result.target_provider or "").strip().lower() != "custom":
-                                    clear_model_endpoint_credentials(_persist_model_cfg)
+                                    clear_model_endpoint_credentials(_persist_model_cfg, clear_base_url=True)
                                 from hermes_cli.config import save_config
                                 save_config(_persist_cfg)
                             except Exception as e:
@@ -1756,7 +1762,12 @@ class GatewaySlashCommandsMixin:
         skew_error = _model_switch_skew_guard()
         if skew_error:
             return skew_error
-        result = _switch_model(
+        # Offload the switch off the event loop — switch_model() can fall
+        # through to a synchronous models.dev HTTP fetch (requests.get, 15s
+        # timeout) on a cold/expired cache, which freezes the gateway
+        # otherwise. See #20525, #41289.
+        result = await asyncio.to_thread(
+            _switch_model,
             raw_input=model_input,
             current_provider=current_provider,
             current_model=current_model,
@@ -1892,7 +1903,7 @@ class GatewaySlashCommandsMixin:
                     if result.base_url:
                         model_cfg["base_url"] = result.base_url
                     if str(result.target_provider or "").strip().lower() != "custom":
-                        clear_model_endpoint_credentials(model_cfg)
+                        clear_model_endpoint_credentials(model_cfg, clear_base_url=True)
                     from hermes_cli.config import save_config
                     save_config(cfg)
                 except Exception as e:
@@ -3085,6 +3096,17 @@ class GatewaySlashCommandsMixin:
             from agent.model_metadata import estimate_request_tokens_rough
 
             session_key = self._session_key_for_source(source)
+            # Preserve the same platform + stable gateway session identity that a
+            # normal gateway turn passes (gateway/run.py main turn), so external
+            # context engines bind this temporary compression agent to the
+            # original platform conversation instead of falling back to an
+            # unbound/default "cli" host source — see #50422. _platform_config_key
+            # maps LOCAL->"cli" exactly like the live turn, avoiding a new
+            # "local" vs "cli" mismatch.
+            from gateway.run import _platform_config_key
+            platform_key = (
+                _platform_config_key(source.platform) if source.platform else None
+            )
             model, runtime_kwargs = self._resolve_session_agent_runtime(
                 source=source,
                 session_key=session_key,
@@ -3111,6 +3133,21 @@ class GatewaySlashCommandsMixin:
                     partial = False
                     head = msgs
 
+            # Bind the temporary compression agent to the originating source's
+            # platform + stable gateway session key. These are *authoritative*
+            # identity invariants (derived from `source`), so assign them into
+            # runtime_kwargs directly rather than via setdefault: a value already
+            # present there from the resolver would be a placeholder/stale
+            # identity and must not win. Assigning (vs passing a second explicit
+            # kwarg) also keeps each key single-valued, avoiding a "got multiple
+            # values for keyword argument" TypeError. platform is only set when
+            # known: for a source without platform metadata we leave it unset so
+            # AIAgent's default (platform=None -> source "cli") applies, exactly
+            # the prior behavior. _resolve_session_agent_runtime does not set
+            # either key today, so in practice this just adds them.
+            if platform_key is not None:
+                runtime_kwargs["platform"] = platform_key
+            runtime_kwargs["gateway_session_key"] = session_key
             tmp_agent = AIAgent(
                 **runtime_kwargs,
                 model=model,
@@ -3161,29 +3198,45 @@ class GatewaySlashCommandsMixin:
                 new_session_id = tmp_agent.session_id
                 rotated = new_session_id != session_entry.session_id
                 _in_place = bool(getattr(tmp_agent, "_last_compaction_in_place", False))
-                if rotated:
-                    session_entry.session_id = new_session_id
-                    self.session_store._save()
-                    await asyncio.to_thread(
-                        self._sync_telegram_topic_binding,
-                        source, session_entry, reason="compress-command",
-                    )
 
-                # Rewrite the transcript when EITHER rotation produced a new id
-                # OR in-place compaction succeeded. The danger this guards
-                # against is the THIRD case: _compress_context could NOT rotate
-                # AND was not in-place (e.g. legacy mode but _session_db
-                # unavailable / the DB split raised) — there session_id is
-                # unchanged for a FAILURE reason, and rewrite_transcript() would
-                # DELETE the original messages and replace them with only the
-                # compressed summary (permanent data loss #44794, #39704). In
-                # in-place mode the unchanged id is SUCCESS, so the rewrite is
-                # exactly right (and is the durable write when the throwaway
-                # /compress agent has no _session_db of its own).
+                # Persist the compressed transcript BEFORE repointing the live
+                # session onto the new session_id. Order matters: if we
+                # repointed first and the canonical DB write then failed (lock
+                # contention under concurrent writes, ENOSPC, a disk/IO error),
+                # the session entry would already reference a brand-new, empty
+                # session_id while the handler still reported success — the
+                # user's active conversation would silently vanish from view.
+                # Writing first, and treating a write failure as fatal, keeps
+                # the old history reachable (on rotation the entry still points
+                # at it; in place the original transcript is untouched) and lets
+                # the outer handler surface a "compress failed" banner instead.
+                #
+                # The rewrite runs when EITHER rotation produced a new id OR
+                # in-place compaction succeeded. It is skipped in the THIRD
+                # case: _compress_context could NOT rotate AND was not in-place
+                # (e.g. legacy mode but _session_db unavailable / the DB split
+                # raised) — there session_id is unchanged for a FAILURE reason,
+                # and rewrite_transcript() would DELETE the original messages and
+                # replace them with only the compressed summary (permanent data
+                # loss #44794, #39704). In in-place mode the unchanged id is
+                # SUCCESS, so the rewrite is exactly right (and is the durable
+                # write when the throwaway /compress agent has no _session_db of
+                # its own).
                 if rotated or _in_place:
-                    self.session_store.rewrite_transcript(
+                    if not self.session_store.rewrite_transcript(
                         new_session_id, compressed
-                    )
+                    ):
+                        raise RuntimeError(
+                            f"failed to persist compressed transcript for "
+                            f"session {new_session_id}"
+                        )
+                    if rotated:
+                        session_entry.session_id = new_session_id
+                        self.session_store._save()
+                        await asyncio.to_thread(
+                            self._sync_telegram_topic_binding,
+                            source, session_entry, reason="compress-command",
+                        )
                 else:
                     logger.warning(
                         "Manual /compress: session rotation did not occur "
@@ -3763,6 +3816,47 @@ class GatewaySlashCommandsMixin:
             lines.append("Complete your top-up in the browser — credits will appear in /credits shortly.")
         return "\n".join(lines)
 
+    def _context_breakdown_lines(self, agent, source) -> list[str]:
+        """Render the per-category context breakdown for /usage.
+
+        Estimated (chars/4) — same engine the desktop popover uses. Returns an
+        empty list and never raises on failure so /usage stays robust.
+        """
+        try:
+            from agent.context_breakdown import compute_session_context_breakdown
+
+            history: list[dict] = []
+            try:
+                entry = self.session_store.get_or_create_session(source)
+                history = self.session_store.load_transcript(entry.session_id) or []
+            except Exception:
+                history = []
+
+            payload = compute_session_context_breakdown(agent, history)
+            categories = payload.get("categories") or []
+            if not categories:
+                return []
+
+            total = payload.get("estimated_total") or 0
+            out = [t("gateway.usage.breakdown_header")]
+            for cat in categories:
+                tokens = int(cat.get("tokens") or 0)
+                if tokens <= 0:
+                    continue
+                cat_id = str(cat.get("id") or "")
+                label = t(f"gateway.usage.breakdown_cat_{cat_id}")
+                # Missing key → t() echoes the key back; fall back to the
+                # English label the engine already provides.
+                if label.endswith(f"breakdown_cat_{cat_id}"):
+                    label = str(cat.get("label") or cat_id)
+                pct = round(tokens / total * 100) if total else 0
+                out.append(
+                    t("gateway.usage.breakdown_line", label=label, count=f"{tokens:,}", pct=pct)
+                )
+            return out if len(out) > 1 else []
+        except Exception:
+            return []
+
     async def _handle_usage_command(self, event: MessageEvent) -> str:
         """Handle /usage command -- show token usage for the current session.
 
@@ -3856,11 +3950,21 @@ class GatewaySlashCommandsMixin:
 
             # Context window and compressions
             ctx = agent.context_compressor
-            if ctx.last_prompt_tokens:
-                pct = min(100, ctx.last_prompt_tokens / ctx.context_length * 100) if ctx.context_length else 0
-                lines.append(t("gateway.usage.label_context", used=f"{ctx.last_prompt_tokens:,}", total=f"{ctx.context_length:,}", pct=f"{pct:.0f}"))
+            _lpt = ctx.last_prompt_tokens if ctx.last_prompt_tokens > 0 else 0
+            if _lpt:
+                pct = min(100, _lpt / ctx.context_length * 100) if ctx.context_length else 0
+                lines.append(t("gateway.usage.label_context", used=f"{_lpt:,}", total=f"{ctx.context_length:,}", pct=f"{pct:.0f}"))
             if ctx.compression_count:
                 lines.append(t("gateway.usage.label_compressions", count=ctx.compression_count))
+
+            # Per-category context breakdown (estimated — chars/4 heuristic).
+            # Same engine the desktop popover uses (PR #54907). The system
+            # prompt / tools / skills / memory slices read off the live agent;
+            # the conversation slice is estimated from the session transcript.
+            breakdown_lines = self._context_breakdown_lines(agent, source)
+            if breakdown_lines:
+                lines.append("")
+                lines.extend(breakdown_lines)
 
             if account_lines:
                 lines.append("")
