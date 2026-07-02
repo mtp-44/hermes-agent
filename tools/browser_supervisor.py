@@ -53,6 +53,14 @@ def _redact_cdp_error_text(exc: object) -> str:
         return "<error redacted>"
 
 
+def _redact_supervisor_text(value: str) -> str:
+    """Redact page-originated text before exposing supervisor snapshots."""
+    from agent.redact import redact_sensitive_text
+
+    return redact_sensitive_text(value, force=True)
+
+
+
 # ── Config defaults ───────────────────────────────────────────────────────────
 
 DIALOG_POLICY_MUST_RESPOND = "must_respond"
@@ -166,8 +174,8 @@ class PendingDialog:
         return {
             "id": self.id,
             "type": self.type,
-            "message": self.message,
-            "default_prompt": self.default_prompt,
+            "message": _redact_supervisor_text(self.message),
+            "default_prompt": _redact_supervisor_text(self.default_prompt),
             "opened_at": self.opened_at,
             "frame_id": self.frame_id,
         }
@@ -194,7 +202,7 @@ class DialogRecord:
         return {
             "id": self.id,
             "type": self.type,
-            "message": self.message,
+            "message": _redact_supervisor_text(self.message),
             "opened_at": self.opened_at,
             "closed_at": self.closed_at,
             "closed_by": self.closed_by,
@@ -361,12 +369,8 @@ class CDPSupervisor:
         if not self._ready_event.wait(timeout=timeout):
             self.stop()
             try:
-                from agent.redact import (
-                    _redact_url_query_params,
-                    _redact_url_userinfo,
-                    redact_sensitive_text,
-                )
-                _safe_url = _redact_url_userinfo(_redact_url_query_params(redact_sensitive_text(self.cdp_url)))
+                from agent.redact import redact_cdp_url
+                _safe_url = redact_cdp_url(self.cdp_url)
             except Exception:
                 _safe_url = "<cdp_url redacted>"
             raise TimeoutError(
