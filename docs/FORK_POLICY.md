@@ -29,6 +29,44 @@
    `tests/plugins/test_routing_classifier_plugin.py` before the live gateway
    moves.
 
+## Designated successor (evaluated 2026-07-02)
+
+If/when rule 3 fires, the concrete swap candidate is
+**[vellum-assistant](https://github.com/vellum-ai/vellum-assistant)**
+(MIT, very active, v0.10.x at evaluation). Code-read findings:
+
+- **Full MCP client** (official SDK; stdio/SSE/streamable-HTTP) with
+  **per-server custom headers** — mounts open_brain with the existing
+  `x-brain-key` today, and ships an MCP OAuth provider for checklist A4.
+- **Covers the whole surface set, maintained upstream:** macOS/iOS/web
+  clients in-repo; gateway speaks Telegram, Slack, email, voice.
+- **Local mode is real:** Ollama models, local ONNX embeddings —
+  **pin `memory.embeddings.provider` to local/ollama** (default
+  auto-falls-back to cloud, which would add an undocumented processor).
+- **Security posture strong:** actor tiers, credential isolation in a
+  separate process, sandboxed tools, deny-by-default.
+- **Known tension:** its native 8-type memory system is the product core
+  and would accumulate a parallel profile beside open_brain. Acceptable
+  only as the local working-set tier; open_brain stays canonical via MCP.
+
+**Trial gate (must all pass before any switch; trial itself is post-Phase-A
+work and needs Mark's go under the lean rules):**
+
+1. `scripts/openbrain_conformance_smoke.py` passes against open_brain
+   mounted in Vellum (same capture/retrieve contract as Hermes).
+2. Vellum's native memory can be scoped down/disabled to working-set size —
+   the first unknown to resolve; if "you" accumulates in the appliance
+   beyond a working set, walk away.
+3. Embeddings provably pinned local (no silent cloud fallback), and any new
+   processor documented in `open_brain/BRAIN.md` BEFORE the trial.
+4. Proactive delivery unaffected (open_brain's own `daily_digest.py` +
+   Telegram bot are independent of the conversation surface and keep running
+   either way).
+
+Fallback surface if no successor qualifies at swap time: open_brain's own
+Python Telegram bot (capture + proactive) + Claude clients over the hosted
+MCP (retrieval/conversation) — zero gateway at all.
+
 ## What is Mark's in this fork (the portable inventory)
 
 - `plugins/routing-classifier/` — deterministic local/frontier route
