@@ -818,7 +818,7 @@ class GatewaySlashCommandsMixin:
             return self._same_origin_chat(source, origin)
         # Inactive/persisted-only: best-effort scope by DB row source + user.
         try:
-            row = await self._session_db.get_session(target_id) or {}
+            row = await asyncio.to_thread(self._session_db.get_session, target_id) or {}
         except Exception:
             return False
         caller_src = source.platform.value if source.platform else None
