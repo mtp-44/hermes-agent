@@ -272,11 +272,11 @@ class GatewaySlashCommandsMixin:
             session_info = ""
 
         if new_entry:
-            header = self._telegram_topic_new_header(source) or t("gateway.reset.header_default")
+            header = await asyncio.to_thread(self._telegram_topic_new_header, source) or t("gateway.reset.header_default")
         else:
             # No existing session, just create one
             new_entry = self.session_store.get_or_create_session(source, force_new=True)
-            header = self._telegram_topic_new_header(source) or t("gateway.reset.header_new")
+            header = await asyncio.to_thread(self._telegram_topic_new_header, source) or t("gateway.reset.header_new")
 
         # Set session title if provided with /new <title>
         _title_arg = event.get_command_args().strip()
@@ -290,7 +290,7 @@ class GatewaySlashCommandsMixin:
                 _title_note = t("gateway.reset.title_rejected", error=str(e))
             if sanitized:
                 try:
-                    self._session_db.set_session_title(new_entry.session_id, sanitized)
+                    await self._session_db.set_session_title(new_entry.session_id, sanitized)
                     header = t("gateway.reset.header_titled", title=sanitized)
                 except ValueError as e:
                     _title_note = t("gateway.reset.title_error_untitled", error=str(e))
@@ -306,9 +306,9 @@ class GatewaySlashCommandsMixin:
         # uses the freshly-created session. Without this, the binding
         # still points at the old session and the binding-lookup at the
         # top of _handle_message_with_agent would switch right back.
-        if self._is_telegram_topic_lane(source) and new_entry is not None:
+        if await asyncio.to_thread(self._is_telegram_topic_lane, source) and new_entry is not None:
             try:
-                self._record_telegram_topic_binding(source, new_entry)
+                await asyncio.to_thread(self._record_telegram_topic_binding, source, new_entry)
             except Exception:
                 logger.debug("Failed to rebind Telegram topic after /new", exc_info=True)
 
@@ -542,11 +542,11 @@ class GatewaySlashCommandsMixin:
         db_total_tokens = 0
         if self._session_db:
             try:
-                title = self._session_db.get_session_title(session_entry.session_id)
+                title = await self._session_db.get_session_title(session_entry.session_id)
             except Exception:
                 title = None
             try:
-                row = self._session_db.get_session(session_entry.session_id)
+                row = await self._session_db.get_session(session_entry.session_id)
                 if isinstance(row, dict):
                     session_row = row
                     db_total_tokens = (
@@ -750,9 +750,19 @@ class GatewaySlashCommandsMixin:
         chat_type = (getattr(current, "chat_type", "") or "").lower()
         # DM-like chats are always per-user.
         if chat_type in {"dm", "direct", "private", ""}:
-            if origin.user_id and current.user_id:
-                return origin.user_id == current.user_id
-            return True
+            # chat_id was already required equal above and, when present, IS the
+            # DM session key — so an equal non-empty chat_id is sufficient.
+            # build_session_key only falls back to the participant id
+            # (``user_id_alt or user_id`` — Signal/Feishu key on user_id_alt)
+            # when there is NO chat_id; mirror that and fail closed on a
+            # missing/different participant so two no-chat_id DM origins are
+            # never conflated (was: compared user_id only and allowed when
+            # either side was missing).
+            if str(getattr(current, "chat_id", "") or ""):
+                return True
+            cur_pid = str(current.user_id_alt or current.user_id or "")
+            org_pid = str(origin.user_id_alt or origin.user_id or "")
+            return bool(cur_pid) and cur_pid == org_pid
         # Non-DM: scope by participant whenever the session key for this source
         # is per-user. is_shared_multi_user_session mirrors build_session_key's
         # isolation rules exactly, so the guard stays in lock-step with the key.
@@ -818,7 +828,7 @@ class GatewaySlashCommandsMixin:
             return self._same_origin_chat(source, origin)
         # Inactive/persisted-only: best-effort scope by DB row source + user.
         try:
-            row = await asyncio.to_thread(self._session_db.get_session, target_id) or {}
+            row = await self._session_db.get_session(target_id) or {}
         except Exception:
             return False
         caller_src = source.platform.value if source.platform else None
@@ -827,23 +837,104 @@ class GatewaySlashCommandsMixin:
             return False  # different platform / source
         caller_uid = str(getattr(source, "user_id", "") or "")
         row_uid = str(row.get("user_id") or "")
+        # Chat/thread origin recorded at session creation (see
+        # SessionDB._insert_session_row). The sessions table historically stored
+        # only source + user_id, so a same-user row could belong to a DIFFERENT
+        # chat; comparing the persisted origin closes that gap. Legacy rows
+        # created before origin capture have NULL here and therefore fail closed
+        # (they cannot prove the caller's chat) — resume them via a live session
+        # or an admin override.
+        caller_chat = str(getattr(source, "chat_id", "") or "")
+        row_chat = str(row.get("chat_id") or "")
+        caller_thread = str(getattr(source, "thread_id", "") or "")
+        row_thread = str(row.get("thread_id") or "")
+        chat_type = (getattr(source, "chat_type", "") or "").lower()
+        caller_is_dm = chat_type in {"dm", "direct", "private", ""}
+        # build_session_key keys the participant on ``user_id_alt or user_id``
+        # (Signal/Feishu carry the canonical participant in user_id_alt), but the
+        # sessions table only ever stored user_id — it has no user_id_alt column.
+        # So when the caller carries a user_id_alt, the row CANNOT prove the
+        # canonical participant that the live session key is built from: two
+        # members sharing one user_id but different user_id_alt map to DIFFERENT
+        # session keys, yet the persisted row's user_id would match both. The
+        # live-origin guard (_same_origin_chat) compares user_id_alt correctly;
+        # the persisted fallback cannot, so any per-user comparison that would
+        # otherwise rely on row_uid == caller_uid must fail closed here to stay
+        # in lock-step with the key boundary (CWE-639). Shared group/thread
+        # sessions are unaffected (they don't scope by participant at all), and
+        # an admin --all override still bypasses this above.
+        caller_keys_on_alt = bool(str(getattr(source, "user_id_alt", "") or ""))
         if caller_uid:
             # Identity-bearing caller: allow only when the row PROVES the same
-            # owner AND the same platform/origin. A row with no/blank user_id
-            # cannot be proven to belong to this caller; a row with no/blank
-            # source cannot be proven to share the caller's platform (the
-            # row_src check above only rejects a *mismatching* non-blank source,
-            # so a blank/legacy source would otherwise slip through on user_id
-            # equality alone). Either gap fails closed — an identified user must
-            # not bind to an unowned, other-owned, or unproven-origin persisted
-            # session by id/title. (Legacy NULL-owner or blank-source rows are
-            # intentionally not resumable this way; use a live session or an
-            # explicit admin override.)
-            return (
-                bool(row_uid) and row_uid == caller_uid
-                and bool(row_src) and bool(caller_src)
+            # owner AND the same platform/origin AND the same chat/thread. A row
+            # with no/blank user_id cannot be proven to belong to this caller; a
+            # row with no/blank source cannot be proven to share the caller's
+            # platform (the row_src check above only rejects a *mismatching*
+            # non-blank source, so a blank/legacy source would otherwise slip
+            # through on user_id equality alone); and a row whose origin chat
+            # (or thread) differs from the caller's belongs to a different
+            # conversation. Any gap fails closed — an identified user must not
+            # bind to an unowned, other-owned, other-chat, or unproven-origin
+            # persisted session by id/title. (Legacy NULL-owner/blank-source/
+            # NULL-chat rows are intentionally not resumable this way; use a
+            # live session or an explicit admin override.)
+            # Common origin proof for any identity-bearing caller: a non-blank
+            # source that matches the caller's platform, and the same thread. A
+            # blank/legacy source can't prove the platform; a different thread is
+            # a different session (build_session_key appends thread_id).
+            origin_ok = (
+                bool(row_src) and bool(caller_src)
                 and str(row_src) == str(caller_src)
+                and row_thread == caller_thread
             )
+            if not origin_ok:
+                return False
+            if caller_is_dm:
+                # DMs are keyed on user_id; require the same owner. chat_id is
+                # legitimately absent on both sides for a no-chat_id DM (scoped
+                # by user_id), but a mismatching chat_id (when present) is still
+                # rejected.
+                #
+                # A no-chat_id DM is keyed PURELY on the participant
+                # (``user_id_alt or user_id``). If the caller keys on user_id_alt
+                # the persisted row (user_id only) cannot prove that participant,
+                # so fail closed. When chat_id is present on both sides it is the
+                # DM key and equal chat_id is sufficient, so the alt gap doesn't
+                # apply there.
+                if caller_keys_on_alt and not (bool(row_chat) and bool(caller_chat)):
+                    return False
+                return (
+                    bool(row_uid) and row_uid == caller_uid
+                    and row_chat == caller_chat
+                )
+            # Non-DM (group/channel/forum/thread): build_session_key includes
+            # chat_id, so a row (or caller) with NO chat provenance cannot prove
+            # same-chat. Require both sides non-blank and equal — a legacy
+            # NULL-chat row (or a caller missing its chat_id) fails closed even
+            # when both normalize to "". (CWE-639)
+            if not (bool(row_chat) and bool(caller_chat) and row_chat == caller_chat):
+                return False
+            # Within the same non-DM chat/thread, mirror build_session_key's
+            # participant scoping: a SHARED group/thread session
+            # (group_sessions_per_user=False, or a shared thread) is one session
+            # for every participant, so the same-chat proof above is sufficient —
+            # do NOT also require user-id equality (otherwise a co-member is
+            # wrongly blocked from their own shared session). A per-user session
+            # still requires the same owner.
+            shared = is_shared_multi_user_session(
+                source,
+                group_sessions_per_user=getattr(self.config, "group_sessions_per_user", True),
+                thread_sessions_per_user=getattr(self.config, "thread_sessions_per_user", False),
+            )
+            if shared:
+                return True
+            # Per-user non-DM: the session key includes the participant
+            # (``user_id_alt or user_id``). If the caller keys on user_id_alt,
+            # the persisted row (user_id only) cannot prove the canonical
+            # participant, so fail closed rather than matching on user_id alone.
+            if caller_keys_on_alt:
+                return False
+            return bool(row_uid) and row_uid == caller_uid
         # No caller identity: the persisted row carries only source + user_id
         # (the sessions table has no chat_id), so a same-platform row can belong
         # to a DIFFERENT chat or user. Same-platform alone is therefore NOT
@@ -1389,7 +1480,7 @@ class GatewaySlashCommandsMixin:
         # (Telegram DM topic recovery) before deriving the override key, so
         # the override is stored under the key the next message turn reads
         # (#30479).
-        source = self._normalize_source_for_session_key(source)
+        source = await asyncio.to_thread(self._normalize_source_for_session_key, source)
         session_key = self._session_key_for_source(source)
         override = self._session_model_overrides.get(session_key, {})
         if override:
@@ -1516,7 +1607,7 @@ class GatewaySlashCommandsMixin:
                                 _sess_entry = _self.session_store.get_or_create_session(
                                     event.source
                                 )
-                                _sess_db.update_session_model(
+                                await _sess_db.update_session_model(
                                     _sess_entry.session_id, result.new_model
                                 )
                             except Exception as exc:
@@ -1742,7 +1833,7 @@ class GatewaySlashCommandsMixin:
                     # override just stored below (Closes #48031).
                     if getattr(_sess_entry, "was_auto_reset", False):
                         _sess_entry.was_auto_reset = False
-                    _sess_db.update_session_model(
+                    await _sess_db.update_session_model(
                         _sess_entry.session_id, result.new_model
                     )
                 except Exception as exc:
@@ -2534,7 +2625,7 @@ class GatewaySlashCommandsMixin:
         # Normalize the source (Telegram DM topic recovery) before deriving
         # the override key so storage matches the key the next message turn
         # reads — same fix as /model (#30479).
-        _reasoning_source = self._normalize_source_for_session_key(event.source)
+        _reasoning_source = await asyncio.to_thread(self._normalize_source_for_session_key, event.source)
         session_key = self._session_key_for_source(_reasoning_source)
         self._show_reasoning = self._load_show_reasoning()
         self._reasoning_config = self._resolve_session_reasoning_config(
@@ -3028,7 +3119,7 @@ class GatewaySlashCommandsMixin:
                 skip_memory=True,
                 enabled_toolsets=["memory"],
                 session_id=session_entry.session_id,
-                session_db=self._session_db,
+                session_db=getattr(self._session_db, "_db", self._session_db),
             )
             try:
                 tmp_agent._print_fn = lambda *a, **kw: None
@@ -3073,7 +3164,8 @@ class GatewaySlashCommandsMixin:
                 if rotated:
                     session_entry.session_id = new_session_id
                     self.session_store._save()
-                    self._sync_telegram_topic_binding(
+                    await asyncio.to_thread(
+                        self._sync_telegram_topic_binding,
                         source, session_entry, reason="compress-command",
                     )
 
@@ -3186,7 +3278,7 @@ class GatewaySlashCommandsMixin:
 
         # /topic off — clean disable path so users don't have to edit the DB.
         if args.lower() in {"off", "disable", "stop"}:
-            return self._disable_telegram_topic_mode_for_chat(source)
+            return await self._disable_telegram_topic_mode_for_chat(source)
 
         if args:
             if not source.thread_id:
@@ -3207,7 +3299,7 @@ class GatewaySlashCommandsMixin:
                 return t("gateway.topic.topics_user_disallowed")
 
         try:
-            self._session_db.enable_telegram_topic_mode(
+            await self._session_db.enable_telegram_topic_mode(
                 chat_id=str(source.chat_id),
                 user_id=str(source.user_id),
                 has_topics_enabled=capabilities.get("has_topics_enabled"),
@@ -3222,7 +3314,7 @@ class GatewaySlashCommandsMixin:
 
         if source.thread_id:
             try:
-                binding = self._session_db.get_telegram_topic_binding(
+                binding = await self._session_db.get_telegram_topic_binding(
                     chat_id=str(source.chat_id),
                     thread_id=str(source.thread_id),
                 )
@@ -3233,7 +3325,7 @@ class GatewaySlashCommandsMixin:
                 session_id = str(binding.get("session_id") or "")
                 title = None
                 try:
-                    title = self._session_db.get_session_title(session_id)
+                    title = await self._session_db.get_session_title(session_id)
                 except Exception:
                     title = None
                 session_label = title or t("gateway.topic.untitled_session")
@@ -3244,7 +3336,7 @@ class GatewaySlashCommandsMixin:
                 )
             return t("gateway.topic.thread_ready")
 
-        return self._telegram_topic_root_status_message(source)
+        return await self._telegram_topic_root_status_message(source)
 
     async def _handle_title_command(self, event: MessageEvent) -> str:
         """Handle /title command — set or show the current session's title."""
@@ -3258,14 +3350,20 @@ class GatewaySlashCommandsMixin:
 
         # Ensure session exists in SQLite DB (it may only exist in session_store
         # if this is the first command in a new session)
-        existing_title = self._session_db.get_session_title(session_id)
+        existing_title = await self._session_db.get_session_title(session_id)
         if existing_title is None:
             # Session doesn't exist in DB yet — create it
             try:
-                self._session_db.create_session(
+                await self._session_db.create_session(
                     session_id=session_id,
                     source=source.platform.value if source.platform else "unknown",
                     user_id=source.user_id,
+                    # Persist the messaging origin so a later /resume of this
+                    # titled-but-now-inactive session can prove it belongs to the
+                    # caller's chat/thread (IDOR scoping).
+                    chat_id=source.chat_id,
+                    chat_type=source.chat_type,
+                    thread_id=source.thread_id,
                 )
             except Exception:
                 pass  # Session might already exist, ignore errors
@@ -3274,14 +3372,15 @@ class GatewaySlashCommandsMixin:
         if title_arg:
             # Sanitize the title before setting
             try:
-                sanitized = self._session_db.sanitize_title(title_arg)
+                from hermes_state import SessionDB
+                sanitized = SessionDB.sanitize_title(title_arg)
             except ValueError as e:
                 return t("gateway.shared.warn_passthrough", error=e)
             if not sanitized:
                 return t("gateway.title.empty_after_clean")
             # Set the title
             try:
-                if self._session_db.set_session_title(session_id, sanitized):
+                if await self._session_db.set_session_title(session_id, sanitized):
                     # Propagate the user-chosen title to the visible Telegram
                     # forum topic name too. Auto-generated titles already rename
                     # the topic; without this, /title only updated the DB title
@@ -3292,7 +3391,7 @@ class GatewaySlashCommandsMixin:
                     )
                     if callable(schedule_rename):
                         try:
-                            schedule_rename(source, session_id, sanitized)
+                            await asyncio.to_thread(schedule_rename, source, session_id, sanitized)
                         except Exception:
                             logger.debug(
                                 "Failed to rename Telegram topic from /title",
@@ -3305,7 +3404,7 @@ class GatewaySlashCommandsMixin:
                 return t("gateway.shared.warn_passthrough", error=e)
         else:
             # Show the current title and session ID
-            title = self._session_db.get_session_title(session_id)
+            title = await self._session_db.get_session_title(session_id)
             if title:
                 return t("gateway.title.current_with_title", session_id=session_id, title=title)
             else:
@@ -3338,15 +3437,15 @@ class GatewaySlashCommandsMixin:
         ):
             name = name[1:-1].strip()
 
-        def _list_titled_sessions() -> list[dict]:
+        async def _list_titled_sessions() -> list[dict]:
             user_source = source.platform.value if source.platform else None
-            sessions = self._session_db.list_sessions_rich(source=user_source, limit=10)
+            sessions = await self._session_db.list_sessions_rich(source=user_source, limit=10)
             return [s for s in sessions if s.get("title")][:10]
 
         if not name:
             # List recent titled sessions for this user/platform
             try:
-                titled = _list_titled_sessions()
+                titled = await _list_titled_sessions()
                 titled = [
                     s for s in titled
                     if await self._resume_row_visible(source, s, allow_all)
@@ -3374,7 +3473,7 @@ class GatewaySlashCommandsMixin:
         # Resolve a numbered choice or a title to a session ID.
         if name.isdigit():
             try:
-                titled = _list_titled_sessions()
+                titled = await _list_titled_sessions()
                 titled = [
                     s for s in titled
                     if await self._resume_row_visible(source, s, allow_all)
@@ -3391,17 +3490,17 @@ class GatewaySlashCommandsMixin:
         else:
             # Try direct session ID lookup first (so `/resume <session_id>`
             # works in the gateway, not just `/resume <title>`).
-            session = self._session_db.get_session(name)
+            session = await self._session_db.get_session(name)
             if session:
                 target_id = session["id"]
             else:
-                target_id = self._session_db.resolve_session_by_title(name)
+                target_id = await self._session_db.resolve_session_by_title(name)
         if not target_id:
             return t("gateway.resume.not_found", name=name)
         # Compression creates child continuations that hold the live transcript.
         # Follow that chain so gateway /resume matches CLI behavior (#15000).
         try:
-            target_id = self._session_db.resolve_resume_session_id(target_id)
+            target_id = await self._session_db.resolve_resume_session_id(target_id)
         except Exception as e:
             logger.debug("Failed to resolve resume continuation for %s: %s", target_id, e)
 
@@ -3438,6 +3537,20 @@ class GatewaySlashCommandsMixin:
             return t("gateway.resume.switch_failed")
         self._clear_session_boundary_security_state(session_key)
 
+        # Clear session-scoped model/reasoning overrides so the resumed
+        # conversation picks up configured defaults instead of a /model
+        # switch made in the previous session under the same chat
+        # session_key. /resume is a conversation boundary just like /new
+        # (which clears these too); without this, a stale override leaks
+        # across the switch. See #10702.
+        _overrides = getattr(self, "_session_model_overrides", None)
+        if isinstance(_overrides, dict):
+            _overrides.pop(session_key, None)
+        self._set_session_reasoning_override(session_key, None)
+        _pending_notes = getattr(self, "_pending_model_notes", None)
+        if isinstance(_pending_notes, dict):
+            _pending_notes.pop(session_key, None)
+
         # Evict any cached agent for this session so the next message
         # rebuilds with the correct session_id end-to-end — mirrors
         # /branch and /reset. Without this, the cached AIAgent (and its
@@ -3446,7 +3559,7 @@ class GatewaySlashCommandsMixin:
         self._evict_cached_agent(session_key)
 
         # Get the title for confirmation
-        title = self._session_db.get_session_title(target_id) or name
+        title = await self._session_db.get_session_title(target_id) or name
 
         # Count messages for context
         history = self.session_store.load_transcript(target_id)
@@ -3496,8 +3609,9 @@ class GatewaySlashCommandsMixin:
         # previews / sources — the enumeration half of the /resume IDOR.
         cross_origin = include_all and self._resume_caller_is_admin(source)
         current_entry = self.session_store.get_or_create_session(source)
-        rows = query_session_listing(
-            self._session_db,
+        rows = await asyncio.to_thread(
+            query_session_listing,
+            getattr(self._session_db, "_db", self._session_db),
             source=source.platform.value if source.platform else None,
             current_session_id=current_entry.session_id,
             include_all_sources=cross_origin,
@@ -3553,9 +3667,9 @@ class GatewaySlashCommandsMixin:
         if branch_name:
             branch_title = branch_name
         else:
-            current_title = self._session_db.get_session_title(current_entry.session_id)
+            current_title = await self._session_db.get_session_title(current_entry.session_id)
             base = current_title or "branch"
-            branch_title = self._session_db.get_next_title_in_lineage(base)
+            branch_title = await self._session_db.get_next_title_in_lineage(base)
 
         parent_session_id = current_entry.session_id
 
@@ -3565,7 +3679,7 @@ class GatewaySlashCommandsMixin:
         # /sessions even after the parent is reopened and re-ended with a
         # different end_reason (e.g. tui_shutdown overwriting 'branched').
         try:
-            self._session_db.create_session(
+            await self._session_db.create_session(
                 session_id=new_session_id,
                 source=source.platform.value if source.platform else "gateway",
                 model=(self.config.get("model", {}) or {}).get("default") if isinstance(self.config, dict) else None,
@@ -3579,7 +3693,7 @@ class GatewaySlashCommandsMixin:
         # Copy conversation history to the new session
         for msg in history:
             try:
-                self._session_db.append_message(
+                await self._session_db.append_message(
                     session_id=new_session_id,
                     role=msg.get("role", "user"),
                     content=msg.get("content"),
@@ -3598,7 +3712,7 @@ class GatewaySlashCommandsMixin:
 
         # Set title
         try:
-            self._session_db.set_session_title(new_session_id, branch_title)
+            await self._session_db.set_session_title(new_session_id, branch_title)
         except Exception:
             pass
 
@@ -3681,7 +3795,7 @@ class GatewaySlashCommandsMixin:
         if not provider and getattr(self, "_session_db", None) is not None:
             try:
                 _entry_for_billing = self.session_store.get_or_create_session(source)
-                persisted = self._session_db.get_session(_entry_for_billing.session_id) or {}
+                persisted = await self._session_db.get_session(_entry_for_billing.session_id) or {}
             except Exception:
                 persisted = {}
             provider = provider or persisted.get("billing_provider")
