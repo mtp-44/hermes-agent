@@ -150,7 +150,10 @@ what tripped us up."
 
 - Standing process: `docs/hermes-update-runbook.md`
 - This sync's detailed notes: `docs/cleanup/2026-07-02-security-sync.md`
+- The `/resume` hardening follow-up's detailed notes (item 1, landed same
+  day via PR #5): `docs/cleanup/2026-07-02-resume-hardening.md`
 - Prior sync notes: `docs/cleanup/2026-06-26-upstream-sync.md`,
   `docs/cleanup/2026-06-19-after-upstream-sync.md`
 - Triage tool: `scripts/upstream_digest.py`
-- Rollback tag from this sync: `archive/pre-hermes-update-20260702-074406`
+- Rollback tags: `archive/pre-hermes-update-20260702-074406` (security sync),
+  `archive/pre-hermes-update-20260702-120323` (`/resume` hardening)
