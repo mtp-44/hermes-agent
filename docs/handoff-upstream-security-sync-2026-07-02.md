@@ -12,8 +12,10 @@ tractable at upstream's pace (~140 commits/day). On 2026-07-02 we did a
 **security-only** cherry-pick sync instead of a full merge, landed it, and
 restarted the gateway. Later the same day, the 3 deferred `/resume` hardening
 commits (item 1 below) also landed via PR #5, pulling in a bigger dependency
-chain than expected. **Full non-security merge (item 2) is still outstanding**
-— that's the next real chunk of work.
+chain than expected. **Later the same day, the full non-security merge (item
+2, ~1,160 commits) also landed via PR #6** — turned out to be tractable as a
+single `git merge` (mirroring the 2026-06-26 precedent) rather than needing
+batching. **Only item 3 (optional digest automation) remains open.**
 
 Read `docs/hermes-update-runbook.md` first — it's the standing process this
 handoff builds on. This file is just "what's already done, what's left, and
@@ -46,7 +48,7 @@ what tripped us up."
   `LOCAL_DELTA_PATHS` (our load-bearing files); everything else is a bulk
   count by conventional-commit type.
 
-## Next up (not started)
+## Next up
 
 **1. ~~The 3 deferred `/resume` hardening commits~~ — DONE 2026-07-02.**
    Landed via [PR #5](https://github.com/mtp-44/hermes-agent/pull/5)
@@ -88,26 +90,47 @@ what tripped us up."
      before touching production. Confirms this needs checking after *every*
      `uv sync` in *any* worktree, not just the first one in a session.
 
-**2. The full non-security merge** (~1,098 remaining commits as of
-   2026-07-02, growing). Strategy:
-   - Run `scripts/upstream_digest.py` fresh to see current drift and any
-     new security commits since this sync.
-   - Do NOT try to review 1,000+ commits by hand. Merge in batches (e.g. by
-     date range or by subsystem) on a dated `sync/` branch, resolve
-     conflicts per the Update Rules in the runbook (never blanket
-     "keep-ours" — reapply local deltas where upstream moved code), and
-     lean on CI + `run_tests_parallel.py` vs. a `main` baseline to catch
-     regressions rather than trying to reason about every commit.
-   - Expect the same failure modes we hit this sync: upstream commits that
-     assume a later refactor (async facades, schema changes) not yet
-     merged. When a cherry-pick/merge references a symbol/table/async
-     interface that doesn't exist in our tree, look for the actual
-     defining/introducing commit and pull it in first rather than
-     papering over it.
+**2. ~~The full non-security merge~~ — DONE 2026-07-02.** Landed via
+   [PR #6](https://github.com/mtp-44/hermes-agent/pull/6) (merge commit
+   `e430f809b`), gateway restarted, all post-checks green. Turned out
+   tractable as a single `git merge reference/main` in a disposable
+   worktree — the same approach as the 2026-06-26 858-commit sync — rather
+   than needing date/subsystem batching as originally speculated; only 16
+   files conflicted, and only 5 of those were genuinely load-bearing local
+   deltas requiring judgment calls (the rest were mechanical version bumps
+   or pure test additions). Full details, conflict-by-conflict resolution
+   rationale, and the test-diff triage:
+   `docs/cleanup/2026-07-02-full-merge.md`.
+   - Verified: full `run_tests_parallel.py` suite (35,789 tests) vs.
+     unmerged-`main` baseline — merged tree equal-or-better (61 vs. 64
+     failures), every differing file triaged individually, no true
+     regressions. i18n parity 47/47, clean byte-compile, CI green on PR #6,
+     98/98 focused OB/Hermes conformance tests, health monitor all-healthy
+     post-restart.
+   - DB backup: `/Users/mh/.hermes/backups/state.db.pre-full-merge-20260702-135347`.
+     Rollback tags: `archive/pre-hermes-update-20260702-121602` (pre-merge),
+     `archive/pre-hermes-update-20260702-135442` (post-fast-forward,
+     pre-restart).
+   - Notable upstream features landed: compression-lock lease refresher,
+     `resume_pending` freshness gate (#46934), self-heal stale session
+     routing (#54878, already observed firing correctly post-restart),
+     consolidated `redact_cdp_url` as the single CDP-URL-redaction source of
+     truth, browser `eval` SSRF/sensitive-primitive blocklist, aiohttp
+     3.14.1.
+   - **Gotcha reproduced live AGAIN**: a third `uv sync` (in a throwaway
+     worktree used to verify a test failure against pure upstream) hijacked
+     `/Users/mh/.local/bin/hermes` once more — same recurring issue as
+     earlier the same day. This time it repointed to a *different*,
+     already-stale worktree's venv rather than the one just synced. Caught
+     via routine `readlink`, fixed before touching production. See the
+     sharpened gotcha note below.
+   - **Still needed**: a real Telegram smoke message from a human (the one
+     post-update-smoke step that can't self-trigger).
 
 **3. Consider scheduling `upstream_digest.py`** (e.g. via Hermes's own
    scheduled-tasks) to run every 1–2 days and report via Telegram, so drift
-   is visible continuously instead of rediscovered cold at each sync.
+   is visible continuously instead of rediscovered cold at each sync. This
+   is the only item left open in this handoff.
 
 ## Gotchas hit this sync (don't repeat)
 
@@ -118,6 +141,13 @@ what tripped us up."
   `readlink /Users/mh/.local/bin/hermes` and confirm it points at
   `/Users/mh/ai/agents/hermes-agent/.venv/bin/hermes` before restarting the
   gateway, if you did any `uv sync` in a disposable worktree along the way.
+  **Reproduced a third time during the full-merge sync**, and that time it
+  repointed to a *different, already-stale* worktree's venv rather than the
+  one most recently synced — don't assume which venv it'll point to if
+  hijacked; always `readlink` and compare explicitly rather than eyeballing
+  it. This has now happened at least once in every sync session this same
+  day — check after *every single* `uv sync`, no exceptions, no matter how
+  many times you've already checked earlier in the session.
 - **Production `uv sync` needs `--extra messaging`** alongside
   `--extra all --extra dev`, or it prunes `python-telegram-bot[webhooks]`
   (lazy-installed, deliberately excluded from `[all]`). Same class of
@@ -152,8 +182,12 @@ what tripped us up."
 - This sync's detailed notes: `docs/cleanup/2026-07-02-security-sync.md`
 - The `/resume` hardening follow-up's detailed notes (item 1, landed same
   day via PR #5): `docs/cleanup/2026-07-02-resume-hardening.md`
+- The full non-security merge's detailed notes (item 2, landed same day via
+  PR #6): `docs/cleanup/2026-07-02-full-merge.md`
 - Prior sync notes: `docs/cleanup/2026-06-26-upstream-sync.md`,
   `docs/cleanup/2026-06-19-after-upstream-sync.md`
 - Triage tool: `scripts/upstream_digest.py`
 - Rollback tags: `archive/pre-hermes-update-20260702-074406` (security sync),
-  `archive/pre-hermes-update-20260702-120323` (`/resume` hardening)
+  `archive/pre-hermes-update-20260702-120323` (`/resume` hardening),
+  `archive/pre-hermes-update-20260702-121602` (full-merge, pre-merge),
+  `archive/pre-hermes-update-20260702-135442` (full-merge, pre-restart)
