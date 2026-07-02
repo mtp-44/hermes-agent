@@ -8,8 +8,10 @@
 
 ## Status: DONE through post-smoke
 
-Production `main` and the live gateway are UPDATED and verified. Cleanup
-window (bottom of this doc) is deliberately held for a burn-in period.
+Production `main` and the live gateway are UPDATED and verified. The sync
+worktree/branch were cleaned up immediately (no burn-in hold requested this
+time, matching the resume-hardening sync earlier the same day) — see
+Cleanup Window below for what's left.
 
 - PR: [mtp-44/hermes-agent#6](https://github.com/mtp-44/hermes-agent/pull/6) —
   merged after all required CI checks green, merge commit `e430f809b`.
@@ -111,13 +113,14 @@ eyeball it.**
 
 ## Cleanup Window
 
-Only after production has passed the post-update guard and a real Telegram
-smoke for at least one day:
-
-- Remove worktree: `git -C /Users/mh/ai/agents/hermes-agent worktree remove /Users/mh/ai/agents/hermes-sync-2026-07-02`
-- Delete sync branch: `git branch -d sync/full-merge-main-2026-07-02` (local + `origin --delete`)
-- Prune older `archive/pre-hermes-update-*` tags, keeping the newest known-good.
-- Delete this file.
+- Sync branch `sync/full-merge-main-2026-07-02`: deleted (both local and
+  `origin`) immediately after merge — no burn-in hold requested this time.
+- Disposable worktrees `/Users/mh/ai/agents/hermes-sync-2026-07-02` and
+  `/tmp/hermes-reference-check`: removed.
+- Prune older `archive/pre-hermes-update-*` tags, keeping the newest
+  known-good, once this sync has proven stable — still pending.
+- Delete this file once a day of real Telegram traffic has passed with no
+  regressions traceable to this merge.
 
 **Unrelated stale debt noticed in passing (not this sync's responsibility,
 flagging for the next cleanup pass):** `sync/unified-retrieval-main-2026-06-26`
