@@ -10,7 +10,10 @@ The fork was ~1,113 commits behind `reference/main` (NousResearch/hermes-agent,
 last full sync 2026-06-26). Reviewing/merging all of it in one sitting isn't
 tractable at upstream's pace (~140 commits/day). On 2026-07-02 we did a
 **security-only** cherry-pick sync instead of a full merge, landed it, and
-restarted the gateway. Full non-security merge is still outstanding.
+restarted the gateway. Later the same day, the 3 deferred `/resume` hardening
+commits (item 1 below) also landed via PR #5, pulling in a bigger dependency
+chain than expected. **Full non-security merge (item 2) is still outstanding**
+— that's the next real chunk of work.
 
 Read `docs/hermes-update-runbook.md` first — it's the standing process this
 handoff builds on. This file is just "what's already done, what's left, and
@@ -45,23 +48,45 @@ what tripped us up."
 
 ## Next up (not started)
 
-**1. The 3 deferred `/resume` hardening commits**, in order:
-   `5248877c6` → `599a6391d` → `f1e58d8c1` → `5b3f06425`
-   (chat/thread-origin proof, DM scoping tightening, shared-group fallback,
-   `user_id_alt` keying). These depend on a `sessions` table schema change
-   (`chat_id`/`thread_id` columns + `ON CONFLICT` upsert enrichment in
-   `hermes_state.py`'s session-insert helper) that lives in earlier,
-   non-security upstream commits we haven't merged. To take these:
-   - Find the schema-introducing commit(s) upstream (walk
-     `git log reference/main -- hermes_state.py` around the same date range
-     as `5248877c6`).
-   - Cherry-pick the schema commit(s) first, verify `hermes_state.py`
-     migrations/tests pass, *then* the 4 `/resume` commits should apply
-     cleanly (they didn't need the async/i18n workarounds this sync needed
-     for the base IDOR fix, since by then upstream's own test file is
-     already consistent).
-   - This is a real schema change touching the live production SQLite DB —
-     treat it with the same care as a migration (backup, verify rollback).
+**1. ~~The 3 deferred `/resume` hardening commits~~ — DONE 2026-07-02.**
+   Landed via [PR #5](https://github.com/mtp-44/hermes-agent/pull/5)
+   (merge commit `c2d0119d4`), gateway restarted, all post-checks green. The
+   dependency chain was bigger than expected — 13 commits total, not the 4
+   security commits + 1 schema commit originally assumed:
+   - Schema/persistence: `e28e14443` (sessions table gains `chat_id`/
+     `thread_id`, session-restart preservation), `3b6193eaf` (upsert instead
+     of INSERT-OR-IGNORE).
+   - `AsyncSessionDB` facade chain (needed because `5248877c6`'s own test
+     file assumed it existed): `98f955154` → `bb102c98b` → `cdc14e964` →
+     `15506e4cc`.
+   - `4e0f5c37d` (Telegram topic-recovery offload) — needed because it's the
+     upstream commit that updates `test_resume_command.py`'s test harness to
+     wrap `SessionDB` in `AsyncSessionDB`; without it the harness didn't
+     match the facade's contract.
+   - The 4 target security commits: `8a10b4e36`, `bf96b9d60`, `323520208`,
+     `2e5c7bcd4`.
+   - `449d11ca1` (clear `/model` overrides on `/resume`) — its test arrived
+     as diff-context noise on one of the security commits; pulled in the
+     actual implementing commit rather than leaving an orphaned test.
+   - `7b115d3ad` — local fix. The prior sync's `bd0e71685` had adapted
+     `_resume_target_allowed` to double-wrap `self._session_db.get_session`
+     in `asyncio.to_thread` because `AsyncSessionDB` didn't exist in our tree
+     yet; once it did, that wrap awaited a coroutine object instead of the
+     row dict. Reverted to match upstream's current body.
+   - Verified: 658/658 targeted tests, full suite parity vs. unmerged `main`
+     baseline (2 apparently-new failures were confirmed order-dependent
+     flakes, pass in isolation on both trees), i18n parity 47/47, clean
+     byte-compile, CI green on PR #5.
+   - DB backup taken before restart: `/Users/mh/.hermes/backups/state.db.pre-resume-hardening-20260702-120137`.
+     Rollback tag: `archive/pre-hermes-update-20260702-120323`. Schema change
+     confirmed live via `PRAGMA table_info(sessions)` post-restart (`chat_id`/
+     `thread_id` present) — pure additive `ALTER TABLE ADD COLUMN` via the
+     existing idempotent reconciler, non-destructive.
+   - **Gotcha reproduced live**: a second `uv sync` (for a baseline-comparison
+     worktree) hijacked `/Users/mh/.local/bin/hermes` again, exactly as this
+     doc's gotcha list warned. Caught immediately via `readlink`, restored
+     before touching production. Confirms this needs checking after *every*
+     `uv sync` in *any* worktree, not just the first one in a session.
 
 **2. The full non-security merge** (~1,098 remaining commits as of
    2026-07-02, growing). Strategy:
