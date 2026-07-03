@@ -2149,7 +2149,7 @@ class SlackAdapter(BasePlatformAdapter):
         if not self._app:
             return SendResult(success=False, error="Not connected")
 
-        from tools.url_safety import is_safe_url
+        from tools.url_safety import create_ssrf_safe_async_client, is_safe_url
 
         if not is_safe_url(image_url):
             logger.warning("[Slack] Blocked unsafe image URL (SSRF protection)")
@@ -2158,8 +2158,6 @@ class SlackAdapter(BasePlatformAdapter):
             )
 
         try:
-            import httpx
-
             async def _ssrf_redirect_guard(response):
                 """Re-check redirect targets so public URLs cannot bounce into private IPs."""
                 from tools.url_safety import redirect_target_from_response
@@ -2168,7 +2166,7 @@ class SlackAdapter(BasePlatformAdapter):
                     raise ValueError("Blocked redirect to private/internal address")
 
             # Download the image first
-            async with httpx.AsyncClient(
+            async with create_ssrf_safe_async_client(
                 timeout=30.0,
                 follow_redirects=True,
                 event_hooks={"response": [_ssrf_redirect_guard]},
