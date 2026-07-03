@@ -4,12 +4,16 @@
 Runs the update guard plus the local tests that cover the Open Brain adapter
 surface: command registration, query formatting and feedback, generic message
 actions, Telegram rendering, boundary capture, and the Open Brain memory
-provider. Live Open Brain tools/list probing is opt-in with --live-smoke.
+provider. Live Open Brain tools/list probing is opt-in with --live-smoke;
+--oauth-smoke additionally drives the hosted endpoint's OAuth 2.1 path
+(checklist A4) via open_brain/scripts/oauth_smoke.py, so both auth paths —
+legacy x-brain-key and bearer token — are covered.
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -17,6 +21,9 @@ from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parent
+DEFAULT_OPEN_BRAIN_ROOT = Path(
+    os.environ.get("OPEN_BRAIN_ROOT", Path.home() / "ai" / "open_brain")
+)
 
 FOCUSED_TESTS = (
     "tests/test_conftest_session_home.py",
@@ -83,6 +90,18 @@ def main(argv: list[str] | None = None) -> int:
         help="Ask hermes_update_guard to probe live Open Brain tools/list.",
     )
     parser.add_argument(
+        "--oauth-smoke",
+        action="store_true",
+        help="Also run the OAuth 2.1 auth-path smoke against the live hosted "
+        "endpoint (open_brain/scripts/oauth_smoke.py).",
+    )
+    parser.add_argument(
+        "--open-brain-root",
+        default=str(DEFAULT_OPEN_BRAIN_ROOT),
+        help="Path to the open_brain repo for --oauth-smoke "
+        "(default: $OPEN_BRAIN_ROOT or ~/ai/open_brain).",
+    )
+    parser.add_argument(
         "--skip-guard",
         action="store_true",
         help="Run only the focused pytest suite.",
@@ -112,6 +131,19 @@ def main(argv: list[str] | None = None) -> int:
         rc = _run("Focused Open Brain/Hermes tests", _pytest_args(args))
         if rc:
             return rc
+
+    if args.oauth_smoke:
+        open_brain_root = Path(args.open_brain_root).expanduser()
+        smoke = open_brain_root / "scripts" / "oauth_smoke.py"
+        if not smoke.exists():
+            print(f"\nOAuth smoke script not found: {smoke}")
+            return 1
+        cmd = ["uv", "run", "python", str(smoke)]
+        print(f"\n== Open Brain OAuth path smoke ==\n{' '.join(cmd)}")
+        proc = subprocess.run(cmd, cwd=str(open_brain_root), check=False)
+        if proc.returncode:
+            print(f"\nOAuth path smoke failed with exit code {proc.returncode}.")
+            return proc.returncode
 
     print("\nOpen Brain/Hermes conformance smoke passed.")
     return 0
