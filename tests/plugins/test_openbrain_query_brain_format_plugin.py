@@ -66,6 +66,45 @@ def test_rewrite_result_mentions_limited_retrieval():
     assert "semantic retrieval was unavailable" in json.loads(rewritten)["result"]
 
 
+def test_rewrite_result_names_leads_when_low_confidence_and_limited():
+    plugin = _load_plugin_module()
+    payload = {
+        "query": "give me a quick summary of sprints 98 and 99",
+        "results": [
+            {
+                "table": "thoughts",
+                "id": "thought-sprint",
+                "score": 0.74,
+                "content_summary": "Amnia AMP — Sprint 97, 98 & 99 End-of-Sprint Reports.",
+                "metadata": {},
+            },
+        ],
+        "warnings": ["semantic_unavailable"],
+    }
+
+    rewritten = json.loads(plugin._rewrite_result(_wrap_payload(payload)))["result"]
+
+    assert "Amnia AMP — Sprint 97, 98 & 99 End-of-Sprint Reports." in rewritten
+    assert "tentatively" in rewritten
+    assert "semantic retrieval was unavailable" in rewritten
+
+
+def test_rewrite_result_low_confidence_limited_without_summaries():
+    plugin = _load_plugin_module()
+    payload = {
+        "query": "anything about project X?",
+        "results": [
+            {"table": "thoughts", "id": "t1", "score": 0.6, "content_summary": "", "metadata": {}},
+        ],
+        "warnings": ["semantic_unavailable"],
+    }
+
+    rewritten = json.loads(plugin._rewrite_result(_wrap_payload(payload)))["result"]
+
+    assert "couldn't find a confident answer" in rewritten
+    assert "semantic retrieval was unavailable" in rewritten
+
+
 def test_rewrite_result_leaves_normal_results_unchanged():
     plugin = _load_plugin_module()
     payload = {

@@ -249,6 +249,13 @@ to use the new tool vs the individual tools:
 This collapses nine search decisions into one, making Hermes easier to reason about and
 less likely to miss data that lives in a table it didn't think to search.
 
+**Update 2026-07-07:** the live system prompt additionally handles the `uncertain`
+verdict — Hermes must never claim nothing was found when maybe-band results exist
+(present them as tentative candidates), may retry once with more distinctive
+keywords, and when reporting a miss must note the memory may exist but ranked
+below the retrieval threshold. Rationale and incident details in
+[rca-sprint-recall-false-negative-2026-07-07.md](rca-sprint-recall-false-negative-2026-07-07.md).
+
 ---
 
 ## Implementation phases

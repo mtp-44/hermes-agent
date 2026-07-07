@@ -66,6 +66,15 @@ def _is_aggregate_result(result: dict[str, Any]) -> bool:
     return metadata.get("aggregate") is True
 
 
+def _lead_summaries(results: list[dict[str, Any]], limit: int = 3) -> str:
+    summaries = []
+    for result in results[:limit]:
+        summary = str(result.get("content_summary") or "").strip()
+        if summary:
+            summaries.append(summary[:200])
+    return " | ".join(summaries)
+
+
 def _direct_retrieval_reply(payload: dict[str, Any]) -> str | None:
     warnings = payload.get("warnings") or []
     results = payload.get("results") or []
@@ -89,9 +98,16 @@ def _direct_retrieval_reply(payload: dict[str, Any]) -> str | None:
         return top_summary
 
     if top_score < _DIRECT_REPLY_SCORE_THRESHOLD and warnings:
+        leads = _lead_summaries(results)
+        if leads:
+            return (
+                "Nothing scored confidently and retrieval was limited "
+                f"({_warning_summary(warnings)}). Closest matches, to present "
+                f"tentatively rather than as 'not found': {leads}"
+            )
         return (
-            "I found a possible lead, but I wouldn't present it confidently because "
-            f"retrieval was limited ({_warning_summary(warnings)})."
+            "I couldn't find a confident answer in your brain for that, and "
+            f"retrieval was limited because {_warning_summary(warnings)}."
         )
 
     if only_aggregate_results and top_summary:
