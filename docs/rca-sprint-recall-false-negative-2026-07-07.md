@@ -63,14 +63,17 @@ negative is not.
 ## Open work (open_brain repo)
 
 - **Scoring bug:** `recency_boost` on bulk-imported `life_items` uses import
-  `created_at`, not the activity date — 2021 rides imported last week outrank
-  real work content. Needs a fix plus a regression/gold-set query for this case
-  (spawned as a separate task 2026-07-07).
-- **S8 reranker** (`open_brain` `docs/specs/S8_reranker.md`): built and shipped
-  disabled pending the L5/F5 gate (false-confident rate and abstention moved
-  the wrong way on the gold set at every alpha). This incident is a concrete
-  real-world instance of the query class the reranker targets — relevant
-  evidence for the next gate review (Fable's call).
+  `created_at`, not the activity date — 2021 rides imported 2026-07-04 outrank
+  real work content. Already characterized in `open_brain`
+  `docs/f4_eval_gate.md` §2 (582 rows, 35% of hosted `life_items`; 5 of 6
+  gold-set false-confident cases trace to this batch) and carried in §5 as a
+  standalone non-Phase-L ticket. This incident is its first user-facing hit —
+  evidence recorded there 2026-07-07.
+- **S8 reranker** (`open_brain` `docs/specs/S8_reranker.md`): SHELVED by the
+  S8b gate adjudication on 2026-07-06 (lateral FC swap, not progress;
+  `rerank.enabled` stays false). Not a remediation path for this incident —
+  per that adjudication, future FC-tail/scoring work belongs to L6 dividends,
+  and the Strava `created_at` fix is the relevant ticket.
 
 ## Lesson
 
