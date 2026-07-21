@@ -41,9 +41,12 @@ def test_build_capture_context_includes_provenance_refs():
         {"index": 1, "role": "assistant"},
         {"index": 2, "role": "tool", "tool_name": "memory_write", "tool_call_id": "call-1"},
     ]
-    assert context["eligible"] is True
-    assert context["capture_record_counts"]["session_summary"] == 1
-    assert context["capture_records"][0]["type"] == "session_summary"
+    # Provenance refs are built for every boundary regardless of eligibility.
+    # A bare "hello"/"hi there" exchange carries no durable user-owned signal,
+    # so under the signal-gate it is (correctly) ineligible and emits nothing.
+    assert context["eligible"] is False
+    assert context["capture_skip_reason"] == "no_durable_signal"
+    assert context["capture_records"] == []
 
 
 def test_build_capture_context_extracts_structured_records():
@@ -93,6 +96,146 @@ def test_persist_capture_artifact_writes_boundary_file():
         payload = json.loads(written.read_text(encoding="utf-8"))
         assert payload["boundary_id"] == context["boundary_id"]
         assert payload["session_id"] == "sess-300"
+
+
+# --- Signal-gate behavior (2026-07-21) ---
+
+def test_health_check_session_is_skipped():
+    context = build_capture_context(
+        session_id="sess-ping",
+        boundary_reason="gateway_shutdown",
+        platform="telegram",
+        messages=[
+            {"role": "user", "content": "back up?"},
+            {"role": "assistant", "content": "Yes, I'm fully back up and running."},
+        ],
+    )
+    assert context["eligible"] is False
+    assert context["capture_skip_reason"] == "health_check"
+    assert context["capture_records"] == []
+
+
+def test_smoke_test_session_is_skipped():
+    context = build_capture_context(
+        session_id="sess-smoke",
+        boundary_reason="cli_close",
+        platform="cli",
+        messages=[
+            {"role": "user", "content": "Reply with exactly: HERMES OK"},
+            {"role": "assistant", "content": "HERMES OK"},
+        ],
+    )
+    assert context["eligible"] is False
+    assert context["capture_skip_reason"] == "smoke_test"
+
+
+def test_pure_query_session_is_skipped():
+    context = build_capture_context(
+        session_id="sess-query",
+        boundary_reason="ws_orphan_reap",
+        platform="telegram",
+        messages=[
+            {"role": "user", "content": "how many people live in Munich?"},
+            {"role": "assistant", "content": "About 1.5 million people live in Munich."},
+        ],
+    )
+    assert context["eligible"] is False
+    assert context["capture_skip_reason"] == "no_durable_signal"
+    assert context["capture_records"] == []
+
+
+def test_assistant_commitment_alone_does_not_make_session_eligible():
+    # Assistant "I'll check…" is in-session task chatter, not a durable user
+    # commitment. The old code tagged it owner="user" at 0.88 canonical.
+    context = build_capture_context(
+        session_id="sess-asstchatter",
+        boundary_reason="gateway_shutdown",
+        platform="cli",
+        messages=[
+            {"role": "user", "content": "check the current working folder"},
+            {"role": "assistant", "content": "I'll check your backup system now."},
+        ],
+    )
+    assert context["eligible"] is False
+    assert context["capture_skip_reason"] == "no_canonical_signal"
+
+
+def test_user_commitment_alone_is_not_eligible():
+    # A user asking the assistant to do something now ("I need to X") is not a
+    # six-month-durable commitment; action items must not gate on their own.
+    context = build_capture_context(
+        session_id="sess-commit",
+        boundary_reason="new_session",
+        platform="cli",
+        messages=[
+            {"role": "user", "content": "I need to migrate the gateway to the new endpoint."},
+            {"role": "assistant", "content": "I'll help you plan that."},
+        ],
+    )
+    assert context["eligible"] is False
+
+
+def test_action_item_owner_reflects_speaker_and_stays_pending():
+    # Owner must be the real speaker (the old code faked owner="user" for any
+    # "I'll" match); action items ride along as pending context only.
+    context = build_capture_context(
+        session_id="sess-owner",
+        boundary_reason="new_session",
+        platform="cli",
+        messages=[
+            {
+                "role": "user",
+                "content": "I prefer Signal. I need to migrate the gateway to the new endpoint.",
+            },
+            {"role": "assistant", "content": "I'll help you plan that migration."},
+        ],
+    )
+    assert context["eligible"] is True  # made eligible by the durable "I prefer" fact
+    action_items = [r for r in context["capture_records"] if r["type"] == "action_item"]
+    user_items = [r for r in action_items if r["owner"] == "user"]
+    hermes_items = [r for r in action_items if r["owner"] == "hermes"]
+    assert user_items and hermes_items, "both speakers' commitments should be attributed correctly"
+    assert all(r["routing"] == "pending" for r in action_items)
+    # The assistant "I'll help" must NOT be attributed to the user.
+    assert all(
+        not (r["owner"] == "user" and "help you plan" in r["title"].lower())
+        for r in action_items
+    )
+
+
+def test_injected_compaction_block_does_not_create_a_decision():
+    context = build_capture_context(
+        session_id="sess-compaction",
+        boundary_reason="compression",
+        platform="cli",
+        messages=[
+            {
+                "role": "user",
+                "content": "[CONTEXT COMPACTION — REFERENCE ONLY] Earlier turns confirmed the plan and accepted the approach.",
+            },
+            {"role": "assistant", "content": "Continuing from the summary."},
+        ],
+    )
+    assert context["eligible"] is False
+    assert not any(r["type"] == "decision_record" for r in context["capture_records"])
+
+
+def test_no_auto_record_exceeds_deliberate_capture_confidence():
+    context = build_capture_context(
+        session_id="sess-conf",
+        boundary_reason="new_session",
+        platform="cli",
+        messages=[
+            {"role": "user", "content": "I prefer uv. I need to ship the fix. Let's use the hosted endpoint."},
+            {"role": "assistant", "content": "Understood."},
+        ],
+    )
+    assert context["eligible"] is True
+    assert context["capture_records"], "session with durable signal should emit records"
+    for record in context["capture_records"]:
+        assert record["confidence"] <= 0.85, (
+            f"{record['type']} confidence {record['confidence']} outranks deliberate captures"
+        )
 
 
 # --- Edge cases ---

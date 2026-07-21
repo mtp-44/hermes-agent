@@ -24,6 +24,15 @@ _TRIVIAL_RE = re.compile(
     r"^(ok|okay|thanks|thank you|got it|sure|yes|no|yep|nope|k|ty|thx|np|cool)\.?$",
     re.IGNORECASE,
 )
+# System-injected reference blocks (context-compaction summaries, etc.) arrive
+# as user-role messages but are not real user utterances. They must not feed
+# decision/commitment/fact extraction — a compaction summary that happens to
+# contain "confirmed"/"accepted" was creating phantom user decisions.
+_INJECTED_RE = re.compile(
+    r"^\[[^\]]*(context compaction|reference only)[^\]]*\]",
+    re.IGNORECASE,
+)
+
 _STOPWORDS = {
     "about", "after", "again", "also", "been", "being", "from", "have", "just",
     "more", "need", "that", "them", "then", "they", "this", "were", "what",
@@ -42,22 +51,43 @@ _TOPIC_LIMIT = 5
 # At or above this threshold a record routes to canonical; below goes to pending
 _CANONICAL_CONFIDENCE_THRESHOLD = 0.8
 
-# Per-shape confidence values
-_CONFIDENCE_SESSION_SUMMARY = 0.95
+# Confidence policy (2026-07-21 signal-gate rewrite)
+# -------------------------------------------------
+# Open Brain's own capture policy is "capture only six-month-durable
+# decisions/facts/commitments; MOST sessions produce ZERO captures". The old
+# heuristic did the opposite: it emitted a session_summary at a blanket 0.95
+# for every session with a user turn, so health-checks, ops questions, smoke
+# tests, and one-off queries all landed as durable 0.95 "knowledge".
+#
+# The rule now: NO auto-capture record may outrank a deliberate human
+# capture_thought, and a record only routes canonical when it carries an
+# explicit *user-owned* durable signal. Anything softer (assistant-voiced,
+# collaborative, suggested) routes pending and decays. A session is only
+# eligible at all if it produced >=1 canonical record (see _build_capture_policy).
 
-_CONFIDENCE_ACTION_EXPLICIT_USER = 0.88   # "I need to / I should / I will"
-_CONFIDENCE_ACTION_SUGGESTED = 0.82       # "you should / next step / follow up"
-_CONFIDENCE_ACTION_COLLABORATIVE = 0.78   # "we need to / let's"
-_CONFIDENCE_ACTION_HERMES = 0.76          # Hermes-voiced commitment
+# session_summary is emitted ONLY for eligible sessions and rides along as
+# decaying context — never a standalone durable fact, never 0.95.
+_CONFIDENCE_SESSION_SUMMARY = 0.75
 
-_CONFIDENCE_DECISION_USER = 0.84
-_CONFIDENCE_DECISION_ASSISTANT = 0.76
+# Action items are deliberately kept below the canonical threshold: a user
+# saying "I need to X" mid-chat is almost always asking the assistant to do X
+# *now*, not recording a six-month-durable commitment. So action items never
+# route canonical and never make a session eligible on their own — they ride
+# along as decaying pending context in sessions already made eligible by a
+# genuine user decision or durable fact. (Real durable commitments come through
+# deliberate capture_thought / the commitments system.)
+_CONFIDENCE_ACTION_USER_COMMITMENT = 0.78   # user: "I need to / I'll / I'm going to" -> pending
+_CONFIDENCE_ACTION_USER_SOFT = 0.72         # user: "we should / let's / you should"  -> pending
+_CONFIDENCE_ACTION_ASSISTANT = 0.6          # assistant-voiced "I'll / I can"          -> pending
 
-_CONFIDENCE_FACT_PREFER = 0.9
-_CONFIDENCE_FACT_DEFAULT_PREF = 0.85
-_CONFIDENCE_FACT_LIKE = 0.83
-_CONFIDENCE_FACT_USUALLY = 0.78
-_CONFIDENCE_FACT_USE = 0.78
+_CONFIDENCE_DECISION_USER = 0.82            # user decision -> canonical
+_CONFIDENCE_DECISION_ASSISTANT = 0.6        # assistant confirmation -> pending
+
+_CONFIDENCE_FACT_PREFER = 0.85
+_CONFIDENCE_FACT_DEFAULT_PREF = 0.82
+_CONFIDENCE_FACT_LIKE = 0.8
+_CONFIDENCE_FACT_USUALLY = 0.75
+_CONFIDENCE_FACT_USE = 0.75
 
 # How long a pending record survives before automatic decay
 _PENDING_DECAY_DAYS = 14
@@ -170,6 +200,8 @@ def _meaningful_messages(
         text = _message_text(msg)
         if _is_trivial(text):
             continue
+        if _INJECTED_RE.match(text):
+            continue
         kept.append({"index": start_index + idx, "role": role, "text": text})
     return kept
 
@@ -219,7 +251,13 @@ def _build_session_summary(base: Dict[str, Any], meaningful: List[Dict[str, Any]
         summary_text += f" Outcome: {outcome}"
 
     indexes = [m["index"] for m in meaningful]
-    return {
+    # The summary is supporting context for an already-eligible session, not a
+    # durable fact in its own right: cap it below the canonical threshold so it
+    # routes pending and decays, while the session's canonical decision/fact/
+    # commitment records carry the durable knowledge.
+    confidence = _CONFIDENCE_SESSION_SUMMARY
+    routing = "canonical" if confidence >= _CANONICAL_CONFIDENCE_THRESHOLD else "pending"
+    record = {
         "type": "session_summary",
         "session_id": base.get("session_id", ""),
         "parent_session_id": base.get("parent_session_id", ""),
@@ -230,35 +268,59 @@ def _build_session_summary(base: Dict[str, Any], meaningful: List[Dict[str, Any]
         "topics": _extract_topics(meaningful),
         "source_count": len(meaningful),
         "captured_at": base.get("captured_at", ""),
-        "confidence": _CONFIDENCE_SESSION_SUMMARY,
-        "routing": "canonical",
+        "confidence": confidence,
+        "routing": routing,
         "provenance": _record_provenance(base, indexes),
     }
+    if routing == "pending":
+        record["decay_at"] = (
+            datetime.fromisoformat(base["captured_at"]) + timedelta(days=_PENDING_DECAY_DAYS)
+        ).isoformat()
+    return record
+
+
+# Explicit first-person user commitment -> canonical-eligible.
+_ACTION_USER_COMMITMENT_RE = re.compile(
+    r"\b(i need to|i have to|i must|i will|i'll|i'm going to|i am going to|i plan to|i intend to)\b",
+    re.IGNORECASE,
+)
+# Softer user-side intent (collaborative / suggested) -> pending only.
+_ACTION_USER_SOFT_RE = re.compile(
+    r"\b(you need to|you should|next step|follow up|action item|we need to|we should|let's|let us)\b",
+    re.IGNORECASE,
+)
+# Assistant-voiced commitments ("I'll check…") are in-session task chatter, not
+# durable user commitments -> pending only, low confidence, decays.
+_ACTION_ASSISTANT_RE = re.compile(
+    r"\b(i will|i'll|i can|i'm going to|i am going to)\b",
+    re.IGNORECASE,
+)
 
 
 def _extract_action_items(base: Dict[str, Any], meaningful: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     action_items: List[Dict[str, Any]] = []
     seen: set[str] = set()
-    patterns = [
-        (re.compile(r"\b(i need to|i should|i will|i'll)\b", re.IGNORECASE), "user", _CONFIDENCE_ACTION_EXPLICIT_USER),
-        (re.compile(r"\b(you need to|you should|next step|follow up|action item)\b", re.IGNORECASE), "user", _CONFIDENCE_ACTION_SUGGESTED),
-        (re.compile(r"\b(we need to|we should|let's)\b", re.IGNORECASE), "user", _CONFIDENCE_ACTION_COLLABORATIVE),
-        (re.compile(r"\b(i can|i will|i'll)\b", re.IGNORECASE), "hermes", _CONFIDENCE_ACTION_HERMES),
-    ]
     for msg in meaningful:
+        role = msg["role"]
         text = msg["text"]
         sentences = re.split(r"(?<=[.!?])\s+", text)
         for sentence in sentences:
             cleaned = _shorten(sentence, _TEXT_LIMIT_SHORT)
             if len(cleaned) < _ACTION_ITEM_MIN_LENGTH:
                 continue
+            # Owner is the actual speaker, not a static label. The old code
+            # tagged every "I'll…" match owner="user" regardless of role, so
+            # assistant task-chatter became canonical user commitments at 0.88.
             owner = ""
             confidence = 0.0
-            for pattern, candidate_owner, candidate_confidence in patterns:
-                if pattern.search(cleaned):
-                    owner = candidate_owner
-                    confidence = candidate_confidence
-                    break
+            if role == "user":
+                if _ACTION_USER_COMMITMENT_RE.search(cleaned):
+                    owner, confidence = "user", _CONFIDENCE_ACTION_USER_COMMITMENT
+                elif _ACTION_USER_SOFT_RE.search(cleaned):
+                    owner, confidence = "user", _CONFIDENCE_ACTION_USER_SOFT
+            elif role == "assistant":
+                if _ACTION_ASSISTANT_RE.search(cleaned):
+                    owner, confidence = "hermes", _CONFIDENCE_ACTION_ASSISTANT
             if not owner:
                 continue
             key = cleaned.lower()
@@ -388,6 +450,37 @@ def _boundary_id(
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
 
 
+# Pure smoke-test / health-check openers. Used only to label the skip reason
+# for observability — eligibility itself is decided by signal, not these.
+_SMOKE_TEST_RE = re.compile(
+    r"\b(test|testing|reply with exactly|write this exactly|private-smoke|hermes ok|codex ok|go boy)\b",
+    re.IGNORECASE,
+)
+_HEALTH_CHECK_RE = re.compile(
+    r"^(back|back up|you there|there|here|work|works|up|running|up and running|"
+    r"you good|you good hermes|you ggod|good|ready|alive|online|ping|new)\b[\s\W]*$",
+    re.IGNORECASE,
+)
+
+
+def _classify_low_signal(first_user_text: str, durable_records: List[Dict[str, Any]]) -> str:
+    """Name *why* a content-bearing session produced no canonical record.
+
+    Purely for logging/audit observability; the eligibility decision is the
+    presence of a canonical record, not this label.
+    """
+    text = (first_user_text or "").strip()
+    if _SMOKE_TEST_RE.search(text):
+        return "smoke_test"
+    if _HEALTH_CHECK_RE.match(text):
+        return "health_check"
+    if durable_records:
+        # Had soft/pending signals (assistant chatter, "let's…") but nothing a
+        # user explicitly owned as durable.
+        return "no_canonical_signal"
+    return "no_durable_signal"
+
+
 def _build_capture_policy(
     base: Dict[str, Any],
     messages: List[Dict[str, Any]],
@@ -411,26 +504,41 @@ def _build_capture_policy(
             "record_counts": {},
         }
 
+    # Signal-based eligibility (2026-07-21): extract candidate records first,
+    # then capture the session ONLY if it produced at least one canonical
+    # (explicit user-owned) durable record. Health-checks, ops/meta questions,
+    # smoke tests, one-off knowledge queries, and file-analysis runs yield no
+    # canonical record and are skipped — matching Open Brain's "most sessions
+    # produce ZERO captures" policy. The session_summary is deliberately NOT
+    # part of this test: it is context that rides along with real signal, not
+    # a reason to capture on its own.
+    durable_records: List[Dict[str, Any]] = []
+    durable_records.extend(_extract_action_items(base, meaningful))
+    durable_records.extend(_extract_decisions(base, meaningful))
+    durable_records.extend(_extract_durable_facts(base, meaningful))
+
+    has_canonical = any(r.get("routing") == "canonical" for r in durable_records)
+    if not has_canonical:
+        skip_reason = _classify_low_signal(users[0]["text"], durable_records)
+        logger.debug(
+            "session_capture: skipping boundary=%s reason=%s meaningful=%d soft_records=%d",
+            base.get("boundary_id", ""),
+            skip_reason,
+            len(meaningful),
+            len(durable_records),
+        )
+        return {
+            "eligible": False,
+            "skip_reason": skip_reason,
+            "records": [],
+            "record_counts": {},
+        }
+
     records: List[Dict[str, Any]] = []
     summary = _build_session_summary(base, meaningful)
     if summary:
         records.append(summary)
-    records.extend(_extract_action_items(base, meaningful))
-    records.extend(_extract_decisions(base, meaningful))
-    records.extend(_extract_durable_facts(base, meaningful))
-
-    if not summary and not records:
-        logger.debug(
-            "session_capture: skipping boundary=%s reason=no_high_signal_candidates meaningful=%d",
-            base.get("boundary_id", ""),
-            len(meaningful),
-        )
-        return {
-            "eligible": False,
-            "skip_reason": "no_high_signal_candidates",
-            "records": [],
-            "record_counts": {},
-        }
+    records.extend(durable_records)
 
     counts: Dict[str, int] = {}
     for record in records:
