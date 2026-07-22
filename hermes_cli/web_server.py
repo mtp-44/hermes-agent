@@ -1184,6 +1184,45 @@ _FS_READDIR_HIDDEN = {
     "target",
     "venv",
 }
+
+# Filenames that must never be listed, read, or downloaded through the
+# managed-files API.  These typically contain credentials (API keys, tokens)
+# and exposing them through the dashboard file browser is a security leak —
+# see issue #57505. The set mirrors the two canonical credential guards
+# elsewhere in the codebase (agent.file_safety.get_read_block_error and
+# gateway.platforms.base._ROOT_CREDENTIAL_FILES) so the dashboard Files tab
+# doesn't lag behind them — an operator can point the managed root at
+# HERMES_HOME itself, at which point every one of these basenames is a live
+# secret store sitting in the browsable tree.
+_SENSITIVE_MANAGED_FILE_BASENAMES = frozenset({
+    "auth.json",
+    "auth.lock",
+    "credentials",
+    "config.yaml",
+    ".anthropic_oauth.json",
+    "google_token.json",
+    "google_oauth_pending.json",
+    "google_oauth.json",
+    "webhook_subscriptions.json",
+    "bws_cache.json",
+})
+
+
+def _is_sensitive_filename(name: str) -> bool:
+    """Return True for a filename the managed-files API must never expose.
+
+    Covers ``.env`` / ``.env.<suffix>`` / ``.envrc`` variants plus the
+    canonical Hermes credential-store basenames (see
+    ``_SENSITIVE_MANAGED_FILE_BASENAMES`` above).
+
+    Case-insensitive so ``.ENV`` / ``.Env.local`` / ``Auth.JSON`` on
+    case-insensitive filesystems (macOS/Windows mounts) can't slip past
+    the guard.
+    """
+    lowered = name.lower()
+    if lowered == ".env" or lowered.startswith(".env.") or lowered == ".envrc":
+        return True
+    return lowered in _SENSITIVE_MANAGED_FILE_BASENAMES
 _FS_DATA_URL_MAX_BYTES = 16 * 1024 * 1024
 _FS_TEXT_SOURCE_MAX_BYTES = 64 * 1024 * 1024
 _FS_TEXT_PREVIEW_MAX_BYTES = 512 * 1024
@@ -1614,7 +1653,11 @@ async def list_managed_files(request: Request, path: Optional[str] = None):
         raise HTTPException(status_code=400, detail="Path is not a directory")
 
     try:
-        entries = [_managed_file_entry(policy, child) for child in target.iterdir()]
+        entries = [
+            _managed_file_entry(policy, child)
+            for child in target.iterdir()
+            if not _is_sensitive_filename(child.name)
+        ]
     except PermissionError:
         raise HTTPException(status_code=403, detail="Directory is not readable")
     except OSError as exc:
@@ -1640,6 +1683,8 @@ async def read_managed_file(request: Request, path: str):
         raise HTTPException(status_code=404, detail="File not found")
     if not target.is_file():
         raise HTTPException(status_code=400, detail="Path is not a file")
+    if _is_sensitive_filename(target.name):
+        raise HTTPException(status_code=403, detail="Access to sensitive files is not allowed")
 
     try:
         size = target.stat().st_size
@@ -1682,6 +1727,8 @@ async def download_managed_file(request: Request, path: str):
         raise HTTPException(status_code=404, detail="File not found")
     if not target.is_file():
         raise HTTPException(status_code=400, detail="Path is not a file")
+    if _is_sensitive_filename(target.name):
+        raise HTTPException(status_code=403, detail="Access to sensitive files is not allowed")
 
     try:
         size = target.stat().st_size
