@@ -67,6 +67,43 @@ Fallback surface if no successor qualifies at swap time: open_brain's own
 Python Telegram bot (capture + proactive) + Claude clients over the hosted
 MCP (retrieval/conversation) — zero gateway at all.
 
+### Re-check 2026-07-22 (v0.10.5 → v0.10.11, code-read)
+
+Still qualifies; policy stays standby. Gate movement since the evaluation:
+
+- **Gate 2 (memory scoping) — the "first unknown" is ANSWERED, favorably.**
+  `memory.enabled: false` is a global kill switch (gates background memory
+  jobs, embedding generation, and `<memory>` injection; explicitly wins over
+  both v2 and v3 per `assistant/src/config/memory-v3-gate.ts`). Finer knobs
+  exist: `memory.retention`/`cleanup`, per-tier `v2.enabled`/`v3.live`, and
+  an `assistant memory items` CLI (v0.10.6) to edit/delete individual
+  memories. The walk-away condition is now controllable, not a mystery.
+- **Gate 3 (embeddings) — still pinnable, caveat unchanged.** Provider enum
+  `auto|local|openai|gemini|ollama`; default remains `auto` (cloud
+  fallback), so the trial must still set `provider: ollama` (or `local`
+  in-process ONNX). Vectors stay in local Qdrant.
+- **Gate 1 (MCP mount) — infrastructure grown**: per-server header store +
+  MCP auth orchestrator + OAuth routes all present; the A4 OAuth path is
+  more built-out than at evaluation.
+- **Self-hosting is first-class and accelerating** (all landed 2026-07-22):
+  tailscale tunnel provider, `vellum pair --qr` device pairing, iOS
+  self-hosted-server URL field + guide — matches the house pattern
+  (launchd + tailnet).
+
+New watch-items for any future trial:
+
+1. **Managed-platform pull is strengthening**: "Vellum account" with credit
+   balances, speech that auto-enables on account connect, one-connection
+   hosted models, Atlas Cloud gateway. None mandatory — but a trial config
+   must deliberately NOT connect a Vellum account.
+2. **Memory is getting more central, not less**: v3 (concept pages, memory
+   graph, procedural-memory-as-skills) is default-on for new assistants and
+   v0.10.6 auto-enabled improved retrieval for everyone. The kill switch
+   covers it, but the known tension grows with the product.
+
+Health at re-check: 915 stars, releases every 3–5 days, v0.10.11
+(2026-07-21), commits same-day.
+
 ## What is Mark's in this fork (the portable inventory)
 
 - `plugins/routing-classifier/` — deterministic local/frontier route
