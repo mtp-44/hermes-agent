@@ -1,0 +1,94 @@
+{
+  "schema_version": 1,
+  "captured_on": "2026-07-23",
+  "commit": "60a0c7bdae5b578c8beb37c3b57ba9cb269253e0",
+  "runtime": {
+    "node_release_line": 22,
+    "node_version": "22.23.1",
+    "minimum_supported_node_version": "22.12.0",
+    "npm_version": "10.9.8",
+    "python_version": "3.11.15"
+  },
+  "build": {
+    "command": "npm --prefix apps/desktop run build:pwa",
+    "explicit_build_stamp": null,
+    "build_stamp_status": "build:pwa does not emit an explicit build stamp at this baseline",
+    "entry_javascript": "assets/pwa-CFDi_0aP.js",
+    "entry_stylesheet": "assets/pwa-BP8yXrbn.css"
+  },
+  "tests": {
+    "desktop_ui": {
+      "total": 1107,
+      "passed": 1086,
+      "failed": 21,
+      "skipped": 0,
+      "unhandled_errors": 6
+    },
+    "backend_pwa_target": {
+      "files": 9,
+      "passed": 239,
+      "failed": 0
+    }
+  },
+  "assets": {
+    "measurement": "node:zlib.gzipSync default compression over each dist-pwa file",
+    "initial_javascript": {
+      "raw_bytes": 27706451,
+      "gzip_bytes": 5867712
+    },
+    "initial_css": {
+      "raw_bytes": 307742,
+      "gzip_bytes": 51702
+    },
+    "initial_total": {
+      "raw_bytes": 28014193,
+      "gzip_bytes": 5919414
+    },
+    "all_files": {
+      "count": 85,
+      "raw_bytes": 36620375,
+      "gzip_bytes": 14225827
+    }
+  },
+  "asset_budgets": {
+    "initial_javascript_gzip_bytes_max": 2000000,
+    "initial_css_gzip_bytes_max": 100000
+  },
+  "expected_public_status_fields": [
+    "version",
+    "release_date",
+    "config_version",
+    "latest_config_version",
+    "can_update_hermes",
+    "gateway_running",
+    "gateway_state",
+    "gateway_platforms",
+    "gateway_exit_reason",
+    "gateway_updated_at",
+    "active_agents",
+    "gateway_busy",
+    "gateway_drainable",
+    "restart_drain_timeout",
+    "active_sessions",
+    "auth_required",
+    "auth_providers"
+  ],
+  "target_device_dimensions_css_px": {
+    "iphone_portrait": {
+      "width": 390,
+      "height": 844
+    },
+    "iphone_landscape": {
+      "width": 844,
+      "height": 390
+    }
+  },
+  "production_non_secret_facts": {
+    "hermes_version": "0.18.0",
+    "config_version": 30,
+    "latest_config_version": 33,
+    "gateway_running": true,
+    "gateway_state": "running",
+    "auth_required": true
+  }
+}
