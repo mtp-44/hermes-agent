@@ -80,6 +80,23 @@ def test_load_picker_context_string_model_legacy_shape():
     assert ctx.current_base_url == ""
 
 
+def test_load_picker_context_picker_allowlist_from_config():
+    """model.picker_allowlist becomes a lowercased frozenset on the context."""
+    cfg = _cfg(model={"default": "qwen3.6:35b-mlx", "picker_allowlist": ["Qwen3.6:35b-MLX", "gpt-5.6-sol"]})
+    with patch("hermes_cli.config.load_config", return_value=cfg):
+        ctx = load_picker_context()
+    assert ctx.picker_allowlist == frozenset({"qwen3.6:35b-mlx", "gpt-5.6-sol"})
+
+
+def test_load_picker_context_picker_allowlist_absent_is_none():
+    """Unset (the default for every other install) must stay a no-op, not an
+    empty allowlist that would hide every provider."""
+    cfg = _cfg(model={"default": "some-model"})
+    with patch("hermes_cli.config.load_config", return_value=cfg):
+        ctx = load_picker_context()
+    assert ctx.picker_allowlist is None
+
+
 def test_load_picker_context_empty_config():
     cfg = _cfg()
     with patch("hermes_cli.config.load_config", return_value=cfg):
@@ -94,13 +111,14 @@ def test_load_picker_context_empty_config():
 # ─── with_overrides ────────────────────────────────────────────────────
 
 
-def _empty_ctx(provider="orig", model="orig-model", base_url="orig-url"):
+def _empty_ctx(provider="orig", model="orig-model", base_url="orig-url", picker_allowlist=None):
     return ConfigContext(
         current_provider=provider,
         current_model=model,
         current_base_url=base_url,
         user_providers={},
         custom_providers=[],
+        picker_allowlist=picker_allowlist,
     )
 
 
@@ -168,6 +186,51 @@ def test_build_models_payload_returns_expected_shape():
     assert payload["providers"][0]["slug"] == "moa"
     assert payload["providers"][0]["models"] == ["default"]
     assert payload["providers"][1:] == rows
+
+
+def test_build_models_payload_applies_picker_allowlist():
+    """A configured allowlist restricts every row to the confirmed subset and
+    drops rows left with zero models entirely — e.g. a provider whose whole
+    curated catalog is unconfirmed disappears from the picker, not just its
+    models list going empty."""
+    rows = [
+        {"slug": "openai-codex", "name": "OpenAI (Codex)", "models": ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-mini"],
+         "total_models": 3, "is_current": True, "is_user_defined": False, "source": "built-in"},
+        {"slug": "anthropic", "name": "Anthropic", "models": ["claude-opus-4-8", "claude-sonnet-5"],
+         "total_models": 2, "is_current": False, "is_user_defined": False, "source": "built-in"},
+    ]
+    ctx = _empty_ctx(picker_allowlist=frozenset({"gpt-5.6-sol", "gpt-5.6-terra", "qwen3.6:35b-mlx"}))
+    with _list_auth_returning(rows):
+        payload = build_models_payload(ctx)
+    slugs = {row["slug"] for row in payload["providers"]}
+    assert "anthropic" not in slugs
+    codex_row = next(row for row in payload["providers"] if row["slug"] == "openai-codex")
+    assert codex_row["models"] == ["gpt-5.6-sol", "gpt-5.6-terra"]
+    assert codex_row["total_models"] == 2
+
+
+def test_build_models_payload_picker_allowlist_case_insensitive():
+    rows = [
+        {"slug": "ollama", "name": "Ollama (local)", "models": ["Qwen3.6:35b-MLX"],
+         "total_models": 1, "is_current": True, "is_user_defined": True, "source": "custom"},
+    ]
+    ctx = _empty_ctx(picker_allowlist=frozenset({"qwen3.6:35b-mlx"}))
+    with _list_auth_returning(rows):
+        payload = build_models_payload(ctx)
+    assert payload["providers"][0]["models"] == ["Qwen3.6:35b-MLX"]
+
+
+def test_build_models_payload_no_picker_allowlist_is_noop():
+    """Unset allowlist (every other Hermes install) must leave the full
+    multi-provider catalog untouched."""
+    rows = [
+        {"slug": "anthropic", "name": "Anthropic", "models": ["claude-opus-4-8"],
+         "total_models": 1, "is_current": False, "is_user_defined": False, "source": "built-in"},
+    ]
+    ctx = _empty_ctx(picker_allowlist=None)
+    with _list_auth_returning(rows):
+        payload = build_models_payload(ctx)
+    assert any(row["slug"] == "anthropic" for row in payload["providers"])
 
 
 def test_build_models_payload_does_not_call_provider_model_ids():

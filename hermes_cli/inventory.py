@@ -52,6 +52,7 @@ class ConfigContext:
     current_base_url: str
     user_providers: dict
     custom_providers: list
+    picker_allowlist: Optional[frozenset] = None
 
     def with_overrides(
         self,
@@ -96,12 +97,19 @@ def load_picker_context() -> ConfigContext:
         current_provider = ""
         current_base_url = ""
     raw = cfg.get("providers")
+    raw_allowlist = model_cfg.get("picker_allowlist") if isinstance(model_cfg, dict) else None
+    picker_allowlist = (
+        frozenset(str(m).strip().lower() for m in raw_allowlist if str(m).strip())
+        if isinstance(raw_allowlist, list) and raw_allowlist
+        else None
+    )
     return ConfigContext(
         current_provider=current_provider,
         current_model=current_model,
         current_base_url=current_base_url,
         user_providers=raw if isinstance(raw, dict) else {},
         custom_providers=get_compatible_custom_providers(cfg),
+        picker_allowlist=picker_allowlist,
     )
 
 
@@ -149,6 +157,11 @@ def build_models_payload(
       re-fetches its live catalog. Set only for an explicit user-triggered
       "refresh models" action; normal picker opens leave it false to stay
       snappy on the 1h cache.
+
+    ``ctx.picker_allowlist`` (from config ``model.picker_allowlist``), when
+    set, restricts every row to that confirmed subset and drops any row left
+    with zero models — opt-in only, so the default (unset) behavior for
+    every other Hermes install is the full multi-provider catalog unchanged.
     """
     from hermes_cli.model_switch import list_authenticated_providers
 
@@ -222,12 +235,33 @@ def build_models_payload(
         _apply_pricing(rows, force_fresh_nous_tier=force_fresh_nous_tier)
     if capabilities:
         _apply_capabilities(rows)
+    if ctx.picker_allowlist:
+        rows = _apply_picker_allowlist(rows, ctx.picker_allowlist)
 
     return {
         "providers": rows,
         "model": ctx.current_model,
         "provider": ctx.current_provider,
     }
+
+
+def _apply_picker_allowlist(rows: list[dict], allowlist: frozenset) -> list[dict]:
+    """Restrict every row's models to the confirmed subset, dropping any row
+    left with zero models — including unauthenticated ``CANONICAL_PROVIDERS``
+    stubs ``include_unconfigured`` adds (those never carry models to match
+    anyway, so an active allowlist also declutters the "set up a new
+    provider" affordance down to providers actually in the confirmed set).
+    """
+    kept: list[dict] = []
+    for row in rows:
+        models = [m for m in row.get("models") or [] if m.lower() in allowlist]
+        if not models:
+            continue
+        row = dict(row)
+        row["models"] = models
+        row["total_models"] = len(models)
+        kept.append(row)
+    return kept
 
 
 def _apply_capabilities(rows: list[dict]) -> None:
