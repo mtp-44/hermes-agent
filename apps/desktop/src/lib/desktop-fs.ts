@@ -179,6 +179,16 @@ export async function selectDesktopPaths(options?: HermesSelectPathsOptions): Pr
   }
 
   if (!options?.directories) {
+    // A remote Electron profile cannot use a client-local path on its
+    // backend, so file picking stays disabled there. The PWA browser bridge
+    // is different: selectPaths uploads the chosen device file first and
+    // returns the resulting backend path, which is valid remote context.
+    const version = await desktop.getVersion()
+
+    if (version.platform === 'web') {
+      return desktop.selectPaths(options)
+    }
+
     return []
   }
 

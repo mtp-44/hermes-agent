@@ -18,6 +18,7 @@ const readFileText = vi.fn(async () => ({ path: '/local/file.txt', text: 'local'
 const readFileDataUrl = vi.fn(async () => 'data:text/plain;base64,bG9jYWw=')
 const gitRoot = vi.fn(async () => '/local')
 const selectPaths = vi.fn(async () => ['/local'])
+const getVersion = vi.fn(async () => ({ platform: 'darwin' }))
 
 const api = vi.fn(async ({ path }: { path: string }) => {
   if (path.startsWith('/api/fs/list?')) {
@@ -52,6 +53,7 @@ function stubBridge() {
     hermesDesktop: {
       api,
       gitRoot,
+      getVersion,
       readDir,
       readFileDataUrl,
       readFileText,
@@ -140,6 +142,18 @@ describe('desktop filesystem facade', () => {
 
     expect(remoteSelect).toHaveBeenCalledWith({ defaultPath: '/remote', directories: true, multiple: false })
     expect(selectPaths).not.toHaveBeenCalled()
+  })
+
+  it('routes device-local file picks through the uploading PWA bridge in remote mode', async () => {
+    $connection.set({ mode: 'remote' } as never)
+    getVersion.mockResolvedValueOnce({ platform: 'web' })
+    selectPaths.mockResolvedValueOnce(['/remote/pwa-upload.txt'])
+
+    const options = { directories: false, multiple: true }
+
+    await expect(selectDesktopPaths(options)).resolves.toEqual(['/remote/pwa-upload.txt'])
+    expect(getVersion).toHaveBeenCalledOnce()
+    expect(selectPaths).toHaveBeenCalledWith(options)
   })
 
   it('limits the remote picker to single-directory selection', async () => {
