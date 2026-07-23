@@ -216,6 +216,22 @@ class TestWebSocketHostOriginGuard:
         ):
             pass
 
+    def test_nonsecret_websocket_health_path_returns_version(self, monkeypatch):
+        from fastapi.testclient import TestClient
+
+        import hermes_cli.web_server as ws
+
+        monkeypatch.setattr(ws.app.state, "bound_host", "127.0.0.1", raising=False)
+        client = TestClient(ws.app)
+        with client.websocket_connect(
+            "/api/ws-health",
+            headers={
+                "Host": "localhost:9119",
+                "Origin": "http://localhost:9119",
+            },
+        ) as connection:
+            assert connection.receive_json() == {"ok": True, "version": ws.__version__}
+
 
 class TestDeclaredPublicHost:
     """Loopback bind behind a TLS-terminating reverse proxy (tailscale serve,

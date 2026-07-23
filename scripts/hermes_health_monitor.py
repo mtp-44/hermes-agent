@@ -2,9 +2,13 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import hashlib
 import json
 import os
 import shutil
+import socket
+import ssl
 import subprocess
 import sys
 import urllib.error
@@ -33,6 +37,10 @@ DEFAULT_PWA_RELEASE_ROOT = PROJECT_DIR.parent / "hermes-agent-pwa-releases"
 DEFAULT_PWA_STATUS_URLS = (
     "http://127.0.0.1:9219/api/status",
     "https://mini-mh.tailbd0650.ts.net/api/status",
+)
+DEFAULT_PWA_WS_URLS = (
+    "ws://127.0.0.1:9219/api/ws-health",
+    "wss://mini-mh.tailbd0650.ts.net/api/ws-health",
 )
 DEFAULT_SERVICES = ("ollama", "gateway", "pwa", "config", "telegram", "openbrain", "disk", "memory")
 
@@ -449,10 +457,63 @@ def _check_gateway() -> CheckResult:
     return CheckResult("gateway", True, f"{gateway_state} (pid {pid})", "ok", {"gateway_state": gateway_state, "pid": pid})
 
 
+def _check_websocket(url: str, *, timeout: float) -> str:
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in {"ws", "wss"} or not parsed.hostname:
+        raise ValueError(f"invalid WebSocket URL: {url}")
+    secure = parsed.scheme == "wss"
+    port = parsed.port or (443 if secure else 80)
+    host_header = parsed.hostname if parsed.port is None else f"{parsed.hostname}:{parsed.port}"
+    request_path = parsed.path or "/"
+    if parsed.query:
+        request_path = f"{request_path}?{parsed.query}"
+    key = base64.b64encode(os.urandom(16)).decode("ascii")
+    expected_accept = base64.b64encode(
+        hashlib.sha1(f"{key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11".encode("ascii")).digest()
+    ).decode("ascii")
+    raw_socket = socket.create_connection((parsed.hostname, port), timeout=timeout)
+    connection: socket.socket | ssl.SSLSocket = raw_socket
+    try:
+        if secure:
+            connection = ssl.create_default_context().wrap_socket(raw_socket, server_hostname=parsed.hostname)
+        origin_scheme = "https" if secure else "http"
+        request = (
+            f"GET {request_path} HTTP/1.1\r\n"
+            f"Host: {host_header}\r\n"
+            f"Origin: {origin_scheme}://{host_header}\r\n"
+            "Upgrade: websocket\r\n"
+            "Connection: Upgrade\r\n"
+            "Sec-WebSocket-Version: 13\r\n"
+            f"Sec-WebSocket-Key: {key}\r\n\r\n"
+        )
+        connection.sendall(request.encode("ascii"))
+        response = b""
+        while b"\r\n\r\n" not in response and len(response) < 16_384:
+            chunk = connection.recv(4096)
+            if not chunk:
+                break
+            response += chunk
+        header_text = response.split(b"\r\n\r\n", 1)[0].decode("latin-1")
+        lines = header_text.splitlines()
+        if not lines or " 101 " not in f" {lines[0]} ":
+            raise RuntimeError(lines[0] if lines else "empty WebSocket response")
+        headers = {}
+        for line in lines[1:]:
+            if ":" in line:
+                name, value = line.split(":", 1)
+                headers[name.strip().lower()] = value.strip()
+        if headers.get("sec-websocket-accept") != expected_accept:
+            raise RuntimeError("invalid Sec-WebSocket-Accept")
+    finally:
+        connection.close()
+    return "HTTP 101"
+
+
 def _check_pwa(
     *,
     release_root: Path = DEFAULT_PWA_RELEASE_ROOT,
     status_urls: tuple[str, ...] = DEFAULT_PWA_STATUS_URLS,
+    websocket_urls: tuple[str, ...] = DEFAULT_PWA_WS_URLS,
 ) -> CheckResult:
     current = release_root / "current"
     if not current.is_symlink():
@@ -510,12 +571,29 @@ def _check_pwa(
                 {"release_id": release_id, "commit": commit},
             )
 
+    for url in websocket_urls:
+        try:
+            _check_websocket(url, timeout=timeout)
+        except Exception as exc:
+            return CheckResult(
+                "pwa",
+                False,
+                f"{url} failed: {type(exc).__name__}: {exc}",
+                f"websocket:{url}:{type(exc).__name__}",
+                {"release_id": release_id, "commit": commit},
+            )
+
     return CheckResult(
         "pwa",
         True,
-        f"ok ({release_id}, loopback + tailnet)",
+        f"ok ({release_id}, loopback + tailnet HTTP/WS)",
         "ok",
-        {"release_id": release_id, "commit": commit, "status_urls": list(status_urls)},
+        {
+            "release_id": release_id,
+            "commit": commit,
+            "status_urls": list(status_urls),
+            "websocket_urls": list(websocket_urls),
+        },
     )
 
 

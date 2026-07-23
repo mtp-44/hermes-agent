@@ -12882,6 +12882,17 @@ async def pty_ws(ws: WebSocket) -> None:
 # ---------------------------------------------------------------------------
 
 
+@app.websocket("/api/ws-health")
+async def websocket_health(ws: WebSocket) -> None:
+    """Non-secret WebSocket transport probe for appliance health checks."""
+    if not _ws_request_is_allowed(ws):
+        await ws.close(code=4403)
+        return
+    await ws.accept()
+    await ws.send_json({"ok": True, "version": __version__})
+    await ws.close(code=1000)
+
+
 @app.websocket("/api/ws")
 async def gateway_ws(ws: WebSocket) -> None:
     if not _DASHBOARD_EMBEDDED_CHAT_ENABLED:

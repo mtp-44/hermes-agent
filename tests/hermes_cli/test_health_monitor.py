@@ -164,15 +164,27 @@ def test_check_pwa_verifies_atomic_stamp_and_both_network_paths(tmp_path, monkey
         "scripts.hermes_health_monitor._http_json",
         lambda url, **_kwargs: requested.append(url) or (200, {"version": "0.17.0"}),
     )
+    websocket_requested: list[str] = []
+    monkeypatch.setattr(
+        "scripts.hermes_health_monitor._check_websocket",
+        lambda url, **_kwargs: websocket_requested.append(url) or "HTTP 101",
+    )
 
     result = _check_pwa(
         release_root=release_root,
         status_urls=("http://loopback/api/status", "https://tailnet/api/status"),
+        websocket_urls=("ws://loopback/api/ws-health", "wss://tailnet/api/ws-health"),
     )
 
     assert result.ok is True
-    assert result.metadata == {"release_id": release_id, "commit": "a" * 40, "status_urls": requested}
+    assert result.metadata == {
+        "release_id": release_id,
+        "commit": "a" * 40,
+        "status_urls": requested,
+        "websocket_urls": websocket_requested,
+    }
     assert requested == ["http://loopback/api/status", "https://tailnet/api/status"]
+    assert websocket_requested == ["ws://loopback/api/ws-health", "wss://tailnet/api/ws-health"]
 
 
 def test_check_pwa_rejects_stamp_that_does_not_match_current_target(tmp_path):
@@ -185,7 +197,7 @@ def test_check_pwa_rejects_stamp_that_does_not_match_current_target(tmp_path):
     )
     (release_root / "current").symlink_to("releases/release-a")
 
-    result = _check_pwa(release_root=release_root, status_urls=())
+    result = _check_pwa(release_root=release_root, status_urls=(), websocket_urls=())
 
     assert result.ok is False
     assert result.fingerprint == "release:stamp-mismatch"
