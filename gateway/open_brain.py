@@ -209,6 +209,23 @@ async def record_proactive_feedback(
     )
 
 
+async def update_commitment(
+    *,
+    commitment_id: str,
+    action: str,
+    snooze_days: int | None = None,
+) -> dict[str, Any]:
+    """Mark an Open Brain commitment done/dropped/snoozed/open."""
+    return await call_open_brain_tool(
+        "update_commitment",
+        {
+            "id": commitment_id,
+            "action": action,
+            **({"snooze_days": snooze_days} if snooze_days else {}),
+        },
+    )
+
+
 # ── Durable work sessions (Phase 5d) ─────────────────────────────────────────
 # Thin wrappers over the hosted ``session_*`` MCP tools. These let any Hermes
 # surface (Telegram, Desktop, TUI) share one durable work-session layer. The

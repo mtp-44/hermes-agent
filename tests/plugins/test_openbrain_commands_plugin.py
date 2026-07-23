@@ -188,5 +188,69 @@ def test_register_wires_proactive_action_handlers():
 
     ctx = RichCtx()
     obc.register(ctx)
-    assert set(ctx.action_handlers) == {"prxa", "prxd"}
+    assert {"prxa", "prxd", "cdone", "cdrop", "cseen"} <= set(ctx.action_handlers)
     assert ctx.action_handlers["prxa"] is obc._handle_proactive_feedback
+    assert ctx.action_handlers["cdone"] is obc._handle_commitment_action
+    assert ctx.action_handlers["cdrop"] is obc._handle_commitment_action
+    assert ctx.action_handlers["cseen"] is obc._handle_commitment_action
+
+
+# --- Numbered digest-commitment done/drop/seen buttons (generic action seam) --
+
+@pytest.mark.asyncio
+async def test_commitment_action_done(monkeypatch):
+    import gateway.open_brain as ob
+    seen = {}
+
+    async def _update(**kwargs):
+        seen.update(kwargs)
+
+    monkeypatch.setattr(ob, "update_commitment", _update)
+    msg = await obc._handle_commitment_action("cdone", "commit-1", {})
+    assert msg == "✅ Marked done"
+    assert seen == {"commitment_id": "commit-1", "action": "done"}
+
+
+@pytest.mark.asyncio
+async def test_commitment_action_drop(monkeypatch):
+    import gateway.open_brain as ob
+    seen = {}
+
+    async def _update(**kwargs):
+        seen.update(kwargs)
+
+    monkeypatch.setattr(ob, "update_commitment", _update)
+    msg = await obc._handle_commitment_action("cdrop", "commit-2", {})
+    assert msg == "🗑 Dropped"
+    assert seen == {"commitment_id": "commit-2", "action": "drop"}
+
+
+@pytest.mark.asyncio
+async def test_commitment_action_seen_snoozes_seven_days(monkeypatch):
+    import gateway.open_brain as ob
+    seen = {}
+
+    async def _update(**kwargs):
+        seen.update(kwargs)
+
+    monkeypatch.setattr(ob, "update_commitment", _update)
+    msg = await obc._handle_commitment_action("cseen", "commit-3", {})
+    assert msg == "👀 Snoozed 7 days"
+    assert seen == {"commitment_id": "commit-3", "action": "snooze", "snooze_days": 7}
+
+
+@pytest.mark.asyncio
+async def test_commitment_action_empty_token():
+    assert await obc._handle_commitment_action("cdone", "", {}) == "This commitment button expired."
+
+
+@pytest.mark.asyncio
+async def test_commitment_action_failure_is_swallowed(monkeypatch):
+    import gateway.open_brain as ob
+
+    async def _update(**kwargs):
+        raise RuntimeError("mcp down")
+
+    monkeypatch.setattr(ob, "update_commitment", _update)
+    msg = await obc._handle_commitment_action("cdone", "commit-4", {})
+    assert msg == "⚠️ Couldn't update."

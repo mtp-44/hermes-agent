@@ -223,6 +223,48 @@ async def _handle_proactive_feedback(action_id: str, token: str, _context) -> st
     return "Marked useful" if status == "acted_on" else "Dismissed"
 
 
+# Numbered digest-commitment buttons (✅ done / 🗑 drop / 👀 seen) — same generic
+# action seam, minted cross-repo by open_brain's daily_digest.py as
+# ``act:cdone|cdrop|cseen:<commitment_id>``. "Seen" maps to a 7-day snooze since
+# ``update_commitment`` has no acknowledged-but-still-open state of its own.
+_COMMIT_DONE = "cdone"
+_COMMIT_DROP = "cdrop"
+_COMMIT_SEEN = "cseen"
+_COMMIT_SEEN_SNOOZE_DAYS = 7
+
+_COMMIT_ACTION_BY_ID = {
+    _COMMIT_DONE: "done",
+    _COMMIT_DROP: "drop",
+    _COMMIT_SEEN: "snooze",
+}
+_COMMIT_REPLY_BY_ID = {
+    _COMMIT_DONE: "✅ Marked done",
+    _COMMIT_DROP: "🗑 Dropped",
+    _COMMIT_SEEN: "👀 Snoozed 7 days",
+}
+
+
+async def _handle_commitment_action(action_id: str, token: str, _context) -> str:
+    """Record a done / drop / seen press on a numbered digest commitment."""
+    commitment_id = (token or "").strip()
+    if not commitment_id:
+        return "This commitment button expired."
+    action = _COMMIT_ACTION_BY_ID.get(action_id)
+    if action is None:
+        return "⚠️ Unknown commitment action."
+    try:
+        from gateway.open_brain import update_commitment
+
+        kwargs = {"commitment_id": commitment_id, "action": action}
+        if action_id == _COMMIT_SEEN:
+            kwargs["snooze_days"] = _COMMIT_SEEN_SNOOZE_DAYS
+        await update_commitment(**kwargs)
+    except Exception as exc:
+        logger.warning("Failed to update commitment %s: %s", commitment_id, exc)
+        return "⚠️ Couldn't update."
+    return _COMMIT_REPLY_BY_ID[action_id]
+
+
 def register(ctx) -> None:
     ctx.register_command(
         "brief", handler=_handle_brief,
@@ -244,3 +286,7 @@ def register(ctx) -> None:
     if hasattr(ctx, "register_action_handler"):
         ctx.register_action_handler(_PROACTIVE_USEFUL, _handle_proactive_feedback)
         ctx.register_action_handler(_PROACTIVE_DISMISS, _handle_proactive_feedback)
+        # Numbered digest-commitment ✅ done / 🗑 drop / 👀 seen buttons.
+        ctx.register_action_handler(_COMMIT_DONE, _handle_commitment_action)
+        ctx.register_action_handler(_COMMIT_DROP, _handle_commitment_action)
+        ctx.register_action_handler(_COMMIT_SEEN, _handle_commitment_action)

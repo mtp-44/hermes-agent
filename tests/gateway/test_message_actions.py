@@ -147,6 +147,85 @@ async def test_dispatch_action_invokes_handler_and_answers():
 
 
 @pytest.mark.asyncio
+async def test_dispatch_clears_only_pressed_row_in_multi_row_message(monkeypatch):
+    # A digest message with one row per numbered commitment: pressing item #2's
+    # button must leave items #1 and #3 actionable, not wipe the whole keyboard.
+    import plugins.platforms.telegram.adapter as tg
+
+    class _FakeBtn:
+        def __init__(self, label, callback_data=None):
+            self.label = label
+            self.callback_data = callback_data
+
+    class _FakeMarkup:
+        def __init__(self, keyboard):
+            self.inline_keyboard = keyboard
+
+    monkeypatch.setattr(tg, "InlineKeyboardMarkup", _FakeMarkup)
+
+    a = _adapter()
+    a.set_action_handler(AsyncMock(return_value="done"))
+
+    existing_markup = _FakeMarkup([
+        [_FakeBtn("1 ✅", "act:cdone:1")],
+        [_FakeBtn("2 ✅", "act:cdone:2")],
+        [_FakeBtn("3 ✅", "act:cdone:3")],
+    ])
+    query = SimpleNamespace(
+        answer=AsyncMock(),
+        message=SimpleNamespace(chat_id=1, message_thread_id=None, reply_markup=existing_markup),
+        from_user=SimpleNamespace(id=1),
+        edit_message_reply_markup=AsyncMock(),
+    )
+
+    handled = await a._dispatch_action_callback(query, "act:cdone:2")
+
+    assert handled is True
+    remaining = query.edit_message_reply_markup.await_args.kwargs["reply_markup"].inline_keyboard
+    assert [row[0].callback_data for row in remaining] == ["act:cdone:1", "act:cdone:3"]
+
+
+@pytest.mark.asyncio
+async def test_dispatch_clears_entire_markup_when_last_row_pressed(monkeypatch):
+    # Single-row messages (proactive ✅/🙈, query 👍/👎) must behave exactly as
+    # before: pressing their only row clears the keyboard entirely.
+    import plugins.platforms.telegram.adapter as tg
+
+    class _FakeBtn:
+        def __init__(self, label, callback_data=None):
+            self.label = label
+            self.callback_data = callback_data
+
+    class _FakeMarkup:
+        def __init__(self, keyboard):
+            self.inline_keyboard = keyboard
+
+    monkeypatch.setattr(tg, "InlineKeyboardMarkup", _FakeMarkup)
+
+    a = _adapter()
+    a.set_action_handler(AsyncMock(return_value="ok"))
+
+    existing_markup = _FakeMarkup([[_FakeBtn("👍", "act:good:tok9")]])
+    query = SimpleNamespace(
+        answer=AsyncMock(),
+        message=SimpleNamespace(chat_id=1, message_thread_id=None, reply_markup=existing_markup),
+        from_user=SimpleNamespace(id=1),
+        edit_message_reply_markup=AsyncMock(),
+    )
+
+    await a._dispatch_action_callback(query, "act:good:tok9")
+
+    assert query.edit_message_reply_markup.await_args.kwargs["reply_markup"] is None
+
+
+def test_markup_without_row_handles_missing_markup():
+    from plugins.platforms.telegram.adapter import TelegramAdapter
+
+    assert TelegramAdapter._markup_without_row(SimpleNamespace(reply_markup=None), "act:x:1") is None
+    assert TelegramAdapter._markup_without_row(SimpleNamespace(), "act:x:1") is None
+
+
+@pytest.mark.asyncio
 async def test_dispatch_denies_unauthorized_press():
     a = _adapter()
     a._is_callback_user_authorized = lambda *args, **kwargs: False

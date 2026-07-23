@@ -777,13 +777,41 @@ class TelegramAdapter(BasePlatformAdapter):
             await query.answer()
             return True
         # A consumed action retires its buttons (best-effort), matching the
-        # one-shot feedback UX these buttons replace.
+        # one-shot feedback UX these buttons replace. Only the pressed row is
+        # removed — for a single-row message that's the same as clearing
+        # everything (proactive/query feedback), but a multi-row message (e.g.
+        # numbered digest commitments) keeps its other rows actionable.
         try:
-            await query.edit_message_reply_markup(reply_markup=None)
+            remaining_markup = self._markup_without_row(message, data)
+            await query.edit_message_reply_markup(reply_markup=remaining_markup)
         except Exception:
             pass
         await query.answer(text=str(result) if result else None)
         return True
+
+    @staticmethod
+    def _markup_without_row(message: Any, pressed_callback_data: str) -> Any:
+        """The message's current inline keyboard minus the row that was pressed.
+
+        Returns ``None`` when the message had no keyboard, no rows survive, or
+        the keyboard shape can't be read (fail safe to the old clear-everything
+        behavior rather than leave a stale, half-consumed row).
+        """
+        markup = getattr(message, "reply_markup", None)
+        rows = getattr(markup, "inline_keyboard", None) if markup else None
+        if not rows:
+            return None
+        remaining = [
+            row
+            for row in rows
+            if not any(
+                getattr(button, "callback_data", None) == pressed_callback_data
+                for button in row
+            )
+        ]
+        if not remaining:
+            return None
+        return InlineKeyboardMarkup(remaining)
 
     def _source_from_message_for_auth(self, message: Message):
         """Build the same Telegram source shape the gateway auth path expects.
