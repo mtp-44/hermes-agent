@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import plistlib
 import shutil
 import subprocess
 import sys
@@ -25,6 +26,9 @@ DEFAULT_RELEASE_ROOT = PROJECT_DIR.parent / "hermes-agent-pwa-releases"
 DEFAULT_HEALTH_URLS = (
     "http://127.0.0.1:9219/api/status",
     "https://mini-mh.tailbd0650.ts.net/api/status",
+)
+DEFAULT_LAUNCHD_PLIST = (
+    Path.home() / "Library" / "LaunchAgents" / "com.mh.hermes-pwa.plist"
 )
 STAMP_FILE = "pwa-release.json"
 STAMP_PLACEHOLDER = "__HERMES_PWA_BUILD_STAMP__"
@@ -51,6 +55,8 @@ class ReleaseManager:
         health_attempts: int = 6,
         health_interval_seconds: float = 2.0,
         now_fn: Callable[[], datetime] | None = None,
+        runtime_project_root: Path | None = None,
+        restart_command: Sequence[str] = (),
     ) -> None:
         self.project_root = project_root.resolve()
         self.release_root = release_root.resolve()
@@ -59,6 +65,10 @@ class ReleaseManager:
         self.health_attempts = health_attempts
         self.health_interval_seconds = health_interval_seconds
         self.now_fn = now_fn or (lambda: datetime.now(timezone.utc))
+        self.runtime_project_root = (
+            runtime_project_root.resolve() if runtime_project_root else None
+        )
+        self.restart_command = tuple(restart_command)
 
     @property
     def current_link(self) -> Path:
@@ -88,7 +98,9 @@ class ReleaseManager:
             check=False,
         )
         if result.returncode != 0:
-            detail = (result.stderr or result.stdout or f"exit {result.returncode}").strip()
+            detail = (
+                result.stderr or result.stdout or f"exit {result.returncode}"
+            ).strip()
             raise ReleaseError(f"{' '.join(command)} failed: {detail}")
         return result.stdout.strip()
 
@@ -106,11 +118,15 @@ class ReleaseManager:
             if line not in {"?? node_modules", "?? node_modules/"}
         ]
         if dirty:
-            raise ReleaseError("source worktree is not clean; commit or remove local changes before deploying")
+            raise ReleaseError(
+                "source worktree is not clean; commit or remove local changes before deploying"
+            )
         verify_env = os.environ.copy()
         appliance_node = Path("/opt/homebrew/opt/node@22/bin")
         if (appliance_node / "node").is_file():
-            verify_env["PATH"] = f"{appliance_node}{os.pathsep}{verify_env.get('PATH', '')}"
+            verify_env["PATH"] = (
+                f"{appliance_node}{os.pathsep}{verify_env.get('PATH', '')}"
+            )
         self._run(
             ["npm", "run", "verify:pwa"],
             cwd=self.project_root / "apps" / "desktop",
@@ -119,6 +135,26 @@ class ReleaseManager:
 
     def _commit(self) -> str:
         return self._run(["git", "rev-parse", "HEAD"], cwd=self.project_root)
+
+    def _verify_runtime_commit(self, commit: str) -> None:
+        if self.runtime_project_root is None:
+            return
+        runtime_commit = self._run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=self.runtime_project_root,
+        )
+        if runtime_commit != commit:
+            raise ReleaseError(
+                "release source commit does not match the configured runtime source: "
+                f"{commit} != {runtime_commit} ({self.runtime_project_root}); "
+                "integrate the release commit into the runtime project before deploying"
+            )
+
+    def _restart_runtime(self) -> None:
+        if self.restart_command:
+            self._run(
+                self.restart_command, cwd=self.runtime_project_root or self.project_root
+            )
 
     def _release_id(self, commit: str) -> str:
         timestamp = self.now_fn().astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -191,15 +227,21 @@ class ReleaseManager:
             sw_path = staging / "sw.js"
             sw_source = sw_path.read_text(encoding="utf-8")
             if STAMP_PLACEHOLDER not in sw_source:
-                raise ReleaseError(f"{sw_path} does not contain the build-stamp placeholder")
-            sw_path.write_text(sw_source.replace(STAMP_PLACEHOLDER, release_id), encoding="utf-8")
+                raise ReleaseError(
+                    f"{sw_path} does not contain the build-stamp placeholder"
+                )
+            sw_path.write_text(
+                sw_source.replace(STAMP_PLACEHOLDER, release_id), encoding="utf-8"
+            )
 
             index_path = staging / "index.html"
             html = index_path.read_text(encoding="utf-8")
             marker = f'<meta name="hermes-pwa-build" content="{release_id}">'
             if "</head>" not in html:
                 raise ReleaseError(f"{index_path} has no </head> marker")
-            index_path.write_text(html.replace("</head>", f"{marker}</head>", 1), encoding="utf-8")
+            index_path.write_text(
+                html.replace("</head>", f"{marker}</head>", 1), encoding="utf-8"
+            )
 
             staging.rename(destination)
         except Exception:
@@ -243,9 +285,10 @@ class ReleaseManager:
         return results
 
     def deploy(self, *, verify: bool = True) -> dict[str, object]:
+        commit = self._commit()
+        self._verify_runtime_commit(commit)
         if verify:
             self._verify_source()
-        commit = self._commit()
         release_id = self._release_id(commit)
         destination = self._stage_release(release_id=release_id, commit=commit)
         target = str(destination.relative_to(self.release_root))
@@ -257,10 +300,18 @@ class ReleaseManager:
         self._replace_link(self.current_link, target)
 
         try:
+            self._restart_runtime()
             health = self._require_healthy()
-        except Exception:
+        except Exception as exc:
             self._replace_link(self.current_link, old_current)
             self._replace_link(self.previous_link, old_previous)
+            try:
+                self._restart_runtime()
+            except Exception as restore_exc:
+                raise ReleaseError(
+                    f"{exc}; release pointers were restored but the runtime restart failed: "
+                    f"{restore_exc}"
+                ) from restore_exc
             raise
 
         return {
@@ -280,10 +331,18 @@ class ReleaseManager:
         self._replace_link(self.current_link, old_previous)
         self._replace_link(self.previous_link, old_current)
         try:
+            self._restart_runtime()
             health = self._require_healthy()
-        except Exception:
+        except Exception as exc:
             self._replace_link(self.current_link, old_current)
             self._replace_link(self.previous_link, old_previous)
+            try:
+                self._restart_runtime()
+            except Exception as restore_exc:
+                raise ReleaseError(
+                    f"{exc}; release pointers were restored but the runtime restart failed: "
+                    f"{restore_exc}"
+                ) from restore_exc
             raise
         return {
             "action": "rollback",
@@ -313,14 +372,42 @@ class ReleaseManager:
         }
 
 
+def _launchd_runtime(plist_path: Path) -> tuple[Path | None, tuple[str, ...]]:
+    if not plist_path.is_file():
+        return None, ()
+    try:
+        with plist_path.open("rb") as handle:
+            configuration = plistlib.load(handle)
+    except (OSError, plistlib.InvalidFileException) as exc:
+        raise ReleaseError(
+            f"cannot read launchd runtime configuration {plist_path}: {exc}"
+        ) from exc
+
+    working_directory = configuration.get("WorkingDirectory")
+    label = configuration.get("Label")
+    if not isinstance(working_directory, str) or not working_directory:
+        raise ReleaseError(
+            f"launchd runtime configuration has no WorkingDirectory: {plist_path}"
+        )
+    if not isinstance(label, str) or not label:
+        raise ReleaseError(f"launchd runtime configuration has no Label: {plist_path}")
+    return (
+        Path(working_directory),
+        ("launchctl", "kickstart", "-k", f"gui/{os.getuid()}/{label}"),
+    )
+
+
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Deploy or roll back the Hermes tailnet PWA atomically.")
+    parser = argparse.ArgumentParser(
+        description="Deploy or roll back the Hermes tailnet PWA atomically."
+    )
     action = parser.add_mutually_exclusive_group(required=True)
     action.add_argument("--deploy", action="store_true")
     action.add_argument("--rollback", action="store_true")
     action.add_argument("--status", action="store_true")
     parser.add_argument("--project-root", type=Path, default=PROJECT_DIR)
     parser.add_argument("--release-root", type=Path, default=DEFAULT_RELEASE_ROOT)
+    parser.add_argument("--launchd-plist", type=Path, default=DEFAULT_LAUNCHD_PLIST)
     parser.add_argument("--health-url", action="append", dest="health_urls")
     parser.add_argument("--health-attempts", type=int, default=6)
     parser.add_argument("--health-interval-seconds", type=float, default=2.0)
@@ -329,14 +416,17 @@ def _parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
-    manager = ReleaseManager(
-        project_root=args.project_root,
-        release_root=args.release_root,
-        health_urls=args.health_urls or DEFAULT_HEALTH_URLS,
-        health_attempts=args.health_attempts,
-        health_interval_seconds=args.health_interval_seconds,
-    )
     try:
+        runtime_project_root, restart_command = _launchd_runtime(args.launchd_plist)
+        manager = ReleaseManager(
+            project_root=args.project_root,
+            release_root=args.release_root,
+            health_urls=args.health_urls or DEFAULT_HEALTH_URLS,
+            health_attempts=args.health_attempts,
+            health_interval_seconds=args.health_interval_seconds,
+            runtime_project_root=runtime_project_root,
+            restart_command=restart_command,
+        )
         if args.deploy:
             result = manager.deploy()
         elif args.rollback:
