@@ -2776,13 +2776,68 @@ def _apply_model_switch(
     }
 
 
+def _agent_matches_model_override(agent: Any, override: dict) -> bool:
+    """Return whether the live agent still implements a pinned session route."""
+    target_model = str(override.get("model") or "").strip()
+    actual_model = str(getattr(agent, "model", "") or "").strip()
+    if not target_model or target_model != actual_model:
+        return False
+
+    target_provider = str(override.get("provider") or "").strip().lower()
+    actual_provider = str(getattr(agent, "provider", "") or "").strip().lower()
+    target_base_url = str(override.get("base_url") or "").strip().rstrip("/")
+    actual_base_url = str(getattr(agent, "base_url", "") or "").strip().rstrip("/")
+
+    if target_provider and target_provider != actual_provider:
+        # Named custom providers resolve to the bare runtime class ``custom``.
+        # The endpoint identity disambiguates them after the switch.
+        if not (
+            target_provider.startswith("custom:")
+            and actual_provider == "custom"
+            and target_base_url
+            and target_base_url == actual_base_url
+        ):
+            return False
+    if target_base_url and target_base_url != actual_base_url:
+        return False
+
+    target_api_mode = str(override.get("api_mode") or "").strip()
+    actual_api_mode = str(getattr(agent, "api_mode", "") or "").strip()
+    return not target_api_mode or target_api_mode == actual_api_mode
+
+
 def _sync_agent_model_with_config(sid: str, session: dict) -> None:
-    """Adopt a config.yaml model change at turn start, like gateways do per
-    message. Sessions pinned with /model keep their choice; a failed switch
-    keeps the current model and never blocks the turn.
+    """Enforce a pinned session route or adopt a config change at turn start.
+
+    A pinned session must never submit through a live client that has drifted
+    to another provider. Repair that mismatch before the turn and fail closed
+    if the intended route cannot be restored. Unpinned config-sync failures
+    retain the previous best-effort behavior and do not block the turn.
     """
     agent = session.get("agent")
-    if agent is None or session.get("model_override"):
+    if agent is None:
+        return
+    override = session.get("model_override")
+    if isinstance(override, dict) and override.get("model"):
+        if _agent_matches_model_override(agent, override):
+            return
+        model = str(override["model"]).strip()
+        provider = str(override.get("provider") or "").strip()
+        raw = f"{model} --provider {provider}" if provider else model
+        try:
+            _apply_model_switch(
+                sid,
+                session,
+                f"{raw} --session",
+                confirm_expensive_model=True,
+                pin_session_override=True,
+            )
+        except Exception as exc:
+            raise ValueError(
+                f"Session model route could not be restored for {model}; "
+                "the turn was not sent. "
+                f"{exc}"
+            ) from exc
         return
     target = _config_model_target()
     if not target[0]:

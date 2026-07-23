@@ -1396,19 +1396,100 @@ def test_config_sync_treats_auto_provider_as_unset(monkeypatch):
     assert calls == ["new/model"]
 
 
-def test_config_sync_skips_session_pinned_by_model_command(monkeypatch):
+def test_config_sync_skips_aligned_session_pinned_by_model_command(monkeypatch):
     _patch_config_model(monkeypatch, "new/model")
     session = _sync_test_session(
         config_model_seen=("old/model", ""),
         model_override={"model": "pinned/model"},
     )
+    session["agent"].model = "pinned/model"
     monkeypatch.setattr(
         server,
         "_apply_model_switch",
-        lambda *a, **k: pytest.fail("pinned session must not be switched"),
+        lambda *a, **k: pytest.fail("aligned pinned session must not be switched"),
     )
 
     server._sync_agent_model_with_config("sid", session)
+
+
+def test_config_sync_accepts_resolved_named_custom_session_route(monkeypatch):
+    _patch_config_model(monkeypatch, "new/model")
+    session = _sync_test_session(
+        model_override={
+            "model": "qwen3.6:35b-mlx",
+            "provider": "custom:ollama-(local)",
+            "base_url": "http://localhost:11434/v1/",
+            "api_mode": "chat_completions",
+        },
+    )
+    session["agent"] = types.SimpleNamespace(
+        model="qwen3.6:35b-mlx",
+        provider="custom",
+        base_url="http://localhost:11434/v1",
+        api_mode="chat_completions",
+    )
+    monkeypatch.setattr(
+        server,
+        "_apply_model_switch",
+        lambda *a, **k: pytest.fail("resolved custom route is already aligned"),
+    )
+
+    server._sync_agent_model_with_config("sid", session)
+
+
+def test_config_sync_repairs_pinned_provider_mismatch_before_turn(monkeypatch):
+    _patch_config_model(monkeypatch, "new/model")
+    session = _sync_test_session(
+        model_override={
+            "model": "qwen3.6:35b-mlx",
+            "provider": "custom:ollama-(local)",
+            "base_url": "http://localhost:11434/v1",
+            "api_mode": "chat_completions",
+        },
+    )
+    session["agent"] = types.SimpleNamespace(
+        model="qwen3.6:35b-mlx",
+        provider="openai-codex",
+        base_url="https://chatgpt.com/backend-api/codex",
+        api_mode="codex_responses",
+    )
+    calls = []
+    monkeypatch.setattr(
+        server,
+        "_apply_model_switch",
+        lambda sid, sess, raw, **kw: calls.append((sid, raw, kw)),
+    )
+
+    server._sync_agent_model_with_config("sid", session)
+
+    assert calls == [
+        (
+            "sid",
+            "qwen3.6:35b-mlx --provider custom:ollama-(local) --session",
+            {"confirm_expensive_model": True, "pin_session_override": True},
+        )
+    ]
+
+
+def test_config_sync_blocks_turn_when_pinned_route_cannot_be_repaired(monkeypatch):
+    session = _sync_test_session(
+        model_override={
+            "model": "qwen3.6:35b-mlx",
+            "provider": "custom:ollama-(local)",
+        },
+    )
+
+    def fail_switch(*args, **kwargs):
+        raise ValueError("provider unavailable")
+
+    monkeypatch.setattr(
+        server,
+        "_apply_model_switch",
+        fail_switch,
+    )
+
+    with pytest.raises(ValueError, match="turn was not sent"):
+        server._sync_agent_model_with_config("sid", session)
 
 
 def test_config_sync_noop_when_config_unchanged(monkeypatch):
