@@ -1,6 +1,6 @@
 import { useStore } from '@nanostores/react'
 import { useQueryClient } from '@tanstack/react-query'
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef } from 'react'
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Navigate, Route, Routes, useLocation, useNavigate, useParams } from 'react-router-dom'
 
 import { BootFailureOverlay } from '@/components/boot-failure-overlay'
@@ -19,6 +19,7 @@ import { getSessionMessages, triggerCronJob } from '../hermes'
 import { type ChatMessage, chatMessageText, preserveLocalAssistantErrors, toChatMessages } from '../lib/chat-messages'
 import { storedSessionIdForNotification } from '../lib/session-ids'
 import { latestSessionTodos } from '../lib/todos'
+import { $commandPaletteOpen } from '../store/command-palette'
 import { setCronFocusJobId } from '../store/cron'
 import {
   $fileBrowserOpen,
@@ -39,18 +40,14 @@ import { respondToApprovalAction } from '../store/native-notifications'
 import { $paneOpen } from '../store/panes'
 import { setPetActivity } from '../store/pet'
 import { setPetScale } from '../store/pet-gallery'
+import { $petGenerateOpen } from '../store/pet-generate'
 import {
   setPetOverlayOpenAppHandler,
   setPetOverlayScaleHandler,
   setPetOverlaySubmitHandler
 } from '../store/pet-overlay'
 import { $filePreviewTarget, $previewTarget, closeActiveRightRailTab } from '../store/preview'
-import {
-  $activeGatewayProfile,
-  $freshSessionRequest,
-  $profileScope,
-  refreshActiveProfile
-} from '../store/profile'
+import { $activeGatewayProfile, $freshSessionRequest, $profileScope, refreshActiveProfile } from '../store/profile'
 import { $startWorkSessionRequest, followActiveSessionCwd, resolveNewSessionCwd } from '../store/projects'
 import { $reviewOpen, REVIEW_PANE_ID } from '../store/review'
 import {
@@ -83,28 +80,18 @@ import { isSecondaryWindow } from '../store/windows'
 import { ChatView } from './chat'
 import { requestComposerFocus, requestComposerInsert } from './chat/composer/focus'
 import { useComposerActions } from './chat/hooks/use-composer-actions'
-import {
-  ChatPreviewRail,
-  PREVIEW_RAIL_MAX_WIDTH,
-  PREVIEW_RAIL_MIN_WIDTH,
-  PREVIEW_RAIL_PANE_WIDTH
-} from './chat/right-rail'
+import { PREVIEW_RAIL_MAX_WIDTH, PREVIEW_RAIL_MIN_WIDTH, PREVIEW_RAIL_PANE_WIDTH } from './chat/right-rail/constants'
 import { ChatSidebar } from './chat/sidebar'
-import { CommandPalette } from './command-palette'
 import { useGatewayBoot } from './gateway/hooks/use-gateway-boot'
 import { useGatewayRequest } from './gateway/hooks/use-gateway-request'
 import { useKeybinds } from './hooks/use-keybinds'
 import { SIDEBAR_COLLAPSE_MEDIA_QUERY } from './layout-constants'
 import { ModelPickerOverlay } from './model-picker-overlay'
 import { ModelVisibilityOverlay } from './model-visibility-overlay'
-import { PetGenerateOverlay } from './pet-generate/pet-generate-overlay'
-import { RightSidebarPane } from './right-sidebar'
 import { FileActionDialogs } from './right-sidebar/file-actions'
 import { RemoteFolderPicker } from './right-sidebar/files/remote-picker'
 import { ReviewPane } from './right-sidebar/review'
 import { $terminalTakeover } from './right-sidebar/store'
-import { TerminalPaneChrome } from './right-sidebar/terminal/chrome'
-import { PersistentTerminal } from './right-sidebar/terminal/persistent'
 import { closeActiveTerminal } from './right-sidebar/terminal/terminals'
 import { CRON_ROUTE, NEW_CHAT_ROUTE, routeSessionId, sessionRoute, SETTINGS_ROUTE } from './routes'
 import { SessionPickerOverlay } from './session-picker-overlay'
@@ -139,6 +126,22 @@ const MessagingView = lazy(async () => ({ default: (await import('./messaging'))
 const ProfilesView = lazy(async () => ({ default: (await import('./profiles')).ProfilesView }))
 const SettingsView = lazy(async () => ({ default: (await import('./settings')).SettingsView }))
 const SkillsView = lazy(async () => ({ default: (await import('./skills')).SkillsView }))
+const ChatPreviewRail = lazy(async () => ({ default: (await import('./chat/right-rail/preview')).ChatPreviewRail }))
+const CommandPalette = lazy(async () => ({ default: (await import('./command-palette')).CommandPalette }))
+
+const PetGenerateOverlay = lazy(async () => ({
+  default: (await import('./pet-generate/pet-generate-overlay')).PetGenerateOverlay
+}))
+
+const RightSidebarPane = lazy(async () => ({ default: (await import('./right-sidebar')).RightSidebarPane }))
+
+const TerminalPaneChrome = lazy(async () => ({
+  default: (await import('./right-sidebar/terminal/chrome')).TerminalPaneChrome
+}))
+
+const PersistentTerminal = lazy(async () => ({
+  default: (await import('./right-sidebar/terminal/persistent')).PersistentTerminal
+}))
 
 // Latest cron-job sessions surfaced in the collapsed "Cron jobs" section. The
 // Cron sessions are written by a background scheduler tick (the desktop
@@ -165,6 +168,8 @@ export function DesktopController() {
   const previewTarget = useStore($previewTarget)
   const selectedStoredSessionId = useStore($selectedStoredSessionId)
   const terminalTakeover = useStore($terminalTakeover)
+  const commandPaletteOpen = useStore($commandPaletteOpen)
+  const petGenerateOpen = useStore($petGenerateOpen)
   const reviewOpen = useStore($reviewOpen)
   const fileBrowserOpen = useStore($fileBrowserOpen)
   const previewPaneOpen = useStore($paneOpen(PREVIEW_PANE_ID))
@@ -198,6 +203,13 @@ export function DesktopController() {
   } = useOverlayRouting()
 
   const terminalSidebarOpen = chatOpen && terminalTakeover
+  const [terminalModuleLoaded, setTerminalModuleLoaded] = useState(terminalSidebarOpen)
+
+  useEffect(() => {
+    if (terminalSidebarOpen) {
+      setTerminalModuleLoaded(true)
+    }
+  }, [terminalSidebarOpen])
 
   const titlebarToolGroups = useGroupRegistry<TitlebarTool>()
   const statusbarItemGroups = useGroupRegistry<StatusbarItem>()
@@ -914,7 +926,11 @@ export function DesktopController() {
   // layer) so pane resize handles still paint above it. Terminals own their state
   // (incl. a snapshotted cwd) independent of the session, so switching sessions
   // never rebuilds or closes them; toggling the pane never rebuilds the shells.
-  const mainOverlays = <PersistentTerminal onAddSelectionToChat={composer.addTerminalSelectionAttachment} />
+  const mainOverlays = terminalModuleLoaded ? (
+    <Suspense fallback={null}>
+      <PersistentTerminal onAddSelectionToChat={composer.addTerminalSelectionAttachment} />
+    </Suspense>
+  ) : null
 
   const overlays = (
     <>
@@ -937,8 +953,16 @@ export function DesktopController() {
       <UpdatesOverlay />
       <GatewayConnectingOverlay />
       <BootFailureOverlay />
-      <CommandPalette />
-      <PetGenerateOverlay />
+      {commandPaletteOpen && (
+        <Suspense fallback={null}>
+          <CommandPalette />
+        </Suspense>
+      )}
+      {petGenerateOpen && (
+        <Suspense fallback={null}>
+          <PetGenerateOverlay />
+        </Suspense>
+      )}
       <SessionSwitcher />
       <FileActionDialogs />
       <RemoteFolderPicker />
@@ -1066,8 +1090,10 @@ export function DesktopController() {
       side={railSide}
       width={PREVIEW_RAIL_PANE_WIDTH}
     >
-      {chatOpen ? (
-        <ChatPreviewRail onRestartServer={restartPreviewServer} setTitlebarToolGroup={setTitlebarToolGroup} />
+      {chatOpen && (previewTarget || filePreviewTarget) ? (
+        <Suspense fallback={null}>
+          <ChatPreviewRail onRestartServer={restartPreviewServer} setTitlebarToolGroup={setTitlebarToolGroup} />
+        </Suspense>
       ) : null}
     </Pane>
   )
@@ -1088,11 +1114,13 @@ export function DesktopController() {
     >
       {/* Key on the project (cwd) so switching projects unmounts the old tree and
           mounts a fresh one straight into its skeleton — no stale-then-blip. */}
-      <RightSidebarPane
-        key={currentCwd || 'no-cwd'}
-        onActivateFile={path => composer.insertContextPathInlineRef(path)}
-        onActivateFolder={path => composer.insertContextPathInlineRef(path, true)}
-      />
+      <Suspense fallback={null}>
+        <RightSidebarPane
+          key={currentCwd || 'no-cwd'}
+          onActivateFile={path => composer.insertContextPathInlineRef(path)}
+          onActivateFolder={path => composer.insertContextPathInlineRef(path, true)}
+        />
+      </Suspense>
     </Pane>
   )
 
@@ -1150,7 +1178,11 @@ export function DesktopController() {
           terminalAsRow ? 'border-l border-(--ui-stroke-secondary) pt-0' : 'pt-(--titlebar-height)'
         )}
       >
-        <TerminalPaneChrome />
+        {terminalModuleLoaded && (
+          <Suspense fallback={null}>
+            <TerminalPaneChrome />
+          </Suspense>
+        )}
       </div>
     </Pane>
   )

@@ -29,8 +29,15 @@ export default mergeConfig(
     build: {
       outDir: 'dist-pwa',
       emptyOutDir: true,
+      manifest: true,
       rolldownOptions: {
-        input: path.resolve(__dirname, 'pwa.html')
+        input: path.resolve(__dirname, 'pwa.html'),
+        output: {
+          // The packaged Electron renderer intentionally ships as one bundle,
+          // but the browser surface must preserve dynamic-import boundaries so
+          // optional routes and renderers do not block the mobile chat shell.
+          codeSplitting: true
+        }
       }
     },
     plugins: [renamePwaEntryHtml()]

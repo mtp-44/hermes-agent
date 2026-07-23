@@ -40,7 +40,7 @@ import {
 } from '@/store/review'
 
 import { SidebarPanelLabel } from '../../shell/sidebar-label'
-import { PaneEmptyState, RightSidebarSectionHeader } from '../index'
+import { PaneEmptyState, RightSidebarSectionHeader } from '../primitives'
 
 import { ReviewFileTree } from './file-tree'
 import { ReviewShipBar } from './ship-bar'

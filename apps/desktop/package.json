@@ -20,6 +20,7 @@
     "start": "npm run build && electron .",
     "build": "node scripts/assert-root-install.cjs && node scripts/write-build-stamp.cjs && node scripts/stage-native-deps.cjs && tsc -b && vite build && npm run postbuild",
     "build:pwa": "vite build --config vite.config.pwa.ts",
+    "check:pwa-budget": "node scripts/check-pwa-budget.mjs",
     "postbuild": "node scripts/assert-dist-built.cjs",
     "prebuilder": "node scripts/patch-electron-builder-mac-binary.cjs",
     "builder": "cross-env NODE_OPTIONS=--max-old-space-size=16384 node scripts/run-electron-builder.cjs",
@@ -46,7 +47,7 @@
     "fmt": "prettier --write 'src/**/*.{ts,tsx}' 'electron/**/*.{js,cjs}' 'vite.config.ts'",
     "fix": "npm run lint:fix && npm run fmt",
     "test:ui": "npm run test:desktop:platforms && vitest run --environment jsdom --exclude=**/*.test.cjs",
-    "verify:pwa": "npm run typecheck && npm run build:pwa && npm run test:pwa && npm run test:ui",
+    "verify:pwa": "npm run typecheck && npm run build:pwa && npm run check:pwa-budget && npm run test:pwa && npm run test:ui",
     "preview": "node scripts/assert-root-install.cjs && vite preview --host 127.0.0.1 --port 4174"
   },
   "dependencies": {
