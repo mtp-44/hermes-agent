@@ -1,6 +1,7 @@
 const ENABLE_KEY = 'hermes-pwa-reconnect-probe'
 const EVENT_NAME = 'hermes:gateway-state'
 const POLL_MS = 100
+const REQUEST_TIMEOUT_MS = 500
 
 type GatewayStateDetail = { state?: string }
 
@@ -54,11 +55,14 @@ export function installReconnectProbe(): void {
 
   const probe = async () => {
     const startedAt = performance.now()
+    const controller = new AbortController()
+    const timeout = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS)
 
     try {
       const response = await fetch(`/api/status?pwa_reconnect_probe=${Date.now()}`, {
         cache: 'no-store',
-        credentials: 'same-origin'
+        credentials: 'same-origin',
+        signal: controller.signal
       })
 
       if (!response.ok) {
@@ -89,6 +93,8 @@ export function installReconnectProbe(): void {
 
       status = 'offline detected; waiting for tailnet'
       render()
+    } finally {
+      window.clearTimeout(timeout)
     }
   }
 
@@ -129,7 +135,12 @@ export function installReconnectProbe(): void {
   window.addEventListener('load', () => {
     document.body.appendChild(panel)
     render()
-    void probe()
-    window.setInterval(() => void probe(), POLL_MS)
+
+    const poll = async () => {
+      await probe()
+      window.setTimeout(() => void poll(), POLL_MS)
+    }
+
+    void poll()
   })
 }
