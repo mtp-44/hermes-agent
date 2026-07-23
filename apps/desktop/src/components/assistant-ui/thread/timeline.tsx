@@ -189,8 +189,15 @@ export const ThreadTimeline: FC = () => {
 
       const top = viewport.getBoundingClientRect().top
 
+      const messageNodes = new Map(
+        [...viewport.querySelectorAll<HTMLElement>('[data-message-id]')].map(node => [
+          node.dataset.messageId,
+          node
+        ])
+      )
+
       const offsets = entries.map(entry => {
-        const node = viewport.querySelector<HTMLElement>(`[data-message-id="${CSS.escape(entry.id)}"]`)
+        const node = messageNodes.get(entry.id)
 
         return node ? node.getBoundingClientRect().top - top : null
       })

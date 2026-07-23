@@ -17,7 +17,9 @@ const setModelAssignment = vi.fn()
 const getRecommendedDefaultModel = vi.fn()
 const setEnvVar = vi.fn()
 const getHermesConfigRecord = vi.fn()
+const getMoaModels = vi.fn()
 const saveHermesConfig = vi.fn()
+const saveMoaModels = vi.fn()
 const startManualProviderOAuth = vi.fn()
 
 vi.mock('@/hermes', () => ({
@@ -28,7 +30,9 @@ vi.mock('@/hermes', () => ({
   getRecommendedDefaultModel: (slug: string) => getRecommendedDefaultModel(slug),
   setEnvVar: (key: string, value: string) => setEnvVar(key, value),
   getHermesConfigRecord: () => getHermesConfigRecord(),
-  saveHermesConfig: (config: unknown) => saveHermesConfig(config)
+  getMoaModels: () => getMoaModels(),
+  saveHermesConfig: (config: unknown) => saveHermesConfig(config),
+  saveMoaModels: (config: unknown) => saveMoaModels(config)
 }))
 
 vi.mock('@/store/onboarding', () => ({
@@ -65,7 +69,9 @@ beforeEach(() => {
   getRecommendedDefaultModel.mockResolvedValue({ provider: 'deepseek', model: 'deepseek-chat', free_tier: null })
   setEnvVar.mockResolvedValue({ ok: true })
   getHermesConfigRecord.mockResolvedValue({ agent: { reasoning_effort: 'medium', service_tier: 'normal' } })
+  getMoaModels.mockResolvedValue(null)
   saveHermesConfig.mockResolvedValue({ ok: true })
+  saveMoaModels.mockImplementation(async config => config)
 })
 
 afterEach(() => {
@@ -92,10 +98,9 @@ describe('ModelSettings', () => {
     fireEvent.click(triggers[0])
 
     // "Nous" shows in both the trigger and the open list; the unconfigured
-    // provider + its setup hint are the unique signal of the full universe.
+    // provider option is the unique signal of the full universe.
     expect((await screen.findAllByText('Nous')).length).toBeGreaterThan(0)
-    expect(await screen.findByText(/DeepSeek/)).toBeTruthy()
-    expect(await screen.findByText(/set up/)).toBeTruthy()
+    expect((await screen.findByText(/DeepSeek/)).closest('[role="option"]')).not.toBeNull()
   })
 
   it('activates an unconfigured api_key provider inline by saving its key', async () => {

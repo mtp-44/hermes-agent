@@ -1,7 +1,7 @@
 import { AssistantRuntimeProvider, type ThreadMessage, useExternalStoreRuntime } from '@assistant-ui/react'
-import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { useEffect, useState } from 'react'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { Thread } from '.'
 
@@ -394,6 +394,11 @@ function DismissibleErrorHarness({ onDismissError }: { onDismissError: (messageI
 
 describe('assistant-ui streaming renderer', () => {
   beforeEach(() => {
+    resizeObservers.clear()
+  })
+
+  afterEach(() => {
+    cleanup()
     resizeObservers.clear()
   })
 
