@@ -141,6 +141,36 @@ def test_gated_static_asset_path_is_public(gated_app):
     assert r.status_code == 404
 
 
+@pytest.mark.parametrize("path", [
+    "/manifest.webmanifest",
+    "/sw.js",
+    "/apple-touch-icon.png",
+    "/pwa-192.png",
+    "/pwa-512.png",
+    "/pwa-maskable-512.png",
+])
+def test_gated_pwa_install_assets_are_public(gated_app, path):
+    """PWA installability assets must bypass the gate.
+
+    Regression guard: these previously 302'd to /login under the OAuth
+    gate, which is invisible in a logged-in browser tab (same-origin
+    fetches carry the cookie) but breaks any install-time icon fetch that
+    doesn't carry it — observed live via macOS Safari's "Add to Dock",
+    which silently fell back to a generic accent-color-plus-initial icon
+    instead of the real one. None of these files carry session content
+    (manifest/sw.js are static; the icons are unauthenticated-safe by the
+    same threshold as /favicon.ico), so 404 (route reached, file missing
+    in the test app's dist) is fine — 401 or a /login redirect is not.
+    """
+    r = gated_app.get(path, follow_redirects=False)
+    assert r.status_code != 401, f"{path} returned 401 under the OAuth gate — should be public"
+    if r.status_code == 302:
+        location = r.headers.get("location", "")
+        assert "/login" not in location, (
+            f"{path} redirected to {location} — should be public, not bounced to /login"
+        )
+
+
 # ---------------------------------------------------------------------------
 # OAuth round trip
 # ---------------------------------------------------------------------------

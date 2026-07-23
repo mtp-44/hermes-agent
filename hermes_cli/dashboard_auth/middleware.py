@@ -52,6 +52,19 @@ _GATE_PUBLIC_PREFIXES: tuple[str, ...] = (
     "/ds-assets/",
     "/fonts/",
     "/fonts-terminal/",
+    # PWA installability assets (manifest.webmanifest, sw.js, and the icon
+    # set it references). Static, identical for every request, no session
+    # content — same threshold as /favicon.ico above. Without this, an
+    # install-time icon fetch that doesn't carry the session cookie (seen
+    # live: macOS Safari's "Add to Dock" icon fetcher) gets bounced to the
+    # /login HTML instead of image bytes, and the OS silently falls back to
+    # a generic accent-color-plus-initial icon instead of erroring loudly.
+    "/manifest.webmanifest",
+    "/sw.js",
+    "/apple-touch-icon.png",
+    "/pwa-192.png",
+    "/pwa-512.png",
+    "/pwa-maskable-512.png",
 )
 
 
