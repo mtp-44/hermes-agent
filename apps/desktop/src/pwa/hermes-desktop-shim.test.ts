@@ -156,6 +156,29 @@ describe('PWA Hermes desktop shim', () => {
     expect(body.data_url).toBe('data:text/plain;base64,aGVsbG8=')
   })
 
+  it('keeps the native picker rendered and DOM-connected for iOS activation', async () => {
+    let picker: HTMLInputElement | null = null
+
+    vi.spyOn(HTMLInputElement.prototype, 'click').mockImplementation(function (this: HTMLInputElement) {
+      picker = this
+      expect(this.isConnected).toBe(true)
+      expect(this.style.display).not.toBe('none')
+      expect(this.style.position).toBe('fixed')
+      expect(this.style.width).toBe('1px')
+      expect(this.style.height).toBe('1px')
+      expect(this.style.opacity).toBe('0')
+      expect(this.tabIndex).toBe(-1)
+      expect(this.getAttribute('aria-hidden')).toBe('true')
+      this.oncancel?.(new Event('cancel'))
+    })
+
+    installHermesDesktopShim()
+
+    await expect(window.hermesDesktop!.selectPaths({})).resolves.toEqual([])
+    expect(picker).not.toBeNull()
+    expect(picker!.isConnected).toBe(false)
+  })
+
   it('surfaces upload size and backend errors', async () => {
     window.__HERMES_SESSION_TOKEN__ = 'loopback-token'
     const oversized = new File(['x'], 'huge.bin')

@@ -392,7 +392,22 @@ export function installHermesDesktopShim(): void {
         if (extensions.length) {
           input.accept = extensions.map(ext => `.${ext.replace(/^\./, '')}`).join(',')
         }
-        input.style.display = 'none'
+        // Keep the picker rendered and DOM-connected. iOS Home Screen WebKit
+        // ignores programmatic activation of display:none file inputs even
+        // when input.click() runs synchronously inside the user's menu press.
+        // A transparent off-screen control preserves that trusted activation
+        // without adding a focusable or visible element to the page.
+        input.tabIndex = -1
+        input.setAttribute('aria-hidden', 'true')
+        Object.assign(input.style, {
+          position: 'fixed',
+          left: '-9999px',
+          top: '0',
+          width: '1px',
+          height: '1px',
+          opacity: '0',
+          pointerEvents: 'none'
+        })
         input.onchange = () => {
           resolve(Array.from(input.files ?? []))
           input.remove()

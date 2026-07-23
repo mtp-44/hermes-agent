@@ -37,6 +37,9 @@ describe('PWA mobile UX contracts', () => {
     expect(pwaCss).toMatch(/min-width:\s*44px\s*!important/)
     expect(pwaCss).toMatch(/min-height:\s*44px\s*!important/)
     expect(pwaCss).toMatch(/\[data-pane-reveal-trigger\]\s*\{[^}]*width:\s*44px\s*!important/s)
+    expect(pwaCss).toMatch(/\[data-pane-reveal-trigger\]\s*\{[^}]*height:\s*44px\s*!important/s)
+    expect(pwaCss).toMatch(/\[data-pane-reveal-trigger\]\s*\{[^}]*top:\s*50%\s*!important/s)
+    expect(pwaCss).toMatch(/\[data-pane-reveal-trigger\]\s*\{[^}]*bottom:\s*auto\s*!important/s)
     expect(pwaCss).toMatch(/:focus-visible\s*\{[^}]*outline:\s*2px solid[^}]*!important/s)
   })
 

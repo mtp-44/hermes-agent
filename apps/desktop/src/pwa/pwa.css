@@ -119,12 +119,18 @@
   }
 }
 
-/* Touch devices: widen the collapsed-pane hover-reveal edge strip into a
- * tappable target and paint a subtle grabber pill so it's discoverable
- * (install.ts turns a tap on it into the pane's reveal-toggle event). */
+/* Touch devices: replace the desktop's full-height hover strip with a
+ * discoverable 44px square tap target. Keeping the transparent hit area the
+ * same height as the visible grabber prevents it from swallowing unrelated
+ * controls all along the viewport edge (install.ts turns a tap on it into the
+ * pane's reveal-toggle event). */
 @media (pointer: coarse) {
   [data-pane-reveal-trigger] {
     width: 44px !important;
+    height: 44px !important;
+    top: 50% !important;
+    bottom: auto !important;
+    transform: translateY(-50%);
   }
 
   [data-pane-reveal-trigger]::after {
