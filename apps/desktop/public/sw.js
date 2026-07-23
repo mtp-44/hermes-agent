@@ -9,7 +9,7 @@
  *
  * Bump VERSION to invalidate every cache after a breaking change.
  */
-const VERSION = 'hermes-pwa-v1'
+const VERSION = 'hermes-pwa-v2'
 
 self.addEventListener('install', () => {
   self.skipWaiting()
