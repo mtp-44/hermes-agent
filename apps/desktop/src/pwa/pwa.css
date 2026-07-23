@@ -53,8 +53,69 @@
     font-size: max(16px, 1em) !important;
   }
 
-  button {
-    min-height: 34px;
+  /* The desktop renderer intentionally uses compact 20–26px controls. On a
+   * phone those are below the WP5 mobile target, so enlarge only the PWA's
+   * critical interaction surfaces. CSS variables keep the composer layout
+   * coherent; stable data-slot hooks cover the other shared surfaces. */
+  [style*='--titlebar-height'] {
+    --titlebar-height: calc(44px + env(safe-area-inset-top, 0px)) !important;
+    --titlebar-controls-top: env(safe-area-inset-top, 0px) !important;
+    --titlebar-control-size: 44px;
+    --titlebar-control-height: 44px;
+    --composer-control-size: 2.75rem;
+    --composer-control-primary-size: 2.75rem;
+  }
+
+  [data-slot='composer-root'] button,
+  [data-slot='aui_message-actions'] button,
+  [data-slot='aui_msg-actions'] button,
+  [data-slot='tool-approval-actions'] button,
+  [data-slot='tool-approval-inline'] button,
+  [data-slot='tool-approval-fallback'] button,
+  [data-slot='sidebar-row'] button,
+  [data-slot='sidebar-section-header'] button,
+  [data-slot='sidebar-workspace-header'] button,
+  [data-slot='right-rail-tabs'] button {
+    min-width: 44px !important;
+    min-height: 44px !important;
+  }
+
+  [data-slot='sidebar-row'],
+  [data-slot='sidebar-section-header'],
+  [data-slot='sidebar-workspace-header'],
+  [data-slot='right-rail-tabs'],
+  [data-slot='tool-approval-choice-group'] {
+    min-height: 44px !important;
+    height: auto !important;
+  }
+
+  /* Touch has no hover discovery step. Reveal only controls in the critical
+   * surfaces above; disabled/absent controls keep their product state. */
+  [data-slot='aui_msg-actions'],
+  [data-slot='sidebar-row'] button:not(:disabled),
+  [data-slot='sidebar-section-header'] button:not(:disabled),
+  [data-slot='sidebar-workspace-header'] button:not(:disabled),
+  [data-slot='right-rail-tabs'] button:not(:disabled),
+  [data-slot='composer-attachments'] button:not(:disabled) {
+    pointer-events: auto !important;
+    opacity: 1 !important;
+  }
+
+  [data-slot='sidebar-row'] button,
+  [data-slot='sidebar-section-header'] button,
+  [data-slot='sidebar-workspace-header'] button {
+    color: var(--ui-text-tertiary) !important;
+  }
+
+  [data-slot='statusbar'] {
+    min-height: 44px !important;
+    height: auto !important;
+  }
+
+  [data-slot='statusbar'] button,
+  [data-slot='statusbar'] a {
+    min-width: 44px !important;
+    min-height: 44px !important;
   }
 }
 
@@ -63,7 +124,7 @@
  * (install.ts turns a tap on it into the pane's reveal-toggle event). */
 @media (pointer: coarse) {
   [data-pane-reveal-trigger] {
-    width: 20px !important;
+    width: 44px !important;
   }
 
   [data-pane-reveal-trigger]::after {
@@ -93,9 +154,30 @@
  * mobile. Force them visible on coarse pointers instead of chasing a
  * tap-then-tap-target interaction. */
 @media (pointer: coarse) {
-  [class*='group-hover/workspace:opacity-100'] {
+  [data-slot='sidebar-row'] [class*='group-hover/'],
+  [data-slot='sidebar-section-header'] [class*='group-hover/'],
+  [data-slot='sidebar-workspace-header'] [class*='group-hover/'] {
     opacity: 1 !important;
   }
+}
+
+/* The shared desktop theme deliberately removes every native focus outline.
+ * Restore a high-contrast keyboard focus indicator for the browser/PWA
+ * surface without changing Electron. `!important` beats that later global
+ * reset because pwa.css is imported before the renderer bundle. */
+:where(
+  a[href],
+  button,
+  input,
+  select,
+  textarea,
+  [contenteditable='true'],
+  [role='button'],
+  [role='tab'],
+  [tabindex]:not([tabindex='-1'])
+):focus-visible {
+  outline: 2px solid var(--ring, var(--color-primary)) !important;
+  outline-offset: 2px !important;
 }
 
 /* The collapsed hover-reveal panes park off-canvas to the right via

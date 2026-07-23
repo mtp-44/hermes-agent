@@ -160,12 +160,26 @@ export async function apiFetch<T>(
   if (token) {
     headers['X-Hermes-Session-Token'] = token
   }
-  const response = await fetch(url, {
-    method: request.method || 'GET',
-    headers,
-    body: request.body === undefined ? undefined : JSON.stringify(request.body),
-    signal: AbortSignal.timeout(timeoutMs)
-  })
+  let response: Response
+
+  try {
+    response = await fetch(url, {
+      method: request.method || 'GET',
+      headers,
+      body: request.body === undefined ? undefined : JSON.stringify(request.body),
+      signal: AbortSignal.timeout(timeoutMs)
+    })
+  } catch (error) {
+    if (error instanceof DOMException && (error.name === 'AbortError' || error.name === 'TimeoutError')) {
+      throw new Error('Hermes gateway timed out — check the gateway and tailnet connection')
+    }
+
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+      throw new Error('Network unavailable — reconnect to the tailnet and retry')
+    }
+
+    throw new Error('Hermes gateway is unreachable over the tailnet — check Tailscale and the gateway')
+  }
 
   if (response.status === 401 && isAuthGated()) {
     // Do not read or surface the response body: it may reflect request
@@ -404,12 +418,18 @@ export function installHermesDesktopShim(): void {
         })
         const safeName = file.name.replace(/[^\w.-]+/g, '_').slice(-80) || 'upload'
         const hostPath = `~/.hermes/pwa-uploads/${Date.now()}-${safeName}`
-        const result = await apiFetch<{ ok: boolean; path?: string; entry?: { path?: string } }>(token, {
-          path: '/api/files/upload',
-          method: 'POST',
-          body: { path: hostPath, data_url: dataUrl, overwrite: true },
-          timeoutMs: 120_000
-        })
+        let result: { ok: boolean; path?: string; entry?: { path?: string } }
+        try {
+          result = await apiFetch(token, {
+            path: '/api/files/upload',
+            method: 'POST',
+            body: { path: hostPath, data_url: dataUrl, overwrite: true },
+            timeoutMs: 120_000
+          })
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : String(error)
+          throw new Error(`Upload failed for "${file.name}": ${detail}`)
+        }
         uploaded.push(result.entry?.path || result.path || hostPath)
       }
       return uploaded

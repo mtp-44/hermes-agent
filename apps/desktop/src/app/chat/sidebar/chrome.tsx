@@ -51,7 +51,11 @@ export function SidebarRowShell({
   ...props
 }: React.ComponentProps<'div'> & { actions?: React.ReactNode }) {
   return (
-    <div className={cn(rowMinH, 'grid grid-cols-[minmax(0,1fr)_auto] items-stretch rounded-md', className)} {...props}>
+    <div
+      className={cn(rowMinH, 'grid grid-cols-[minmax(0,1fr)_auto] items-stretch rounded-md', className)}
+      data-slot="sidebar-row"
+      {...props}
+    >
       {children}
       {actions ? <div className="flex shrink-0 items-center self-center">{actions}</div> : null}
     </div>

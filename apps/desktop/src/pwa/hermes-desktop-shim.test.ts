@@ -120,6 +120,25 @@ describe('PWA Hermes desktop shim', () => {
     )
   })
 
+  it('classifies offline, timeout, and reachable-browser gateway failures', async () => {
+    Object.defineProperty(navigator, 'onLine', { configurable: true, value: false })
+    vi.mocked(fetch).mockRejectedValueOnce(new TypeError('Load failed'))
+    await expect(apiFetch('', { path: '/api/status' })).rejects.toThrow(
+      'Network unavailable — reconnect to the tailnet and retry'
+    )
+
+    Object.defineProperty(navigator, 'onLine', { configurable: true, value: true })
+    vi.mocked(fetch).mockRejectedValueOnce(new DOMException('timed out', 'TimeoutError'))
+    await expect(apiFetch('', { path: '/api/status' })).rejects.toThrow(
+      'Hermes gateway timed out — check the gateway and tailnet connection'
+    )
+
+    vi.mocked(fetch).mockRejectedValueOnce(new TypeError('Load failed'))
+    await expect(apiFetch('', { path: '/api/status' })).rejects.toThrow(
+      'Hermes gateway is unreachable over the tailnet — check Tailscale and the gateway'
+    )
+  })
+
   it('uploads selected files to the managed endpoint and returns host paths', async () => {
     window.__HERMES_SESSION_TOKEN__ = 'loopback-token'
     setPickedFiles([new File(['hello'], 'Quarterly report.txt', { type: 'text/plain' })])
@@ -151,7 +170,9 @@ describe('PWA Hermes desktop shim', () => {
     vi.mocked(fetch).mockResolvedValue(new Response('upload rejected', { status: 413 }))
     installHermesDesktopShim()
 
-    await expect(window.hermesDesktop!.selectPaths({})).rejects.toThrow('413: upload rejected')
+    await expect(window.hermesDesktop!.selectPaths({})).rejects.toThrow(
+      'Upload failed for "small.txt": 413: upload rejected'
+    )
   })
 
   it('fails denied browser permissions safely and leaves optional Electron APIs absent', async () => {

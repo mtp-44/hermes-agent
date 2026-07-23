@@ -172,7 +172,10 @@ const ApprovalBar: FC<{ request: ApprovalRequest; surface: 'floating' | 'inline'
       data-slot={surface === 'inline' ? 'tool-approval-inline' : 'tool-approval-actions'}
     >
       <div className="flex items-center gap-2.5">
-        <div className="inline-flex h-6 items-stretch overflow-hidden rounded-md border border-primary/25 bg-primary/10 text-primary">
+        <div
+          className="inline-flex h-6 items-stretch overflow-hidden rounded-md border border-primary/25 bg-primary/10 text-primary"
+          data-slot="tool-approval-choice-group"
+        >
           <Button
             className="h-full gap-1 rounded-none px-2 text-xs font-medium text-primary hover:bg-primary/15 hover:text-primary"
             disabled={busy}

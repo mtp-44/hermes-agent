@@ -411,6 +411,7 @@ class TestLoginPageRender:
             assert 'value="/sessions"' in html
             assert "<script>" in html
             assert "/auth/password-login" in html
+            assert "min-height: 44px" in html
         finally:
             clear_providers()
 

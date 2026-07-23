@@ -252,6 +252,7 @@ _LOGIN_HTML_TEMPLATE = """\
   }}
   .field-input {{
     width: 100%;
+    min-height: 44px;
     box-sizing: border-box;
     padding: 0.7rem 0.8rem;
     background: color-mix(in srgb, #000000 25%, var(--background-base));
