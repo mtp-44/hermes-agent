@@ -5,6 +5,7 @@ import type { HermesConnection } from '@/global'
 import { HermesGateway } from '@/hermes'
 import { translateNow } from '@/i18n'
 import { desktopDefaultCwd } from '@/lib/desktop-fs'
+import { emitGatewayStateForReconnectProbe } from '@/pwa/reconnect-probe'
 import {
   $desktopBoot,
   applyDesktopBootProgress,
@@ -240,6 +241,7 @@ export function useGatewayBoot({
     configureGatewayRegistry({ onEvent: event => callbacksRef.current.handleGatewayEvent(event) })
 
     const offState = gateway.onState(st => {
+      emitGatewayStateForReconnectProbe(st)
       // Mirror to the composer only while the primary is the active profile —
       // a background secondary reconnect mustn't flip the foreground state.
       reportPrimaryGatewayState(st)

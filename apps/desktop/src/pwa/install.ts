@@ -10,8 +10,10 @@
 import './pwa.css'
 
 import { installHermesDesktopShim, isAuthGated, redirectToLogin } from './hermes-desktop-shim'
+import { installReconnectProbe } from './reconnect-probe'
 
 installHermesDesktopShim()
+installReconnectProbe()
 
 // Gated gateway (tailnet bind): if there's no valid session cookie yet, hop
 // to the server-rendered /login page up front instead of letting the renderer
