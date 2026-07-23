@@ -8470,6 +8470,10 @@ def _run_prompt_submit(rid, sid: str, session: dict, text: Any) -> None:
         session_tokens = []
         home_token = None  # per-turn HERMES_HOME override for a resumed remote profile
         goal_followup = None  # set by the post-turn goal hook below
+        # For the outbound message-action decorators below: only feedback
+        # candidates observed DURING this turn may attach to its reply
+        # (mirrors gateway/run.py's ``_turn_started_at`` freshness gate).
+        turn_started_at = time.time()
         try:
             from tools.approval import (
                 reset_current_session_key,
@@ -8715,6 +8719,67 @@ def _run_prompt_submit(rid, sid: str, session: dict, text: Any) -> None:
             with session["history_lock"]:
                 _clear_inflight_turn(session)
             _emit("message.complete", sid, payload)
+
+            # ── Generic message actions (plugin outbound decorators) ──────
+            # Desktop/PWA counterpart of gateway/run.py's Telegram-only
+            # action staging: consult plugin-registered outbound decorators
+            # (e.g. Open Brain 👍/👎 query feedback) and, when any actions
+            # come back, emit them as a follow-up event. The renderer draws
+            # them as chips under the reply; a press round-trips through
+            # ``POST /api/actions/dispatch`` into the same ``act:`` handler
+            # seam every platform shares. Feature-neutral here — the plugin
+            # owns the buttons and the handler.
+            if status == "complete" and isinstance(raw, str) and raw.strip():
+                try:
+                    from gateway.platforms.actions import encode_action_callback
+                    from hermes_cli.plugins import get_plugin_manager
+
+                    _deco_ctx = {
+                        # Feedback candidates are keyed by the AGENT's session
+                        # id (post_tool_call passes agent.session_id), which is
+                        # the stored id — NOT the short WS sid this loop emits
+                        # events under.
+                        "session_id": getattr(session.get("agent"), "session_id", "") or sid,
+                        "session_key": session.get("session_key") or sid,
+                        "platform": "desktop",
+                        "text": raw,
+                        "since": turn_started_at,
+                        "generation": None,
+                    }
+                    _actions: list = []
+                    _decorators = get_plugin_manager().get_outbound_decorators()
+                    for _deco in _decorators:
+                        try:
+                            _res = _deco(_deco_ctx)
+                            if _res:
+                                _actions.extend(_res)
+                        except Exception as _deco_err:
+                            logger.debug("Outbound decorator failed: %s", _deco_err)
+                    logger.debug(
+                        "action staging: sid=%s decorators=%d actions=%d agent_sid=%s",
+                        sid,
+                        len(_decorators),
+                        len(_actions),
+                        getattr(session.get("agent"), "session_id", "?"),
+                    )
+                    _chips = []
+                    for _a in _actions:
+                        try:
+                            _chips.append(
+                                {
+                                    "label": str(_a.get("label") or ""),
+                                    "callback_id": encode_action_callback(
+                                        str(_a.get("action_id") or ""),
+                                        str(_a.get("token") or ""),
+                                    ),
+                                }
+                            )
+                        except ValueError as _enc_err:
+                            logger.debug("Dropping malformed action: %s", _enc_err)
+                    if _chips:
+                        _emit("message.actions", sid, {"actions": _chips})
+                except Exception as _act_err:
+                    logger.debug("Message-action staging failed: %s", _act_err)
 
             # ── /goal continuation (Ralph-style loop) ─────────────────
             # After every TUI turn, if a /goal is active, ask the judge

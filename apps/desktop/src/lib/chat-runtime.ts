@@ -373,7 +373,9 @@ export function toRuntimeMessage(message: ChatMessage): ThreadMessage {
       unstable_annotations: [],
       unstable_data: [],
       steps: [],
-      custom: {}
+      // Message-action chips ride metadata so the assistant-message component
+      // can render them without widening the assistant-ui content types.
+      custom: message.actions?.length ? { actions: message.actions } : {}
     }
   } as ThreadMessage
 }

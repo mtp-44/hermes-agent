@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import hmac
 import importlib.util
+import inspect
 import json
 import logging
 import mimetypes
@@ -914,6 +915,52 @@ class ManagedFileUpload(BaseModel):
 
 class ManagedDirectoryCreate(BaseModel):
     path: str
+
+
+class ActionDispatchRequest(BaseModel):
+    """A pressed message-action chip (``act:<action_id>:<token>``)."""
+
+    callback_id: str
+
+
+@app.post("/api/actions/dispatch")
+async def dispatch_message_action(payload: ActionDispatchRequest, request: Request):
+    """Route a message-action press to its plugin-registered handler.
+
+    Desktop/PWA counterpart of the platform adapters' ``act:`` callback
+    dispatch (e.g. Telegram inline-keyboard presses): the renderer draws the
+    actions emitted by the ``message.actions`` gateway event as chips and
+    POSTs the pressed chip's callback id here. Authorization is the standard
+    dashboard gate (session cookie / token) — the same trust level as sending
+    a chat message. Returns the handler's short ack string for a toast.
+    """
+    _require_token(request)
+
+    from gateway.platforms.actions import decode_action_callback
+
+    decoded = decode_action_callback(payload.callback_id)
+    if decoded is None:
+        raise HTTPException(status_code=400, detail="Malformed action callback")
+    action_id, action_token = decoded
+
+    try:
+        from hermes_cli.plugins import get_plugin_manager
+
+        handler = get_plugin_manager().get_action_handler(action_id)
+    except Exception:
+        handler = None
+    if handler is None:
+        raise HTTPException(status_code=404, detail="No handler registered for that action")
+
+    try:
+        result = handler(action_id, action_token, {"platform": "desktop"})
+        if inspect.isawaitable(result):
+            result = await result
+    except Exception as exc:
+        logging.getLogger(__name__).warning("Message-action handler failed: %s", exc)
+        raise HTTPException(status_code=500, detail="Action handler failed")
+
+    return {"ok": True, "ack": str(result or "")}
 
 
 class ManagedFileDelete(BaseModel):

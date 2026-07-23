@@ -149,10 +149,12 @@ def _decorate_outbound(context: dict[str, Any]) -> list[dict[str, Any]] | None:
 
     Generic outbound-decorator seam consumer (Phase 5c.3 step 2): pops the
     feedback candidate captured for this turn and returns the two actions. The
-    platform renders them and routes a press to ``_handle_feedback``. Telegram
-    only — the previous behavior attached these buttons on Telegram alone.
+    platform renders them and routes a press to ``_handle_feedback``.
+    Platforms: Telegram (inline keyboard) and the desktop/PWA renderer
+    (message-action chips over the ``/api/ws`` gateway + ``/api/actions/
+    dispatch`` round-trip).
     """
-    if str(context.get("platform") or "").lower() != "telegram":
+    if str(context.get("platform") or "").lower() not in {"telegram", "desktop"}:
         return None
     session_id = str(context.get("session_id") or "").strip()
     if not session_id:

@@ -28,7 +28,8 @@ import {
   DropdownMenuLabel,
   DropdownMenuTrigger
 } from '@/components/ui/dropdown-menu'
-import { useI18n } from '@/i18n'
+import { translateNow, useI18n } from '@/i18n'
+import type { ChatMessageAction } from '@/lib/chat-messages'
 import { triggerHaptic } from '@/lib/haptics'
 import { GitBranchIcon, Loader2Icon, Volume2Icon, VolumeXIcon, XIcon } from '@/lib/icons'
 import { extractPreviewTargets } from '@/lib/preview-targets'
@@ -55,6 +56,13 @@ export const AssistantMessage: FC<{
   const messageId = useAuiState(s => s.message.id)
   const messageRuntime = useMessageRuntime()
   const { t } = useI18n()
+
+  // Plugin-decorated interactive chips (message.actions gateway event —
+  // e.g. Open Brain 👍/👎 query feedback). Carried via metadata.custom by
+  // toRuntimeMessage; referentially stable across streaming flushes.
+  const messageActions = useAuiState(
+    s => (s.message.metadata?.custom as { actions?: ChatMessageAction[] } | undefined)?.actions
+  )
 
   // PERF: this component must NOT subscribe to the streaming text. Every
   // selector here returns a value that stays referentially stable across
@@ -129,11 +137,59 @@ export const AssistantMessage: FC<{
             )}
           </ErrorPrimitive.Root>
         </MessagePrimitive.Error>
+        {!isRunning && messageActions && messageActions.length > 0 && (
+          <MessageActionChips actions={messageActions} key={messageId} />
+        )}
       </div>
       {hasVisibleText && (
         <AssistantFooter getMessageText={getMessageText} messageId={messageId} onBranchInNewChat={onBranchInNewChat} />
       )}
     </MessagePrimitive.Root>
+  )
+}
+
+/** Interactive chips under a reply (`message.actions`): a press POSTs the
+ *  callback id to `/api/actions/dispatch` (the shared plugin `act:` handler
+ *  seam) and swaps the chips for the handler's short ack line. */
+const MessageActionChips: FC<{ actions: ChatMessageAction[] }> = ({ actions }) => {
+  const [ack, setAck] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
+
+  if (ack) {
+    return (
+      <div className="mt-2 text-[0.78rem] text-(--ui-text-tertiary)" data-slot="aui_message-actions-ack">
+        {ack}
+      </div>
+    )
+  }
+
+  return (
+    <div className="mt-2 flex flex-wrap gap-1.5" data-slot="aui_message-actions">
+      {actions.map(action => (
+        <button
+          className="cursor-pointer rounded-full border border-(--ui-stroke-tertiary) bg-transparent px-2.5 py-1 text-[0.78rem] leading-none text-(--ui-text-secondary) transition-colors hover:bg-(--ui-sidebar-surface-background) hover:text-foreground disabled:cursor-default disabled:opacity-50"
+          disabled={busy}
+          key={action.callback_id}
+          onClick={async () => {
+            setBusy(true)
+            try {
+              const result = await window.hermesDesktop?.api<{ ok?: boolean; ack?: string }>({
+                path: '/api/actions/dispatch',
+                method: 'POST',
+                body: { callback_id: action.callback_id }
+              })
+              setAck(result?.ack || '✓')
+            } catch (error) {
+              notifyError(error, translateNow('errors.genericFailure'))
+              setBusy(false)
+            }
+          }}
+          type="button"
+        >
+          {action.label}
+        </button>
+      ))}
+    </div>
   )
 }
 

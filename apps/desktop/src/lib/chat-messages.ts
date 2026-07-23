@@ -18,6 +18,16 @@ export type ChatMessage = {
   hidden?: boolean
   /** Composer attachment ref strings (`@file:...`, `@image:...`) sent with this user message. */
   attachmentRefs?: string[]
+  /** Interactive message-action chips (`message.actions` gateway event) —
+   *  plugin-decorated actions such as Open Brain 👍/👎 query feedback. A press
+   *  round-trips through `POST /api/actions/dispatch` into the same `act:`
+   *  handler seam the platform adapters use. */
+  actions?: ChatMessageAction[]
+}
+
+export type ChatMessageAction = {
+  label: string
+  callback_id: string
 }
 
 export type GatewayEventPayload = {
@@ -55,6 +65,8 @@ export type GatewayEventPayload = {
   // agent.terminal.output — live chunk for a read-only agent terminal tab
   process_id?: string
   chunk?: string
+  // message.actions — plugin-decorated interactive chips for the last reply
+  actions?: Array<{ label?: string; callback_id?: string }>
   // clarify.request
   request_id?: string
   question?: string
