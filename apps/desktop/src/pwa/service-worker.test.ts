@@ -106,6 +106,7 @@ describe('PWA service-worker cache contract', () => {
     ['nested API', { url: 'https://hermes.test/api/status' }],
     ['non-GET', { method: 'POST', url: 'https://hermes.test/assets/app.js' }],
     ['cross-origin', { url: 'https://other.test/assets/app.js' }],
+    ['release metadata', { url: 'https://hermes.test/pwa-release.json' }],
     ['login', { mode: 'navigate', url: 'https://hermes.test/login' }],
     ['auth callback', { mode: 'navigate', url: 'https://hermes.test/auth/callback' }]
   ])('never intercepts %s requests', async (_label, request) => {
@@ -175,7 +176,7 @@ describe('PWA service-worker cache contract', () => {
     await work
 
     expect(worker.deleted).toEqual(['hermes-pwa-v1', 'hermes-pwa-v2'])
-    expect(worker.stores.has('hermes-pwa-v3')).toBe(true)
+    expect(worker.stores.has('hermes-pwa-__HERMES_PWA_BUILD_STAMP__')).toBe(true)
     expect(worker.claim).toHaveBeenCalledOnce()
   })
 

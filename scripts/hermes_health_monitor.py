@@ -29,7 +29,12 @@ DEFAULT_HTTP_TIMEOUT_SECONDS = 2.0
 DEFAULT_MIN_DISK_BYTES = 10 * 1024 * 1024 * 1024
 DEFAULT_MIN_MEMORY_BYTES = 2 * 1024 * 1024 * 1024
 DEFAULT_RESTART_BACKOFF_SECONDS = 300
-DEFAULT_SERVICES = ("ollama", "gateway", "config", "telegram", "openbrain", "disk", "memory")
+DEFAULT_PWA_RELEASE_ROOT = PROJECT_DIR.parent / "hermes-agent-pwa-releases"
+DEFAULT_PWA_STATUS_URLS = (
+    "http://127.0.0.1:9219/api/status",
+    "https://mini-mh.tailbd0650.ts.net/api/status",
+)
+DEFAULT_SERVICES = ("ollama", "gateway", "pwa", "config", "telegram", "openbrain", "disk", "memory")
 
 
 def _utc_now() -> datetime:
@@ -444,6 +449,76 @@ def _check_gateway() -> CheckResult:
     return CheckResult("gateway", True, f"{gateway_state} (pid {pid})", "ok", {"gateway_state": gateway_state, "pid": pid})
 
 
+def _check_pwa(
+    *,
+    release_root: Path = DEFAULT_PWA_RELEASE_ROOT,
+    status_urls: tuple[str, ...] = DEFAULT_PWA_STATUS_URLS,
+) -> CheckResult:
+    current = release_root / "current"
+    if not current.is_symlink():
+        return CheckResult("pwa", False, f"missing atomic current link at {current}", "release:current-missing")
+
+    try:
+        target = os.readlink(current)
+        stamp_path = release_root / target / "pwa-release.json"
+        metadata = json.loads(stamp_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return CheckResult(
+            "pwa",
+            False,
+            f"could not read served build stamp: {type(exc).__name__}: {exc}",
+            f"release:stamp:{type(exc).__name__}",
+        )
+
+    release_id = str(metadata.get("release_id") or "")
+    commit = str(metadata.get("commit") or "")
+    if not release_id or not commit or Path(target).name != release_id:
+        return CheckResult("pwa", False, "current release and build stamp do not agree", "release:stamp-mismatch")
+
+    if sys.platform == "darwin":
+        getuid = getattr(os, "getuid", None)
+        if getuid is None:
+            return CheckResult("pwa", False, "cannot determine launchd user domain", "launchd:no-uid")
+        launchd = subprocess.run(
+            ["launchctl", "print", f"gui/{getuid()}/com.mh.hermes-pwa"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        if launchd.returncode != 0:
+            return CheckResult("pwa", False, "com.mh.hermes-pwa is not loaded", "launchd:not-loaded")
+
+    timeout = _parse_float_env("HERMES_HEALTH_HTTP_TIMEOUT_SECONDS", DEFAULT_HTTP_TIMEOUT_SECONDS)
+    for url in status_urls:
+        try:
+            status_code, payload = _http_json(url, timeout=timeout)
+        except Exception as exc:
+            return CheckResult(
+                "pwa",
+                False,
+                f"{url} failed: {type(exc).__name__}: {exc}",
+                f"http:{url}:{type(exc).__name__}",
+                {"release_id": release_id, "commit": commit},
+            )
+        if status_code != 200 or not isinstance(payload, dict) or not payload.get("version"):
+            return CheckResult(
+                "pwa",
+                False,
+                f"{url} returned an invalid status response",
+                f"http:{url}:{status_code}",
+                {"release_id": release_id, "commit": commit},
+            )
+
+    return CheckResult(
+        "pwa",
+        True,
+        f"ok ({release_id}, loopback + tailnet)",
+        "ok",
+        {"release_id": release_id, "commit": commit, "status_urls": list(status_urls)},
+    )
+
+
 def _check_telegram() -> CheckResult:
     token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
     if not token:
@@ -613,6 +688,7 @@ def _build_monitor(*, state_path: Path, log_path: Path) -> HealthMonitor:
         checkers={
             "ollama": _check_ollama,
             "gateway": _check_gateway,
+            "pwa": _check_pwa,
             "config": _check_config,
             "telegram": _check_telegram,
             "openbrain": _check_openbrain,

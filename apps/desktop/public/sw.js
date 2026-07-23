@@ -7,10 +7,12 @@
  *                              offline/reconnect document.
  *   - static assets (hashed):  cache-first with background fill.
  *
- * Bump VERSION to invalidate every cache after a breaking change.
+ * The release command replaces the placeholder with the immutable release
+ * stamp, so each promoted build owns a distinct cache.
  */
-const VERSION = 'hermes-pwa-v3'
+const VERSION = 'hermes-pwa-__HERMES_PWA_BUILD_STAMP__'
 const OFFLINE_URL = '/__hermes_pwa_offline__'
+const RELEASE_METADATA_URL = '/pwa-release.json'
 
 const offlineResponse = () =>
   new Response(
@@ -50,7 +52,12 @@ self.addEventListener('fetch', event => {
   }
 
   // The live API (REST + WS upgrade) must never be served from cache.
-  if (url.pathname === '/api' || url.pathname.startsWith('/api/') || isAuthRoute(url.pathname)) {
+  if (
+    url.pathname === '/api' ||
+    url.pathname.startsWith('/api/') ||
+    url.pathname === RELEASE_METADATA_URL ||
+    isAuthRoute(url.pathname)
+  ) {
     return
   }
 

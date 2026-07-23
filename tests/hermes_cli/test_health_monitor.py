@@ -4,7 +4,7 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-from scripts.hermes_health_monitor import CheckResult, HealthMonitor, RestartResult, _check_config
+from scripts.hermes_health_monitor import CheckResult, HealthMonitor, RestartResult, _check_config, _check_pwa
 
 
 def _now() -> datetime:
@@ -146,3 +146,46 @@ def test_check_config_skips_when_file_missing(tmp_path, monkeypatch):
 
     assert result.ok is True
     assert result.skipped is True
+
+
+def test_check_pwa_verifies_atomic_stamp_and_both_network_paths(tmp_path, monkeypatch):
+    release_root = tmp_path / "releases-root"
+    release_id = "20260723T120000Z-aaaaaaaaaaaa"
+    release = release_root / "releases" / release_id
+    release.mkdir(parents=True)
+    (release / "pwa-release.json").write_text(
+        json.dumps({"release_id": release_id, "commit": "a" * 40}),
+        encoding="utf-8",
+    )
+    (release_root / "current").symlink_to(f"releases/{release_id}")
+    requested: list[str] = []
+    monkeypatch.setattr("scripts.hermes_health_monitor.sys.platform", "linux")
+    monkeypatch.setattr(
+        "scripts.hermes_health_monitor._http_json",
+        lambda url, **_kwargs: requested.append(url) or (200, {"version": "0.17.0"}),
+    )
+
+    result = _check_pwa(
+        release_root=release_root,
+        status_urls=("http://loopback/api/status", "https://tailnet/api/status"),
+    )
+
+    assert result.ok is True
+    assert result.metadata == {"release_id": release_id, "commit": "a" * 40, "status_urls": requested}
+    assert requested == ["http://loopback/api/status", "https://tailnet/api/status"]
+
+
+def test_check_pwa_rejects_stamp_that_does_not_match_current_target(tmp_path):
+    release_root = tmp_path / "releases-root"
+    release = release_root / "releases" / "release-a"
+    release.mkdir(parents=True)
+    (release / "pwa-release.json").write_text(
+        json.dumps({"release_id": "release-b", "commit": "b" * 40}),
+        encoding="utf-8",
+    )
+    (release_root / "current").symlink_to("releases/release-a")
+
+    result = _check_pwa(release_root=release_root, status_urls=())
+
+    assert result.ok is False
+    assert result.fingerprint == "release:stamp-mismatch"

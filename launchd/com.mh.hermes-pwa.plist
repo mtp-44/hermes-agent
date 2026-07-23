@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
     <!-- Tailnet PWA backend: serves the plain-browser build of the desktop
-         renderer (apps/desktop/dist-pwa) on loopback; `tailscale serve`
+         renderer (the atomic PWA release `current` symlink) on loopback; `tailscale serve`
          terminates HTTPS at https://mini-mh.tailbd0650.ts.net and proxies
          here (its config persists in tailscaled independently).
 
@@ -47,7 +47,7 @@
         <key>HOME</key>
         <string>/Users/mh</string>
         <key>HERMES_WEB_DIST</key>
-        <string>/Users/mh/ai/agents/hermes-agent/apps/desktop/dist-pwa</string>
+        <string>/Users/mh/ai/agents/hermes-agent-pwa-releases/current</string>
         <key>HERMES_DASHBOARD_PUBLIC_URL</key>
         <string>https://mini-mh.tailbd0650.ts.net</string>
         <key>HERMES_DASHBOARD_BASIC_AUTH_TTL_SECONDS</key>
