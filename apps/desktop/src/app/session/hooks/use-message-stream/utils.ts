@@ -81,6 +81,23 @@ export function completionErrorText(finalText: string): string | null {
   return text && COMPLETION_ERROR_PATTERNS.some(re => re.test(text)) ? text : null
 }
 
+export function settleInterruptedCompletion(state: ClientSessionState): ClientSessionState | null {
+  if (!state.interrupted) {
+    return null
+  }
+
+  return {
+    ...state,
+    awaitingResponse: false,
+    busy: false,
+    needsInput: false,
+    pendingBranchGroup: null,
+    pendingMessageActions: undefined,
+    streamId: null,
+    turnStartedAt: null
+  }
+}
+
 export const SUBAGENT_EVENT_TYPES = new Set([
   'subagent.spawn_requested',
   'subagent.start',

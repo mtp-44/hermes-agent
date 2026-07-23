@@ -3,16 +3,33 @@
  *
  * Strategy:
  *   - /api/* and non-GET:      never touched — the live gateway is the app.
- *   - navigations:             network-first, falling back to the cached shell
- *                              so the installed PWA still opens offline.
+ *   - navigations:             network-first, falling back to a credential-free
+ *                              offline/reconnect document.
  *   - static assets (hashed):  cache-first with background fill.
  *
  * Bump VERSION to invalidate every cache after a breaking change.
  */
-const VERSION = 'hermes-pwa-v2'
+const VERSION = 'hermes-pwa-v3'
+const OFFLINE_URL = '/__hermes_pwa_offline__'
 
-self.addEventListener('install', () => {
-  self.skipWaiting()
+const offlineResponse = () =>
+  new Response(
+    '<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1">' +
+      '<title>Hermes offline</title></head><body><main><h1>Hermes is offline</h1>' +
+      '<p>Reconnect to the tailnet and reload this page.</p></main></body></html>',
+    { headers: { 'Content-Type': 'text/html; charset=utf-8' } }
+  )
+
+const isAuthRoute = pathname =>
+  pathname === '/login' || pathname === '/logout' || pathname === '/auth' || pathname.startsWith('/auth/')
+
+self.addEventListener('install', event => {
+  event.waitUntil(
+    caches
+      .open(VERSION)
+      .then(cache => cache.put(OFFLINE_URL, offlineResponse()))
+      .then(() => self.skipWaiting())
+  )
 })
 
 self.addEventListener('activate', event => {
@@ -33,23 +50,16 @@ self.addEventListener('fetch', event => {
   }
 
   // The live API (REST + WS upgrade) must never be served from cache.
-  if (url.pathname === '/api' || url.pathname.startsWith('/api/')) {
+  if (url.pathname === '/api' || url.pathname.startsWith('/api/') || isAuthRoute(url.pathname)) {
     return
   }
 
-  // App-shell navigations: network-first so the injected session token stays
-  // fresh; cached shell keeps the PWA opening when the gateway is unreachable.
+  // App-shell navigations: network-first. Never cache the live HTML because it
+  // can contain an injected loopback session token. The offline fallback is a
+  // static credential-free document created during service-worker install.
   if (request.mode === 'navigate') {
     event.respondWith(
-      fetch(request)
-        .then(response => {
-          if (response.ok) {
-            const copy = response.clone()
-            caches.open(VERSION).then(cache => cache.put('/', copy))
-          }
-          return response
-        })
-        .catch(() => caches.match('/'))
+      fetch(request).catch(() => caches.match(OFFLINE_URL).then(response => response || offlineResponse()))
     )
     return
   }

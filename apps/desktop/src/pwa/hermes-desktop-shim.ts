@@ -54,7 +54,12 @@ export function isAuthGated(): boolean {
 /** Send the browser to the gateway's login page, preserving the location. */
 export function redirectToLogin(): void {
   const next = encodeURIComponent(window.location.pathname + window.location.hash)
-  window.location.replace(`/login?next=${next}`)
+  const url = `/login?next=${next}`
+
+  // Expose a non-sensitive signal for diagnostics/tests before navigation
+  // tears down the page. Never include the failed request or response body.
+  window.dispatchEvent(new CustomEvent('hermes:pwa-login-required', { detail: { url } }))
+  window.location.replace(url)
 }
 
 async function mintWsTicket(): Promise<string> {
@@ -78,6 +83,26 @@ async function mintWsTicket(): Promise<string> {
 }
 
 function resolveSessionToken(): string {
+  if (isAuthGated()) {
+    // Auth-gated deployments use only HttpOnly cookies + single-use WS
+    // tickets. Remove legacy/debug token artifacts so they cannot survive in
+    // browser storage or a copied production URL.
+    try {
+      localStorage.removeItem(TOKEN_STORAGE_KEY)
+      const url = new URL(window.location.href)
+
+      if (url.searchParams.has('token')) {
+        url.searchParams.delete('token')
+        window.history.replaceState(window.history.state, '', `${url.pathname}${url.search}${url.hash}`)
+      }
+    } catch {
+      // Storage/history can be unavailable in hardened browser contexts. The
+      // gated connection still returns no token below.
+    }
+
+    return ''
+  }
+
   // Primary: the gateway injects the token into the HTML it serves.
   const injected = window.__HERMES_SESSION_TOKEN__
   if (injected) {
@@ -119,7 +144,11 @@ function buildConnection(token: string): HermesConnection {
 }
 
 /** Same-origin fetch mirroring electron/main.cjs `fetchJson` semantics. */
-async function apiFetch<T>(token: string, request: HermesApiRequest): Promise<T> {
+export async function apiFetch<T>(
+  token: string,
+  request: HermesApiRequest,
+  onUnauthorized: () => void = redirectToLogin
+): Promise<T> {
   const timeoutMs =
     Number.isFinite(request.timeoutMs) && (request.timeoutMs as number) > 0
       ? (request.timeoutMs as number)
@@ -137,6 +166,15 @@ async function apiFetch<T>(token: string, request: HermesApiRequest): Promise<T>
     body: request.body === undefined ? undefined : JSON.stringify(request.body),
     signal: AbortSignal.timeout(timeoutMs)
   })
+
+  if (response.status === 401 && isAuthGated()) {
+    // Do not read or surface the response body: it may reflect request
+    // details. The auth gate is the only layer that should explain this
+    // failure to the user.
+    onUnauthorized()
+    throw new Error('Session expired — redirecting to login')
+  }
+
   const text = await response.text()
 
   if (response.status >= 400) {

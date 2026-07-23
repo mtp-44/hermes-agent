@@ -10,6 +10,7 @@ import { coerceGatewayText, coerceThinkingText, normalizePersonalityValue } from
 import { playCompletionSound } from '@/lib/completion-sound'
 import { gatewayEventRequiresSessionId } from '@/lib/gateway-events'
 import { triggerHaptic } from '@/lib/haptics'
+import { normalizeMessageActions, routeMessageActions } from '@/lib/message-actions'
 import { isProviderSetupErrorMessage } from '@/lib/provider-setup-errors'
 import { clearClarifyRequest, setClarifyRequest } from '@/store/clarify'
 import { setSessionCompacting } from '@/store/compaction'
@@ -348,27 +349,16 @@ export function useGatewayEventHandler(deps: GatewayEventDeps) {
           return
         }
 
-        const actions = (payload?.actions ?? [])
-          .filter(action => action && action.label && action.callback_id)
-          .map(action => ({ label: String(action.label), callback_id: String(action.callback_id) }))
+        const actions = normalizeMessageActions(payload?.actions)
 
         if (actions.length) {
           updateSessionState(sessionId, state => {
-            const reverseIndex = [...state.messages]
-              .reverse()
-              .findIndex(message => message.role === 'assistant' && !message.hidden && !message.pending)
-
-            if (reverseIndex < 0) {
-              return state
-            }
-
-            const index = state.messages.length - 1 - reverseIndex
+            const routed = routeMessageActions(state.messages, actions)
 
             return {
               ...state,
-              messages: state.messages.map((message, messageIndex) =>
-                messageIndex === index ? { ...message, actions } : message
-              )
+              messages: routed.messages,
+              pendingMessageActions: routed.pendingMessageActions
             }
           })
         }

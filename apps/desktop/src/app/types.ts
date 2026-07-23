@@ -1,6 +1,6 @@
 import type * as React from 'react'
 
-import type { ChatMessage } from '@/lib/chat-messages'
+import type { ChatMessage, ChatMessageAction } from '@/lib/chat-messages'
 
 export interface ContextSuggestion {
   text: string
@@ -150,6 +150,8 @@ export interface ClientSessionState {
   sawAssistantPayload: boolean
   pendingBranchGroup: string | null
   interrupted: boolean
+  /** Action chips that arrived before their assistant completion event. */
+  pendingMessageActions?: ChatMessageAction[]
   /** A blocking clarify prompt is waiting on the user for this session. Drives
    *  the sidebar "needs input" indicator; cleared when the turn resumes/ends. */
   needsInput: boolean

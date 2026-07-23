@@ -192,6 +192,31 @@ describe('useRouteResume', () => {
     expect(resumeSession).toHaveBeenCalledWith('session-2', true)
   })
 
+  it('resumes the same durable routed session on a fresh page load', () => {
+    const resumeSession = vi.fn(async () => undefined)
+
+    render(
+      <RouteResumeHarness
+        activeSessionId={null}
+        activeSessionIdRef={{ current: null }}
+        creatingSessionRef={{ current: false }}
+        currentView="chat"
+        freshDraftReady={false}
+        gatewayState="open"
+        locationPathname="/session-durable"
+        resumeSession={resumeSession}
+        routedSessionId="session-durable"
+        runtimeIdByStoredSessionIdRef={{ current: new Map() }}
+        selectedStoredSessionId={null}
+        selectedStoredSessionIdRef={{ current: null }}
+        startFreshSessionDraft={vi.fn()}
+      />
+    )
+
+    expect(resumeSession).toHaveBeenCalledOnce()
+    expect(resumeSession).toHaveBeenCalledWith('session-durable', true)
+  })
+
   it('resumes the selected route again when the gateway reconnects', () => {
     const resumeSession = vi.fn(async () => undefined)
     const startFreshSessionDraft = vi.fn()

@@ -2,11 +2,14 @@ import { describe, expect, it } from 'vitest'
 
 import type { GatewayEventPayload } from '@/lib/chat-messages'
 
+import type { ClientSessionState } from '../../../types'
+
 import {
   completionErrorText,
   delegateTaskPayloads,
   hasSessionInfoStatePatch,
   sessionInfoStatePatch,
+  settleInterruptedCompletion,
   toTodoPayload
 } from './utils'
 
@@ -19,6 +22,47 @@ describe('completionErrorText', () => {
     expect(completionErrorText('Gateway error: nope')).toMatch(/^Gateway error/)
     expect(completionErrorText('here is your answer')).toBeNull()
     expect(completionErrorText('   ')).toBeNull()
+  })
+})
+
+describe('settleInterruptedCompletion', () => {
+  it('cannot append or duplicate a late final message after interruption', () => {
+    const state: ClientSessionState = {
+      storedSessionId: 'stored-1',
+      messages: [
+        {
+          id: 'assistant-stream',
+          role: 'assistant',
+          parts: [{ type: 'text', text: 'kept partial response' }],
+          pending: false
+        }
+      ],
+      branch: '',
+      cwd: '',
+      model: '',
+      provider: '',
+      reasoningEffort: '',
+      serviceTier: '',
+      fast: false,
+      yolo: false,
+      personality: '',
+      busy: true,
+      awaitingResponse: true,
+      streamId: 'assistant-stream',
+      sawAssistantPayload: true,
+      pendingBranchGroup: null,
+      interrupted: true,
+      needsInput: false,
+      turnStartedAt: 1
+    }
+
+    const once = settleInterruptedCompletion(state)
+    const twice = settleInterruptedCompletion(once!)
+
+    expect(twice?.messages).toEqual(state.messages)
+    expect(twice?.messages).toHaveLength(1)
+    expect(twice?.streamId).toBeNull()
+    expect(twice?.busy).toBe(false)
   })
 })
 

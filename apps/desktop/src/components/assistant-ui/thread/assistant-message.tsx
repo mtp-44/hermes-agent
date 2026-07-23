@@ -151,7 +151,7 @@ export const AssistantMessage: FC<{
 /** Interactive chips under a reply (`message.actions`): a press POSTs the
  *  callback id to `/api/actions/dispatch` (the shared plugin `act:` handler
  *  seam) and swaps the chips for the handler's short ack line. */
-const MessageActionChips: FC<{ actions: ChatMessageAction[] }> = ({ actions }) => {
+export const MessageActionChips: FC<{ actions: ChatMessageAction[] }> = ({ actions }) => {
   const [ack, setAck] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
 

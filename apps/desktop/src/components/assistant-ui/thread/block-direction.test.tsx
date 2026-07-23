@@ -7,8 +7,8 @@
 // blocks stay attribute-free (the plaintext CSS owns them). jsdom does not
 // resolve dir="auto", so the contract is asserted at the attribute level.
 import { AssistantRuntimeProvider, type ThreadMessage, useExternalStoreRuntime } from '@assistant-ui/react'
-import { render, screen } from '@testing-library/react'
-import { describe, expect, it, vi } from 'vitest'
+import { cleanup, render, screen } from '@testing-library/react'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { Thread } from '.'
 
@@ -89,6 +89,10 @@ function Harness({ text }: { text: string }) {
 }
 
 describe('block-level direction chrome', () => {
+  afterEach(() => {
+    cleanup()
+  })
+
   it('lists carry dir="auto" so markers follow the resolved direction', async () => {
     render(<Harness text={'מקומות:\n\n1. חוף גורדון\n2. שוק הכרמל\n\n- פריט\n- item'} />)
 

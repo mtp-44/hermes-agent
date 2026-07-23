@@ -19,6 +19,7 @@ import {
   generatedImageEchoSources,
   stripGeneratedImageEchoes
 } from '@/lib/generated-images'
+import { attachActionsToLastCompletedAssistant } from '@/lib/message-actions'
 import { parseTodos } from '@/lib/todos'
 import { dispatchNativeNotification } from '@/store/native-notifications'
 import { broadcastSessionsChanged } from '@/store/session-sync'
@@ -28,7 +29,7 @@ import { setSessionTodos } from '@/store/todos'
 import type { ClientSessionState } from '../../../types'
 
 import { useGatewayEventHandler } from './gateway-event'
-import { completionErrorText, delegateTaskPayloads, STREAM_DELTA_FLUSH_MS } from './utils'
+import { completionErrorText, delegateTaskPayloads, settleInterruptedCompletion, STREAM_DELTA_FLUSH_MS } from './utils'
 
 interface MessageStreamOptions {
   activeSessionIdRef: MutableRefObject<string | null>
@@ -339,16 +340,10 @@ export function useMessageStream({
         // already finalized the bubble (kept the partial text, dropped it if
         // empty). Re-running the dedupe below would replace the partial with
         // the just-cancelled full text, so we settle and bail instead.
-        if (state.interrupted) {
-          return {
-            ...state,
-            awaitingResponse: false,
-            busy: false,
-            needsInput: false,
-            pendingBranchGroup: null,
-            streamId: null,
-            turnStartedAt: null
-          }
+        const interruptedState = settleInterruptedCompletion(state)
+
+        if (interruptedState) {
+          return interruptedState
         }
 
         const streamId = state.streamId
@@ -426,6 +421,10 @@ export function useMessageStream({
           }
         }
 
+        if (state.pendingMessageActions?.length) {
+          nextMessages = attachActionsToLastCompletedAssistant(nextMessages, state.pendingMessageActions)
+        }
+
         const hasInlineError = nextMessages.some(m => m.role === 'assistant' && m.error && !m.hidden)
         const lastVisible = [...nextMessages].reverse().find(m => !m.hidden)
         const unresolvedUserTail = lastVisible?.role === 'user'
@@ -437,6 +436,7 @@ export function useMessageStream({
           messages: nextMessages,
           streamId: null,
           pendingBranchGroup: null,
+          pendingMessageActions: undefined,
           awaitingResponse: false,
           busy: false,
           needsInput: false,
