@@ -1,5 +1,7 @@
 """Tests for tools/tool_result_storage.py -- 3-layer tool result persistence."""
 
+import os
+
 import pytest
 from unittest.mock import MagicMock, patch
 
@@ -17,6 +19,7 @@ from tools.tool_result_storage import (
     _heredoc_marker,
     _resolve_storage_dir,
     _safe_result_filename,
+    _write_local_fallback,
     _write_to_sandbox,
     enforce_turn_budget,
     generate_preview,
@@ -156,6 +159,35 @@ class TestWriteToSandbox:
         assert "'/tmp/x; rm -rf /; echo .txt'" in cmd
 
 
+class TestWriteLocalFallback:
+    def test_writes_file_and_returns_path(self, tmp_path):
+        with patch("tools.tool_result_storage.tempfile.gettempdir", return_value=str(tmp_path)):
+            path = _write_local_fallback("hello world", "tc_local")
+        assert path == str(tmp_path / "hermes-results" / "tc_local.txt")
+        assert (tmp_path / "hermes-results" / "tc_local.txt").read_text() == "hello world"
+
+    def test_sanitizes_tool_use_id(self, tmp_path):
+        with patch("tools.tool_result_storage.tempfile.gettempdir", return_value=str(tmp_path)):
+            path = _write_local_fallback("content", "../outside/$(whoami);x")
+        assert path is not None
+        assert "/../" not in path
+        assert "$" not in os.path.basename(path)
+        # File landed inside the storage dir, not outside it
+        assert path.startswith(str(tmp_path / "hermes-results"))
+
+    def test_returns_none_on_oserror(self, tmp_path):
+        with patch("tools.tool_result_storage.tempfile.gettempdir", return_value=str(tmp_path)), \
+             patch("tools.tool_result_storage.os.makedirs", side_effect=OSError("read-only fs")):
+            path = _write_local_fallback("content", "tc_fail")
+        assert path is None
+
+    def test_unicode_content(self, tmp_path):
+        content = "日本語テスト\n" * 100
+        with patch("tools.tool_result_storage.tempfile.gettempdir", return_value=str(tmp_path)):
+            path = _write_local_fallback(content, "tc_uni")
+        assert (tmp_path / "hermes-results" / "tc_uni.txt").read_text(encoding="utf-8") == content
+
+
 class TestResolveStorageDir:
     def test_defaults_to_storage_dir_without_env(self):
         assert _resolve_storage_dir(None) == STORAGE_DIR
@@ -267,45 +299,74 @@ class TestMaybePersistToolResult:
         # command string — see test_large_content_via_stdin for why).
         assert env.execute.call_args[1]["stdin_data"] == content
 
-    def test_above_threshold_no_env_truncates_inline(self):
+    def test_above_threshold_no_env_persists_to_host(self, tmp_path):
+        """MCP-tool-only turn regression (#strava): no sandbox env exists,
+        but the result must still be spilled to a file the model can
+        read_file, not inline-truncated."""
         content = "x" * 60_000
-        result = maybe_persist_tool_result(
-            content=content,
-            tool_name="terminal",
-            tool_use_id="tc_789",
-            env=None,
-            threshold=30_000,
-        )
-        assert PERSISTED_OUTPUT_TAG not in result
-        assert "Truncated" in result
+        with patch("tools.tool_result_storage.tempfile.gettempdir", return_value=str(tmp_path)):
+            result = maybe_persist_tool_result(
+                content=content,
+                tool_name="strava_activities",
+                tool_use_id="tc_789",
+                env=None,
+                threshold=30_000,
+            )
+        assert PERSISTED_OUTPUT_TAG in result
+        local_path = tmp_path / "hermes-results" / "tc_789.txt"
+        assert str(local_path) in result
+        assert local_path.read_text() == content
         assert len(result) < len(content)
 
-    def test_env_write_failure_falls_back_to_truncation(self):
+    def test_env_write_failure_falls_back_to_host(self, tmp_path):
         env = MagicMock()
         env.execute.return_value = {"output": "disk full", "returncode": 1}
         content = "x" * 60_000
-        result = maybe_persist_tool_result(
-            content=content,
-            tool_name="terminal",
-            tool_use_id="tc_fail",
-            env=env,
-            threshold=30_000,
-        )
-        assert PERSISTED_OUTPUT_TAG not in result
-        assert "Truncated" in result
+        with patch("tools.tool_result_storage.tempfile.gettempdir", return_value=str(tmp_path)):
+            result = maybe_persist_tool_result(
+                content=content,
+                tool_name="terminal",
+                tool_use_id="tc_fail",
+                env=env,
+                threshold=30_000,
+            )
+        assert PERSISTED_OUTPUT_TAG in result
+        assert (tmp_path / "hermes-results" / "tc_fail.txt").read_text() == content
 
-    def test_env_execute_exception_falls_back(self):
+    def test_env_execute_exception_falls_back_to_host(self, tmp_path):
         env = MagicMock()
         env.execute.side_effect = RuntimeError("connection lost")
         content = "x" * 60_000
-        result = maybe_persist_tool_result(
-            content=content,
-            tool_name="terminal",
-            tool_use_id="tc_exc",
-            env=env,
-            threshold=30_000,
-        )
+        with patch("tools.tool_result_storage.tempfile.gettempdir", return_value=str(tmp_path)):
+            result = maybe_persist_tool_result(
+                content=content,
+                tool_name="terminal",
+                tool_use_id="tc_exc",
+                env=env,
+                threshold=30_000,
+            )
+        assert PERSISTED_OUTPUT_TAG in result
+        assert (tmp_path / "hermes-results" / "tc_exc.txt").read_text() == content
+
+    def test_both_writes_fail_truncates_inline(self, tmp_path):
+        """Inline truncation is the last resort when the sandbox write AND
+        the host fallback both fail."""
+        env = MagicMock()
+        env.execute.return_value = {"output": "disk full", "returncode": 1}
+        content = "x" * 60_000
+        with patch(
+            "tools.tool_result_storage._write_local_fallback", return_value=None
+        ):
+            result = maybe_persist_tool_result(
+                content=content,
+                tool_name="terminal",
+                tool_use_id="tc_allfail",
+                env=env,
+                threshold=30_000,
+            )
+        assert PERSISTED_OUTPUT_TAG not in result
         assert "Truncated" in result
+        assert len(result) < len(content)
 
     def test_read_file_never_persisted(self):
         """read_file has threshold=inf, should never be persisted."""
@@ -511,13 +572,15 @@ class TestEnforceTurnBudget:
         )
         assert persisted_count >= 2  # Need to shed at least ~52K
 
-    def test_no_env_falls_back_to_truncation(self):
+    def test_no_env_persists_to_host(self, tmp_path):
         msgs = [
             {"role": "tool", "tool_call_id": "t1", "content": "x" * 250_000},
         ]
-        enforce_turn_budget(msgs, env=None, config=BudgetConfig(turn_budget=200_000))
-        # Should be truncated (no sandbox available)
-        assert "Truncated" in msgs[0]["content"] or PERSISTED_OUTPUT_TAG in msgs[0]["content"]
+        with patch("tools.tool_result_storage.tempfile.gettempdir", return_value=str(tmp_path)):
+            enforce_turn_budget(msgs, env=None, config=BudgetConfig(turn_budget=200_000))
+        # No sandbox available -> host filesystem fallback
+        assert PERSISTED_OUTPUT_TAG in msgs[0]["content"]
+        assert (tmp_path / "hermes-results" / "t1.txt").read_text() == "x" * 250_000
 
     def test_returns_same_list(self):
         msgs = [{"role": "tool", "tool_call_id": "t1", "content": "ok"}]

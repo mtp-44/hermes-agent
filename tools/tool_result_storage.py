@@ -13,7 +13,10 @@ Defense against context-window overflow operates at three levels:
    standard Linux, or $TMPDIR/hermes-results/{tool_use_id}.txt on Termux)
    via env.execute(). The in-context content is replaced with a preview +
    file path reference. The model can read_file to access the full output
-   on any backend.
+   on any backend. When no sandbox env exists (e.g. an MCP-tool-only turn
+   that never triggered environment provisioning) or the sandbox write
+   fails, the output is written to the host temp dir instead — read_file
+   resolves paths on the host, so the model can still access it.
 
 3. **Per-turn aggregate budget** (enforce_turn_budget): After all tool
    results in a single assistant turn are collected, if the total exceeds
@@ -27,6 +30,7 @@ import logging
 import os
 import re
 import shlex
+import tempfile
 import uuid
 
 from tools.budget_config import (
@@ -97,6 +101,29 @@ def _heredoc_marker(content: str) -> str:
     return f"HERMES_PERSIST_{uuid.uuid4().hex[:8]}"
 
 
+def _write_local_fallback(content: str, tool_use_id: str) -> str | None:
+    """Write content to the host temp dir. Returns the path, or None on failure.
+
+    Fallback for when no sandbox environment exists (``env is None``) or the
+    sandbox write failed. An MCP-tool-only turn never provisions a sandbox
+    (``get_active_env`` returns None until terminal/execute_code first runs),
+    but ``read_file`` resolves paths on the host filesystem regardless — so a
+    host-side write still gives the model full access to the output. Uses
+    ``tempfile.gettempdir()`` so the path is valid on macOS, Linux, and Termux
+    hosts alike.
+    """
+    local_dir = os.path.join(tempfile.gettempdir(), "hermes-results")
+    local_path = os.path.join(local_dir, _safe_result_filename(tool_use_id))
+    try:
+        os.makedirs(local_dir, exist_ok=True)
+        with open(local_path, "w", encoding="utf-8") as f:
+            f.write(content)
+    except OSError as exc:
+        logger.warning("Local fallback write failed for %s: %s", tool_use_id, exc)
+        return None
+    return local_path
+
+
 def _write_to_sandbox(content: str, remote_path: str, env) -> bool:
     """Write content into the sandbox via env.execute(). Returns True on success.
 
@@ -152,8 +179,10 @@ def maybe_persist_tool_result(
     """Layer 2: persist oversized result into the sandbox, return preview + path.
 
     Writes via env.execute() so the file is accessible from any backend
-    (local, Docker, SSH, Modal, Daytona). Falls back to inline truncation
-    if write fails or no env is available.
+    (local, Docker, SSH, Modal, Daytona). If no env is available or the
+    sandbox write fails, writes to the host temp dir instead (read_file
+    resolves paths on the host). Inline truncation is the last resort,
+    used only when both writes fail.
 
     Args:
         content: Raw tool result string.
@@ -189,14 +218,25 @@ def maybe_persist_tool_result(
         except Exception as exc:
             logger.warning("Sandbox write failed for %s: %s", tool_use_id, exc)
 
+    # No sandbox (e.g. MCP-tool-only turn, env never provisioned) or the
+    # sandbox write failed: persist to the host filesystem instead, which
+    # read_file can access directly.
+    local_path = _write_local_fallback(content, tool_use_id)
+    if local_path is not None:
+        logger.info(
+            "Persisted large tool result to host filesystem: %s (%s, %d chars -> %s)",
+            tool_name, tool_use_id, len(content), local_path,
+        )
+        return _build_persisted_message(preview, has_more, len(content), local_path)
+
     logger.info(
-        "Inline-truncating large tool result: %s (%d chars, no sandbox write)",
+        "Inline-truncating large tool result: %s (%d chars, no sandbox or local write)",
         tool_name, len(content),
     )
     return (
         f"{preview}\n\n"
         f"[Truncated: tool response was {len(content):,} chars. "
-        f"Full output could not be saved to sandbox.]"
+        f"Full output could not be saved to a file.]"
     )
 
 
