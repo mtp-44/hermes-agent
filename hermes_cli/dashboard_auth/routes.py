@@ -193,6 +193,21 @@ async def auth_login(request: Request, provider: str, next: str = ""):
             detail=f"Provider does not support interactive login: {provider!r}",
         )
 
+    if getattr(p, "supports_password", False):
+        # Password-only providers (BasicAuthProvider) have no OAuth
+        # initiation flow — start_login raises NotImplementedError. Reaching
+        # this route with one is always a stale link (browsers — iOS Safari
+        # especially — cache the old auto-initiate 302 that used to point
+        # here) so redirect to the credential form instead of 500ing.
+        from urllib.parse import quote
+
+        target = _validate_post_login_target(next)
+        prefix = _prefix(request)
+        login_url = (
+            f"{prefix}/login?next={quote(target, safe='')}" if target else f"{prefix}/login"
+        )
+        return RedirectResponse(url=login_url, status_code=302)
+
     try:
         ls = p.start_login(redirect_uri=_redirect_uri(request))
     except ProviderError as e:

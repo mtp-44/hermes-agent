@@ -403,12 +403,44 @@ def should_require_auth(host: str, allow_public: bool = False) -> bool:
     return host not in _LOOPBACK_HOST_VALUES
 
 
-def _is_accepted_host(host_header: str, bound_host: str) -> bool:
+def _declared_public_host() -> str:
+    """Hostname (lowercase, port stripped) of the operator-declared public URL.
+
+    Reads ``HERMES_DASHBOARD_PUBLIC_URL`` (env) / ``dashboard.public_url``
+    (config.yaml) via :func:`resolve_public_url`; returns ``""`` when unset
+    or malformed.
+
+    Declaring a public URL means a TLS-terminating reverse proxy (tailscale
+    serve, Caddy, nginx) fronts this server for that hostname — typically
+    forwarding to a loopback bind, and passing the public hostname through
+    as ``Host``. Two consequences, applied by the callers: that hostname is
+    accepted by ``host_header_middleware`` (else every proxied request 400s
+    against the loopback allowlist), and ``start_server`` engages the auth
+    gate even on a loopback bind (a proxied dashboard is no longer reachable
+    only by the local operator). Coupling the two keeps the widened Host
+    allowlist from ever exposing an UNauthenticated surface.
+    """
+    try:
+        from urllib.parse import urlparse
+
+        from hermes_cli.dashboard_auth.prefix import resolve_public_url
+
+        url = resolve_public_url()
+        if not url:
+            return ""
+        return (urlparse(url).hostname or "").lower()
+    except Exception:
+        return ""
+
+
+def _is_accepted_host(host_header: str, bound_host: str, declared_public_host: str = "") -> bool:
     """True if the Host header targets the interface we bound to.
 
     Accepts:
     - Exact bound host (with or without port suffix)
     - Loopback aliases when bound to loopback
+    - The operator-declared public hostname (reverse proxy in front —
+      see ``_declared_public_host``; passing it also forces the auth gate)
     - Any host when bound to 0.0.0.0 (explicit opt-in to non-loopback,
       no protection possible at this layer)
     """
@@ -438,6 +470,12 @@ def _is_accepted_host(host_header: str, bound_host: str) -> bool:
     if bound_host in {"0.0.0.0", "::"}:
         return True
 
+    # Operator-declared public hostname (TLS-terminating reverse proxy in
+    # front). Never widens an unauthenticated surface: the same declaration
+    # forces the auth gate on in start_server.
+    if declared_public_host and host_only == declared_public_host.lower():
+        return True
+
     # Loopback bind: accept the loopback names
     bound_lc = bound_host.lower()
     if bound_lc in _LOOPBACK_HOST_VALUES:
@@ -464,7 +502,9 @@ async def host_header_middleware(request: Request, call_next):
     bound_host = getattr(app.state, "bound_host", None)
     if bound_host:
         host_header = request.headers.get("host", "")
-        if not _is_accepted_host(host_header, bound_host):
+        if not _is_accepted_host(
+            host_header, bound_host, getattr(app.state, "public_host", "")
+        ):
             return JSONResponse(
                 status_code=400,
                 content={
@@ -12187,7 +12227,8 @@ def _ws_host_origin_reason(ws: "WebSocket") -> Optional[str]:
         return None
 
     host_header = ws.headers.get("host", "")
-    if not _is_accepted_host(host_header, bound_host):
+    public_host = getattr(app.state, "public_host", "")
+    if not _is_accepted_host(host_header, bound_host, public_host):
         return f"host_mismatch host={host_header or '?'} bound={bound_host}"
 
     origin = ws.headers.get("origin", "")
@@ -12204,7 +12245,7 @@ def _ws_host_origin_reason(ws: "WebSocket") -> Optional[str]:
     if not parsed.netloc:
         return f"origin_mismatch origin={origin} bound={bound_host}"
 
-    if not _is_accepted_host(parsed.netloc, bound_host):
+    if not _is_accepted_host(parsed.netloc, bound_host, public_host):
         return f"origin_mismatch origin={origin} bound={bound_host}"
     return None
 
@@ -14190,7 +14231,20 @@ def start_server(
     # injection / WS-auth paths can branch on it consistently.  Phase 3.5
     # uses this to decide whether to refuse the bind, log the gate-on
     # banner, and enable uvicorn proxy_headers.
-    app.state.auth_required = should_require_auth(host)
+    #
+    # A declared public URL (HERMES_DASHBOARD_PUBLIC_URL / dashboard.public_url)
+    # means a TLS-terminating reverse proxy fronts this server — commonly
+    # forwarding to a loopback bind (tailscale serve, Caddy). That hostname is
+    # then accepted by host_header_middleware, and the gate MUST engage even
+    # on loopback: the dashboard is no longer local-operator-only.
+    app.state.public_host = _declared_public_host()
+    app.state.auth_required = should_require_auth(host) or bool(app.state.public_host)
+    if app.state.public_host and not should_require_auth(host):
+        _log.info(
+            "Public URL declared (%s): accepting it as Host and engaging the "
+            "auth gate despite the loopback bind.",
+            app.state.public_host,
+        )
 
     # ``--insecure`` no longer disables the auth gate (June 2026 hardening:
     # the hermes-0day MCP-persistence campaign abused unauthenticated public

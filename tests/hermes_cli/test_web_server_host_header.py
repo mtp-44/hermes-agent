@@ -215,3 +215,85 @@ class TestWebSocketHostOriginGuard:
             },
         ):
             pass
+
+
+class TestDeclaredPublicHost:
+    """Loopback bind behind a TLS-terminating reverse proxy (tailscale serve,
+    Caddy): the operator-declared public hostname is accepted as Host — and
+    only via the explicit third argument, which start_server couples to
+    forcing the auth gate on (so the widened allowlist never exposes an
+    unauthenticated surface)."""
+
+    def test_declared_host_accepted_on_loopback_bind(self):
+        from hermes_cli.web_server import _is_accepted_host
+
+        for host_header in (
+            "mini.tail1234.ts.net",
+            "mini.tail1234.ts.net:443",
+            "MINI.TAIL1234.TS.NET",
+        ):
+            assert _is_accepted_host(
+                host_header, "127.0.0.1", "mini.tail1234.ts.net"
+            ), f"declared public host must be accepted: {host_header!r}"
+
+    def test_attacker_hosts_still_rejected_with_declaration(self):
+        from hermes_cli.web_server import _is_accepted_host
+
+        for attacker in (
+            "evil.example",
+            "mini.tail1234.ts.net.evil.example",  # suffix trick
+            "evil-mini.tail1234.ts.net:443x",  # not an exact hostname match
+            "",
+        ):
+            assert not _is_accepted_host(
+                attacker, "127.0.0.1", "mini.tail1234.ts.net"
+            ), f"must reject {attacker!r}"
+
+    def test_no_declaration_keeps_loopback_allowlist(self):
+        from hermes_cli.web_server import _is_accepted_host
+
+        assert not _is_accepted_host("mini.tail1234.ts.net", "127.0.0.1", "")
+        assert _is_accepted_host("localhost:9119", "127.0.0.1", "")
+
+    def test_declared_public_host_forces_auth_gate(self, monkeypatch):
+        """start_server derives auth_required = non-loopback OR declared
+        public host; verify the helper resolves the env declaration."""
+        import hermes_cli.web_server as ws
+
+        monkeypatch.setenv(
+            "HERMES_DASHBOARD_PUBLIC_URL", "https://mini.tail1234.ts.net"
+        )
+        assert ws._declared_public_host() == "mini.tail1234.ts.net"
+        monkeypatch.setenv("HERMES_DASHBOARD_PUBLIC_URL", "")
+
+    def test_websocket_guard_accepts_declared_public_host(self, monkeypatch):
+        """Loopback bind behind a reverse proxy: the WS Host/Origin guard must
+        honour the declared public hostname exactly like the HTTP middleware —
+        FastAPI HTTP middleware does not run for WebSocket routes, so the
+        check is repeated in _ws_host_origin_reason (regression: the PWA's
+        gateway socket 4403'd through tailscale serve while HTTP passed)."""
+        from starlette.datastructures import Headers
+
+        import hermes_cli.web_server as ws
+
+        monkeypatch.setattr(ws.app.state, "bound_host", "127.0.0.1", raising=False)
+        monkeypatch.setattr(
+            ws.app.state, "public_host", "mini.tail1234.ts.net", raising=False
+        )
+
+        class _FakeWs:
+            headers = Headers(
+                {
+                    "host": "mini.tail1234.ts.net",
+                    "origin": "https://mini.tail1234.ts.net",
+                }
+            )
+
+        assert ws._ws_host_origin_reason(_FakeWs()) is None
+
+        class _EvilWs:
+            headers = Headers(
+                {"host": "evil.example", "origin": "https://evil.example"}
+            )
+
+        assert ws._ws_host_origin_reason(_EvilWs()) is not None
