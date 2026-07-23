@@ -222,6 +222,8 @@ export const ja = defineLocale({
       enableAll: '通知を有効にする',
       enableAllDesc: 'マスタースイッチ。オフにすると以下のすべての通知を無効にします。',
       focusedHint: '完了通知は Hermes がバックグラウンドにあるときのみ表示されます。',
+      pwaPushNotice:
+        'このインストールはクラウドプッシュを使用していません — Apple/Google のサーバーを経由するものは何もありません。通知はこのタブ／アプリを開いている間のみ表示されます。プロアクティブな通知は、設定済みの他のチャンネル（例: Telegram）経由で引き続き届きます。',
       kinds: {
         approval: {
           label: '承認が必要',

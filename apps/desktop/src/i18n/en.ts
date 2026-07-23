@@ -317,6 +317,8 @@ export const en: Translations = {
       enableAll: 'Enable notifications',
       enableAllDesc: 'Master switch. Turn this off to silence every notification below.',
       focusedHint: 'Completion alerts only fire while Hermes is in the background.',
+      pwaPushNotice:
+        "This install doesn't use cloud push — nothing is sent through Apple/Google servers. Notifications only fire while this tab or app is open; the brain's proactive nudges still reach you through your other configured channels (e.g. Telegram).",
       kinds: {
         approval: {
           label: 'Approval needed',

@@ -277,6 +277,7 @@ export interface Translations {
       enableAll: string
       enableAllDesc: string
       focusedHint: string
+      pwaPushNotice: string
       kinds: Record<
         'approval' | 'backgroundDone' | 'input' | 'turnDone' | 'turnError',
         { label: string; description: string }

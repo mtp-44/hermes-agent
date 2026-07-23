@@ -1,5 +1,5 @@
 import { useStore } from '@nanostores/react'
-import type { ReactNode } from 'react'
+import { type ReactNode, useEffect } from 'react'
 
 import { Button } from '@/components/ui/button'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
@@ -18,6 +18,7 @@ import {
   setNativeNotifyKind
 } from '@/store/native-notifications'
 import { notify } from '@/store/notifications'
+import { $desktopVersion, refreshDesktopVersion } from '@/store/updates'
 
 import { CONTROL_TEXT } from './constants'
 import { ListRow, SectionHeading, SettingsContent } from './primitives'
@@ -58,7 +59,15 @@ export function NotificationsSettings() {
   const { t } = useI18n()
   const prefs = useStore($nativeNotifyPrefs)
   const completionSoundVariantId = useStore($completionSoundVariantId)
+  const version = useStore($desktopVersion)
   const copy = t.settings.notifications
+
+  // The PWA shim reports platform 'web' (vs. Electron's darwin/win32/linux);
+  // $desktopVersion is only guaranteed populated once something on this
+  // mount has requested it (About does the same on its own mount).
+  useEffect(() => {
+    void refreshDesktopVersion()
+  }, [])
 
   const runTest = async () => {
     triggerHaptic('open')
@@ -70,6 +79,9 @@ export function NotificationsSettings() {
     <SettingsContent>
       <SectionHeading icon={Bell} title={copy.title} />
       <Caption className="mb-2 leading-(--conversation-caption-line-height)">{copy.intro}</Caption>
+      {version?.platform === 'web' && (
+        <Caption className="mb-2 leading-(--conversation-caption-line-height)">{copy.pwaPushNotice}</Caption>
+      )}
 
       <ToggleRow
         checked={prefs.enabled}

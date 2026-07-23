@@ -84,6 +84,20 @@
   }
 }
 
+/* Hover-gated row actions (Projects/workspace lane "+" and "…" buttons:
+ * WorkspaceAddButton/WorkspaceMenu in sidebar/projects/workspace-header.tsx)
+ * rely on `group-hover:opacity-100` with no `focus-visible` fallback, unlike
+ * their sibling HEADER_ACTION_BTN in sidebar/index.tsx. On a touch device
+ * there is no hover, so they stay invisible and unreachable — you can't start
+ * a new worktree session or open a worktree's menu from the Projects view on
+ * mobile. Force them visible on coarse pointers instead of chasing a
+ * tap-then-tap-target interaction. */
+@media (pointer: coarse) {
+  [class*='group-hover/workspace:opacity-100'] {
+    opacity: 1 !important;
+  }
+}
+
 /* The collapsed hover-reveal panes park off-canvas to the right via
  * translate-x. Chromium excludes transformed descendants from the root's
  * scrollable overflow; WebKit INCLUDES them — so iOS lets the page pan

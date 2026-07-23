@@ -216,6 +216,8 @@ export const zhHant = defineLocale({
       enableAll: '啟用通知',
       enableAllDesc: '總開關。關閉後會靜音下方所有通知。',
       focusedHint: '完成提醒僅在 Hermes 位於背景時觸發。',
+      pwaPushNotice:
+        '此安裝不使用雲端推播——不會透過 Apple/Google 伺服器傳送任何內容。通知僅在此分頁或應用程式開啟時觸發；系統的主動提醒仍會透過你設定的其他管道（例如 Telegram）送達。',
       kinds: {
         approval: {
           label: '需要核准',

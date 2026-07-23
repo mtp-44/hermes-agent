@@ -307,6 +307,8 @@ export const zh: Translations = {
       enableAll: '启用通知',
       enableAllDesc: '总开关。关闭后将静音下方所有通知。',
       focusedHint: '完成提醒仅在 Hermes 处于后台时触发。',
+      pwaPushNotice:
+        '此安装不使用云推送——不会经过 Apple/Google 服务器发送任何内容。通知仅在此标签页或应用打开时触发；系统的主动提醒仍会通过你配置的其他渠道（例如 Telegram）送达。',
       kinds: {
         approval: {
           label: '需要批准',
