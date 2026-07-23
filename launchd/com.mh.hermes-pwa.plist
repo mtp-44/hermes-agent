@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Tailnet PWA backend: serves the plain-browser build of the desktop
+         renderer (apps/desktop/dist-pwa) on loopback; `tailscale serve`
+         terminates HTTPS at https://mini-mh.tailbd0650.ts.net and proxies
+         here (its config persists in tailscaled independently).
+
+         Auth: HERMES_DASHBOARD_PUBLIC_URL forces the dashboard auth gate ON
+         despite the loopback bind (see web_server.py _declared_public_host);
+         credentials come from ~/.hermes/.env (HERMES_DASHBOARD_BASIC_AUTH_*),
+         so no secrets live in this plist.
+
+         MUST run via the repo .venv python — the ~/.local/bin/hermes shim
+         re-execs into the separate ~/.hermes/hermes-agent install, which
+         doesn't carry the repo's declared-public-host patches.
+
+         Load:    launchctl load ~/Library/LaunchAgents/com.mh.hermes-pwa.plist
+         Unload:  launchctl unload ~/Library/LaunchAgents/com.mh.hermes-pwa.plist
+         Install: cp launchd/com.mh.hermes-pwa.plist ~/Library/LaunchAgents/
+         Plan:    ~/ai/tailnet_pwa/ (README + CHECKLIST) -->
+    <key>Label</key>
+    <string>com.mh.hermes-pwa</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/mh/ai/agents/hermes-agent/.venv/bin/python</string>
+        <string>-m</string>
+        <string>hermes_cli.main</string>
+        <string>dashboard</string>
+        <string>--host</string>
+        <string>127.0.0.1</string>
+        <string>--port</string>
+        <string>9219</string>
+        <string>--no-open</string>
+        <string>--skip-build</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/mh/ai/agents/hermes-agent</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/Users/mh/.local/bin:/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin</string>
+        <key>HOME</key>
+        <string>/Users/mh</string>
+        <key>HERMES_WEB_DIST</key>
+        <string>/Users/mh/ai/agents/hermes-agent/apps/desktop/dist-pwa</string>
+        <key>HERMES_DASHBOARD_PUBLIC_URL</key>
+        <string>https://mini-mh.tailbd0650.ts.net</string>
+        <key>HERMES_DASHBOARD_BASIC_AUTH_TTL_SECONDS</key>
+        <string>2592000</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/mh/.hermes/logs/pwa-dashboard.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/mh/.hermes/logs/pwa-dashboard.log</string>
+</dict>
+</plist>

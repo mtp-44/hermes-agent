@@ -67,6 +67,7 @@ environments/benchmarks/evals/
 hermes_cli/web_dist/
 apps/desktop/build/
 apps/desktop/dist/
+apps/desktop/dist-pwa/
 apps/desktop/release/
 apps/desktop/*.tsbuildinfo
 

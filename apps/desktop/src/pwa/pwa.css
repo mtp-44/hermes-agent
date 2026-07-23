@@ -1,0 +1,107 @@
+/*
+ * PWA-only global tweaks layered on top of the desktop renderer's styles.
+ * Kept in a separate file (loaded only by the PWA entry) so the Electron
+ * build is untouched.
+ */
+
+/* iOS standalone: respect the notch / home-indicator safe areas.
+ *
+ * The app shell is viewport-sized (`h-screen`) and anchors its titlebar
+ * geometry via INLINE CSS vars (app-shell.tsx: --titlebar-height 34px,
+ * --titlebar-controls-top 6px — the Electron traffic-light seam), and the
+ * control clusters are position:fixed — so padding #root cannot move them.
+ * Instead, ride the app's own seam: grow the titlebar by the top inset
+ * (pushes the in-flow content down) and shift the fixed clusters below the
+ * status bar. `!important` is required to beat the inline style; the
+ * attribute selector tracks the element carrying it. env() resolves to 0
+ * everywhere outside the installed PWA, so this is a no-op on desktop. */
+[style*='--titlebar-height'] {
+  --titlebar-height: calc(34px + env(safe-area-inset-top, 0px)) !important;
+  --titlebar-controls-top: calc(6px + env(safe-area-inset-top, 0px)) !important;
+  /* Home indicator + landscape notch: shrink the shell's content box. */
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+  padding-left: env(safe-area-inset-left, 0px);
+  padding-right: env(safe-area-inset-right, 0px);
+}
+
+/* The intro hero fits its text with the pure-CSS tan(atan2()) length-ratio
+ * trick (styles.css .fit-text), which WebKit does not resolve — on iOS the
+ * clamp() collapses and the title renders unfitted and clips. On touch
+ * devices, pin it to a container-relative size instead (12 glyphs of the
+ * condensed display font ≈ 10.5cqi fits with margin). Desktop engines keep
+ * the upstream behaviour. */
+@media (pointer: coarse) {
+  .fit-text > :not([aria-hidden]) > * {
+    font-size: clamp(1.75rem, 10.5cqi, 4.5rem) !important;
+  }
+}
+
+/* Mobile: prevent the iOS auto-zoom-on-focus (fires when a focused editable's
+ * font-size is under 16px — and the zoom then STICKS for the whole session,
+ * rendering everything oversized with the right edge off-screen). The chat
+ * composer is a contenteditable div, not an input, so it must be covered
+ * explicitly. Also give touch targets a little more room. */
+@media (pointer: coarse) {
+  /* !important: pwa.css loads BEFORE the renderer's Tailwind bundle, so
+   * without it the utility font classes (text-sm etc.) win the cascade and
+   * the 16px anti-zoom floor never actually applies. */
+  input,
+  select,
+  textarea,
+  [contenteditable],
+  [contenteditable] * {
+    font-size: max(16px, 1em) !important;
+  }
+
+  button {
+    min-height: 34px;
+  }
+}
+
+/* Touch devices: widen the collapsed-pane hover-reveal edge strip into a
+ * tappable target and paint a subtle grabber pill so it's discoverable
+ * (install.ts turns a tap on it into the pane's reveal-toggle event). */
+@media (pointer: coarse) {
+  [data-pane-reveal-trigger] {
+    width: 20px !important;
+  }
+
+  [data-pane-reveal-trigger]::after {
+    content: '';
+    position: absolute;
+    top: 50%;
+    left: 4px;
+    transform: translateY(-50%);
+    width: 4px;
+    height: 44px;
+    border-radius: 2px;
+    background: rgba(128, 128, 128, 0.35);
+  }
+
+  [data-pane-id][data-pane-side='right'] [data-pane-reveal-trigger]::after {
+    left: auto;
+    right: 4px;
+  }
+}
+
+/* The collapsed hover-reveal panes park off-canvas to the right via
+ * translate-x. Chromium excludes transformed descendants from the root's
+ * scrollable overflow; WebKit INCLUDES them — so iOS lets the page pan
+ * ~176px to the right (everything looks "wider", right edge cut). Clip the
+ * root's horizontal overflow outright (`clip` forbids scrolling without
+ * creating a scroll container; the reveal still works — panels animate INTO
+ * the viewport). */
+html,
+body {
+  overflow-x: clip;
+}
+
+/* Use the dynamic viewport unit on mobile browsers so the URL-bar collapse
+ * doesn't leave a dead strip at the bottom. */
+@supports (height: 100dvh) {
+  html,
+  body,
+  #root {
+    height: 100dvh;
+  }
+}
