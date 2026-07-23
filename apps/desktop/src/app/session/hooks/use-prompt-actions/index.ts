@@ -2,7 +2,7 @@ import type { AppendMessage, ThreadMessage } from '@assistant-ui/react'
 import { useStore } from '@nanostores/react'
 import { type MutableRefObject, useCallback, useEffect, useRef } from 'react'
 
-import { transcribeAudio, PROMPT_SUBMIT_REQUEST_TIMEOUT_MS } from '@/hermes'
+import { PROMPT_SUBMIT_REQUEST_TIMEOUT_MS, transcribeAudio } from '@/hermes'
 import { useI18n } from '@/i18n'
 import { stripAnsi } from '@/lib/ansi'
 import { branchGroupForUser, type ChatMessage, chatMessageText, textPart } from '@/lib/chat-messages'
@@ -73,11 +73,16 @@ export async function uploadComposerAttachment(
   const { remote, requestGateway, sessionId } = opts
   const path = attachment.path ?? ''
   const label = attachment.label || pathLabel(path)
+  // A remote Electron client selects a path on the client machine, so its
+  // bytes must cross the gateway. The PWA picker already uploaded the browser
+  // File and returned a backend-owned path; reading that path through the
+  // browser-only local-file stub fails and would upload the same bytes twice.
+  const pathAlreadyOnGateway = remote && (await window.hermesDesktop?.getVersion?.())?.platform === 'web'
 
   if (attachment.kind === 'image') {
     let result: ImageAttachResponse
 
-    if (remote) {
+    if (remote && !pathAlreadyOnGateway) {
       let payload: Awaited<ReturnType<typeof readImageForRemoteAttach>>
 
       try {
@@ -120,7 +125,7 @@ export async function uploadComposerAttachment(
   // Non-image file.
   let dataUrl: string | null = null
 
-  if (remote) {
+  if (remote && !pathAlreadyOnGateway) {
     try {
       dataUrl = await readFileDataUrlForAttach(path)
     } catch (err) {
