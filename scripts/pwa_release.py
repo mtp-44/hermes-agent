@@ -68,6 +68,10 @@ class ReleaseManager:
     def previous_link(self) -> Path:
         return self.release_root / "previous"
 
+    @property
+    def compatibility_assets_dir(self) -> Path:
+        return self.release_root / "compat-assets"
+
     def _run(
         self,
         command: Sequence[str],
@@ -142,6 +146,28 @@ class ReleaseManager:
             "built_at": self.now_fn().astimezone(timezone.utc).isoformat(),
         }
 
+    def _merge_compatibility_assets(self, staging: Path) -> None:
+        """Carry immutable hashed assets forward for already-open clients."""
+        destination_root = staging / "assets"
+        sources = [self.compatibility_assets_dir]
+        if self.releases_dir.is_dir():
+            sources.extend(
+                release / "assets"
+                for release in sorted(self.releases_dir.iterdir())
+                if release.is_dir()
+            )
+        for source_root in sources:
+            if not source_root.is_dir():
+                continue
+            for source in source_root.rglob("*"):
+                if not source.is_file():
+                    continue
+                destination = destination_root / source.relative_to(source_root)
+                if destination.exists():
+                    continue
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, destination)
+
     def _stage_release(self, *, release_id: str, commit: str) -> Path:
         source = self.project_root / "apps" / "desktop" / "dist-pwa"
         if not (source / "index.html").is_file() or not (source / "sw.js").is_file():
@@ -155,6 +181,7 @@ class ReleaseManager:
 
         try:
             shutil.copytree(source, staging)
+            self._merge_compatibility_assets(staging)
             metadata = self._metadata(release_id, commit)
             (staging / STAMP_FILE).write_text(
                 json.dumps(metadata, indent=2, sort_keys=True) + "\n",

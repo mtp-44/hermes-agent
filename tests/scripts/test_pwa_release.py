@@ -101,3 +101,42 @@ def test_status_is_not_ok_without_a_promoted_release(tmp_path, monkeypatch):
 
     assert status["ok"] is False
     assert status["current"] is None
+
+
+def test_deploy_carries_forward_assets_needed_by_already_open_clients(tmp_path, monkeypatch):
+    manager = _manager(tmp_path, monkeypatch)
+    manager.compatibility_assets_dir.mkdir(parents=True)
+    (manager.compatibility_assets_dir / "old-lazy-hash.js").write_text(
+        "export const oldClient = true\n",
+        encoding="utf-8",
+    )
+
+    manager.deploy()
+
+    current = manager.release_root / manager.current_link.readlink()
+    assert (current / "assets" / "old-lazy-hash.js").read_text(encoding="utf-8") == (
+        "export const oldClient = true\n"
+    )
+
+
+def test_deploy_carries_forward_assets_from_prior_atomic_releases(tmp_path, monkeypatch):
+    manager = _manager(tmp_path, monkeypatch, commit="a" * 40)
+    source_assets = manager.project_root / "apps" / "desktop" / "dist-pwa" / "assets"
+    source_assets.mkdir()
+    old_asset = source_assets / "old-lazy-hash.js"
+    old_asset.write_text("export const oldClient = true\n", encoding="utf-8")
+    manager.deploy()
+
+    old_asset.unlink()
+    (source_assets / "new-entry-hash.js").write_text(
+        "export const newClient = true\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(manager, "_commit", lambda: "b" * 40)
+    manager.deploy()
+
+    current = manager.release_root / manager.current_link.readlink()
+    assert (current / "assets" / "old-lazy-hash.js").read_text(encoding="utf-8") == (
+        "export const oldClient = true\n"
+    )
+    assert (current / "assets" / "new-entry-hash.js").is_file()
