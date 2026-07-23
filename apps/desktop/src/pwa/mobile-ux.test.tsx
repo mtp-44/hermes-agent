@@ -9,6 +9,7 @@ import { SidebarRowShell } from '@/app/chat/sidebar/chrome'
 import { StatusbarControls } from '@/app/shell/statusbar-controls'
 
 const pwaCss = readFileSync(resolve(process.cwd(), 'src/pwa/pwa.css'), 'utf8')
+const pwaHtml = readFileSync(resolve(process.cwd(), 'pwa.html'), 'utf8')
 
 afterEach(cleanup)
 
@@ -37,6 +38,11 @@ describe('PWA mobile UX contracts', () => {
     expect(pwaCss).toMatch(/min-height:\s*44px\s*!important/)
     expect(pwaCss).toMatch(/\[data-pane-reveal-trigger\]\s*\{[^}]*width:\s*44px\s*!important/s)
     expect(pwaCss).toMatch(/:focus-visible\s*\{[^}]*outline:\s*2px solid[^}]*!important/s)
+  })
+
+  it('keeps browser zoom available in the mobile viewport contract', () => {
+    expect(pwaHtml).toContain('width=device-width, initial-scale=1.0, viewport-fit=cover')
+    expect(pwaHtml).not.toMatch(/maximum-scale|user-scalable/)
   })
 
   it('gives icon-only status-bar actions and menus accessible names', () => {
