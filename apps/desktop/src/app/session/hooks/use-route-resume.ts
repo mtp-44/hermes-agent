@@ -1,6 +1,7 @@
 import { type MutableRefObject, useEffect, useRef } from 'react'
 
 import { isNewChatRoute } from '@/app/routes'
+import { GATEWAY_FOREGROUND_RESYNC_EVENT } from '@/pwa/foreground-resync'
 import { setResumeExhaustedSessionId } from '@/store/session'
 
 interface RouteResumeOptions {
@@ -95,6 +96,22 @@ export function useRouteResume({
   // for a fresh backoff cycle on the SAME session (the auto-retry loop itself
   // never touches this latch, so it can't spuriously trigger the reset).
   const prevResumeExhaustedRef = useRef<string | null>(null)
+
+  useEffect(() => {
+    const onForegroundResync = () => {
+      // useGatewayBoot emits this only after its forced foreground socket
+      // replacement has opened. Do not gate on the React gatewayState prop:
+      // WebKit can close and reopen quickly enough for React to observe only
+      // the final `open`, which is the physical failure this signal repairs.
+      if (currentView === 'chat' && routedSessionId && !creatingSessionRef.current) {
+        void resumeSession(routedSessionId, true)
+      }
+    }
+
+    window.addEventListener(GATEWAY_FOREGROUND_RESYNC_EVENT, onForegroundResync)
+
+    return () => window.removeEventListener(GATEWAY_FOREGROUND_RESYNC_EVENT, onForegroundResync)
+  }, [creatingSessionRef, currentView, resumeSession, routedSessionId])
 
   useEffect(() => {
     const gatewayOpen = gatewayState === 'open'

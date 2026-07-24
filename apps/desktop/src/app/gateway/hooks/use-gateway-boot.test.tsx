@@ -1,6 +1,7 @@
 import { act, cleanup, render } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { GATEWAY_FOREGROUND_RESYNC_EVENT } from '@/pwa/foreground-resync'
 import { $desktopBoot } from '@/store/boot'
 import { $gatewayState } from '@/store/session'
 
@@ -277,6 +278,8 @@ describe('useGatewayBoot remote reconnect loop (real hook, fake socket)', () => 
   it('forces a web reconnect after foregrounding even when the stale socket still reports open', async () => {
     let visibilityState: DocumentVisibilityState = 'visible'
     vi.spyOn(document, 'visibilityState', 'get').mockImplementation(() => visibilityState)
+    const onForegroundResync = vi.fn()
+    window.addEventListener(GATEWAY_FOREGROUND_RESYNC_EVENT, onForegroundResync)
 
     render(<Harness />)
     await flushAsync()
@@ -298,5 +301,8 @@ describe('useGatewayBoot remote reconnect loop (real hook, fake socket)', () => 
     expect(FakeWebSocket.instances[0]?.readyState).toBe(FakeWebSocket.CLOSED)
     expect(FakeWebSocket.instances).toHaveLength(2)
     expect($gatewayState.get()).toBe('open')
+    expect(onForegroundResync).toHaveBeenCalledOnce()
+
+    window.removeEventListener(GATEWAY_FOREGROUND_RESYNC_EVENT, onForegroundResync)
   })
 })

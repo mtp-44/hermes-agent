@@ -1,7 +1,8 @@
-import { cleanup, render } from '@testing-library/react'
+import { act, cleanup, render } from '@testing-library/react'
 import type { MutableRefObject } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
+import { GATEWAY_FOREGROUND_RESYNC_EVENT } from '@/pwa/foreground-resync'
 import { $resumeExhaustedSessionId, setResumeExhaustedSessionId } from '@/store/session'
 
 import { useRouteResume } from './use-route-resume'
@@ -282,6 +283,35 @@ describe('useRouteResume', () => {
     )
 
     expect(resumeSession).toHaveBeenCalledTimes(1)
+    expect(resumeSession).toHaveBeenCalledWith('session-1', true)
+  })
+
+  it('resumes the selected route after a foreground reconnect whose state edge was batched', () => {
+    const resumeSession = vi.fn(async () => undefined)
+
+    render(
+      <RouteResumeHarness
+        activeSessionId="runtime-1"
+        activeSessionIdRef={{ current: 'runtime-1' }}
+        creatingSessionRef={{ current: false }}
+        currentView="chat"
+        freshDraftReady={false}
+        gatewayState="open"
+        locationPathname="/session-1"
+        resumeSession={resumeSession}
+        routedSessionId="session-1"
+        runtimeIdByStoredSessionIdRef={{ current: new Map([['session-1', 'runtime-1']]) }}
+        selectedStoredSessionId="session-1"
+        selectedStoredSessionIdRef={{ current: 'session-1' }}
+        startFreshSessionDraft={vi.fn()}
+      />
+    )
+
+    expect(resumeSession).not.toHaveBeenCalled()
+
+    act(() => window.dispatchEvent(new Event(GATEWAY_FOREGROUND_RESYNC_EVENT)))
+
+    expect(resumeSession).toHaveBeenCalledOnce()
     expect(resumeSession).toHaveBeenCalledWith('session-1', true)
   })
 })

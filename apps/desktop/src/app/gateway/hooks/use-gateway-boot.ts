@@ -5,6 +5,7 @@ import type { HermesConnection } from '@/global'
 import { HermesGateway } from '@/hermes'
 import { translateNow } from '@/i18n'
 import { desktopDefaultCwd } from '@/lib/desktop-fs'
+import { GATEWAY_FOREGROUND_RESYNC_EVENT } from '@/pwa/foreground-resync'
 import { emitGatewayStateForReconnectProbe } from '@/pwa/reconnect-probe'
 import {
   $desktopBoot,
@@ -111,6 +112,7 @@ export function useGatewayBoot({
     let reconnectAttempt = 0
     let isWebPlatform = false
     let wasHidden = document.visibilityState === 'hidden'
+    let foregroundResyncPending = false
     // Surface "sign in again" once per disconnect episode, not on every backoff
     // tick — a stale OAuth ticket fails every attempt and would otherwise stack
     // identical error toasts (and their haptics). Reset on the next clean open.
@@ -179,6 +181,11 @@ export function useGatewayBoot({
 
         if (cancelled) {
           return
+        }
+
+        if (foregroundResyncPending) {
+          foregroundResyncPending = false
+          window.dispatchEvent(new Event(GATEWAY_FOREGROUND_RESYNC_EVENT))
         }
 
         reconnectAttempt = 0
@@ -299,9 +306,11 @@ export function useGatewayBoot({
 
       if (wasHidden && isWebPlatform && gatewayOpen()) {
         // Force a genuine closed -> open transition even when WebKit has not
-        // delivered the stale socket's close event. useRouteResume observes
-        // that transition and reloads the durable session, including turns
-        // that completed while the PWA was backgrounded.
+        // delivered the stale socket's close event. React can batch this rapid
+        // close -> open so route state never observes the edge; after the new
+        // socket opens, explicitly ask the routed chat to rebind its live
+        // backend session and reload any missed stream output.
+        foregroundResyncPending = true
         gateway.close()
       }
 
