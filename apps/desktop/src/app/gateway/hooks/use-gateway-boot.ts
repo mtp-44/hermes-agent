@@ -109,6 +109,8 @@ export function useGatewayBoot({
     let reconnecting = false
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null
     let reconnectAttempt = 0
+    let isWebPlatform = false
+    let wasHidden = document.visibilityState === 'hidden'
     // Surface "sign in again" once per disconnect episode, not on every backoff
     // tick — a stale OAuth ticket fails every attempt and would otherwise stack
     // identical error toasts (and their haptics). Reset on the next clean open.
@@ -122,6 +124,19 @@ export function useGatewayBoot({
     // `connectionState` to a constant across the early-return guards (the state
     // genuinely changes between reads).
     const gatewayOpen = () => gateway.connectionState === 'open'
+
+    // iOS Home Screen PWAs can suspend the renderer, drop the server-side
+    // socket, then resume with the browser-side WebSocket still reporting
+    // OPEN. A normal reconnect nudge therefore no-ops and leaves the view
+    // frozen on stale streaming/queued state. Only browser builds need this
+    // visibility-specific stale-socket repair; Electron has an explicit
+    // power-resume signal.
+    void desktop
+      .getVersion()
+      .then(version => {
+        isWebPlatform = version.platform === 'web'
+      })
+      .catch(() => undefined)
 
     const clearReconnectTimer = () => {
       if (reconnectTimer !== null) {
@@ -276,9 +291,22 @@ export function useGatewayBoot({
     const onOnline = () => reconnectNow()
 
     const onVisible = () => {
-      if (document.visibilityState === 'visible') {
-        reconnectNow()
+      if (document.visibilityState !== 'visible') {
+        wasHidden = true
+
+        return
       }
+
+      if (wasHidden && isWebPlatform && gatewayOpen()) {
+        // Force a genuine closed -> open transition even when WebKit has not
+        // delivered the stale socket's close event. useRouteResume observes
+        // that transition and reloads the durable session, including turns
+        // that completed while the PWA was backgrounded.
+        gateway.close()
+      }
+
+      wasHidden = false
+      reconnectNow()
     }
 
     window.addEventListener('online', onOnline)

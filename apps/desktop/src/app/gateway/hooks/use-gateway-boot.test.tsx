@@ -99,6 +99,13 @@ function fakeDesktop() {
     onBackendExit: vi.fn(() => () => undefined),
     onPowerResume: vi.fn(() => () => undefined),
     onWindowStateChanged: vi.fn(() => () => undefined),
+    getVersion: vi.fn(async () => ({
+      appVersion: 'pwa',
+      electronVersion: '',
+      hermesRoot: '',
+      nodeVersion: '',
+      platform: 'web'
+    })),
     touchBackend: vi.fn(async () => undefined),
     profile: { get: vi.fn(async () => ({ profile: 'default' })) }
   }
@@ -265,5 +272,31 @@ describe('useGatewayBoot remote reconnect loop (real hook, fake socket)', () => 
 
     expect($gatewayState.get()).toBe('open')
     expect($desktopBoot.get().error).toBeNull()
+  })
+
+  it('forces a web reconnect after foregrounding even when the stale socket still reports open', async () => {
+    let visibilityState: DocumentVisibilityState = 'visible'
+    vi.spyOn(document, 'visibilityState', 'get').mockImplementation(() => visibilityState)
+
+    render(<Harness />)
+    await flushAsync()
+
+    expect($gatewayState.get()).toBe('open')
+    expect(FakeWebSocket.instances).toHaveLength(1)
+
+    // Match iOS Home Screen behavior: the server has dropped the suspended
+    // client, but WebKit has not delivered a close event to this still-OPEN
+    // renderer socket when JavaScript resumes.
+    visibilityState = 'hidden'
+    act(() => document.dispatchEvent(new Event('visibilitychange')))
+    expect(FakeWebSocket.instances[0]?.readyState).toBe(FakeWebSocket.OPEN)
+
+    visibilityState = 'visible'
+    act(() => document.dispatchEvent(new Event('visibilitychange')))
+    await flushAsync()
+
+    expect(FakeWebSocket.instances[0]?.readyState).toBe(FakeWebSocket.CLOSED)
+    expect(FakeWebSocket.instances).toHaveLength(2)
+    expect($gatewayState.get()).toBe('open')
   })
 })
