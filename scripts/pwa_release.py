@@ -12,6 +12,7 @@ import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 from dataclasses import dataclass
@@ -32,6 +33,11 @@ DEFAULT_LAUNCHD_PLIST = (
 )
 STAMP_FILE = "pwa-release.json"
 STAMP_PLACEHOLDER = "__HERMES_PWA_BUILD_STAMP__"
+BUILD_ASSET_MANIFEST_FILE = ".pwa-build-assets.json"
+# A promoted build carries its own assets plus the original assets from the
+# current and previous releases. This supports clients up to two promotions
+# behind without recursively carrying every asset ever released.
+COMPATIBILITY_RELEASE_HORIZON = 2
 
 
 class ReleaseError(RuntimeError):
@@ -182,27 +188,105 @@ class ReleaseManager:
             "built_at": self.now_fn().astimezone(timezone.utc).isoformat(),
         }
 
-    def _merge_compatibility_assets(self, staging: Path) -> None:
-        """Carry immutable hashed assets forward for already-open clients."""
-        destination_root = staging / "assets"
-        sources = [self.compatibility_assets_dir]
-        if self.releases_dir.is_dir():
-            sources.extend(
-                release / "assets"
-                for release in sorted(self.releases_dir.iterdir())
-                if release.is_dir()
+    def _linked_release(self, link: Path) -> Path | None:
+        target = self._read_link(link)
+        if target is None:
+            return None
+        release = (self.release_root / target).resolve()
+        if release.parent != self.releases_dir:
+            raise ReleaseError(
+                f"{link.name} points outside the managed releases directory: {target}"
             )
-        for source_root in sources:
-            if not source_root.is_dir():
-                continue
-            for source in source_root.rglob("*"):
-                if not source.is_file():
-                    continue
+        return release
+
+    def _compatibility_releases(self) -> list[Path]:
+        releases: list[Path] = []
+        for link in (self.current_link, self.previous_link):
+            release = self._linked_release(link)
+            if release is not None and release not in releases:
+                releases.append(release)
+        return releases[:COMPATIBILITY_RELEASE_HORIZON]
+
+    def _original_release_assets(self, release: Path) -> list[Path]:
+        asset_root = release / "assets"
+        manifest_path = release / BUILD_ASSET_MANIFEST_FILE
+        if manifest_path.is_file():
+            try:
+                payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+                relative_assets = payload["assets"]
+                if not isinstance(relative_assets, list):
+                    raise TypeError("assets is not a list")
+                assets: list[Path] = []
+                for value in relative_assets:
+                    if not isinstance(value, str):
+                        raise TypeError(f"asset path is not a string: {value!r}")
+                    relative = Path(value)
+                    if relative.is_absolute() or ".." in relative.parts:
+                        raise ValueError(f"unsafe asset path: {value!r}")
+                    source = asset_root / relative
+                    if not source.is_file():
+                        raise ValueError(f"missing original asset: {value}")
+                    assets.append(source)
+                return assets
+            except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+                raise ReleaseError(
+                    f"invalid build-asset manifest in {release.name}: {exc}"
+                ) from exc
+
+        # Releases created before this manifest existed already contain a
+        # compatibility union. They are accepted only while current/previous;
+        # after two successful promotions all retained releases are bounded by
+        # their original-build manifests.
+        if not asset_root.is_dir():
+            return []
+        return [path for path in asset_root.rglob("*") if path.is_file()]
+
+    def _merge_compatibility_assets(self, staging: Path) -> None:
+        """Carry a bounded set of immutable assets for already-open clients."""
+        destination_root = staging / "assets"
+
+        if self.compatibility_assets_dir.is_dir():
+            for source in self.compatibility_assets_dir.rglob("*"):
+                if source.is_file():
+                    destination = destination_root / source.relative_to(
+                        self.compatibility_assets_dir
+                    )
+                    if not destination.exists():
+                        destination.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(source, destination)
+
+        for release in self._compatibility_releases():
+            source_root = release / "assets"
+            for source in self._original_release_assets(release):
                 destination = destination_root / source.relative_to(source_root)
                 if destination.exists():
                     continue
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(source, destination)
+
+    def _prune_unreachable_release_data(self) -> list[str]:
+        """Remove staging and releases not reachable as current/previous."""
+        protected = set(self._compatibility_releases())
+        removed: list[str] = []
+
+        for staging in self.release_root.glob(".staging-*"):
+            if staging.is_symlink() or not staging.is_dir():
+                staging.unlink()
+            else:
+                shutil.rmtree(staging)
+            removed.append(staging.name)
+
+        if self.releases_dir.is_dir():
+            for release in self.releases_dir.iterdir():
+                if release.resolve() in protected:
+                    continue
+                if release.is_symlink() or not release.is_dir():
+                    release.unlink()
+                else:
+                    shutil.rmtree(release)
+                removed.append(f"releases/{release.name}")
+
+        return sorted(removed)
 
     def _stage_release(self, *, release_id: str, commit: str) -> Path:
         source = self.project_root / "apps" / "desktop" / "dist-pwa"
@@ -217,6 +301,28 @@ class ReleaseManager:
 
         try:
             shutil.copytree(source, staging)
+            asset_root = staging / "assets"
+            build_assets = (
+                sorted(
+                    path.relative_to(asset_root).as_posix()
+                    for path in asset_root.rglob("*")
+                    if path.is_file()
+                )
+                if asset_root.is_dir()
+                else []
+            )
+            (staging / BUILD_ASSET_MANIFEST_FILE).write_text(
+                json.dumps(
+                    {
+                        "assets": build_assets,
+                        "compatibility_release_horizon": COMPATIBILITY_RELEASE_HORIZON,
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
             self._merge_compatibility_assets(staging)
             metadata = self._metadata(release_id, commit)
             (staging / STAMP_FILE).write_text(
@@ -264,6 +370,45 @@ class ReleaseManager:
             return HealthResult(url, False, "status response missing version")
         return HealthResult(url, True, f"HTTP {status}, Hermes {payload['version']}")
 
+    def _release_metadata_url(self, health_url: str) -> str:
+        parsed = urllib.parse.urlsplit(health_url)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise ReleaseError(f"invalid health URL: {health_url}")
+        return urllib.parse.urlunsplit((
+            parsed.scheme,
+            parsed.netloc,
+            f"/{STAMP_FILE}",
+            "",
+            "",
+        ))
+
+    def _probe_release_stamp(
+        self, metadata_url: str, expected_release_id: str
+    ) -> HealthResult:
+        request = urllib.request.Request(
+            metadata_url, headers={"Cache-Control": "no-cache"}
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=3.0) as response:
+                status = response.getcode()
+                payload = json.loads(response.read().decode("utf-8"))
+        except (OSError, urllib.error.URLError, json.JSONDecodeError) as exc:
+            return HealthResult(metadata_url, False, f"{type(exc).__name__}: {exc}")
+        if status != 200:
+            return HealthResult(metadata_url, False, f"HTTP {status}")
+        actual_release_id = (
+            str(payload.get("release_id") or "") if isinstance(payload, dict) else ""
+        )
+        if actual_release_id != expected_release_id:
+            return HealthResult(
+                metadata_url,
+                False,
+                f"release_id {actual_release_id or '<missing>'} != {expected_release_id}",
+            )
+        return HealthResult(
+            metadata_url, True, f"HTTP {status}, release {actual_release_id}"
+        )
+
     def healthcheck(self) -> list[HealthResult]:
         if not self.health_urls:
             return []
@@ -284,6 +429,25 @@ class ReleaseManager:
             raise ReleaseError(f"release health check failed: {details}")
         return results
 
+    def _require_release_stamps(self, expected_release_id: str) -> list[HealthResult]:
+        metadata_urls = [self._release_metadata_url(url) for url in self.health_urls]
+        if not metadata_urls:
+            return []
+        latest: list[HealthResult] = []
+        for attempt in range(self.health_attempts):
+            latest = [
+                self._probe_release_stamp(url, expected_release_id)
+                for url in metadata_urls
+            ]
+            if all(result.ok for result in latest):
+                return latest
+            if attempt + 1 < self.health_attempts:
+                time.sleep(self.health_interval_seconds)
+        details = "; ".join(
+            f"{result.url}: {result.detail}" for result in latest if not result.ok
+        )
+        raise ReleaseError(f"release stamp check failed: {details}")
+
     def deploy(self, *, verify: bool = True) -> dict[str, object]:
         commit = self._commit()
         self._verify_runtime_commit(commit)
@@ -302,6 +466,7 @@ class ReleaseManager:
         try:
             self._restart_runtime()
             health = self._require_healthy()
+            release_health = self._require_release_stamps(release_id)
         except Exception as exc:
             self._replace_link(self.current_link, old_current)
             self._replace_link(self.previous_link, old_previous)
@@ -314,6 +479,13 @@ class ReleaseManager:
                 ) from restore_exc
             raise
 
+        try:
+            pruned = self._prune_unreachable_release_data()
+        except (OSError, shutil.Error) as exc:
+            raise ReleaseError(
+                f"release {release_id} is promoted and healthy, but release cleanup failed: {exc}"
+            ) from exc
+
         return {
             "action": "deploy",
             "release_id": release_id,
@@ -321,6 +493,8 @@ class ReleaseManager:
             "current": target,
             "previous": old_current,
             "health": [result.__dict__ for result in health],
+            "release_health": [result.__dict__ for result in release_health],
+            "pruned": pruned,
         }
 
     def rollback(self) -> dict[str, object]:

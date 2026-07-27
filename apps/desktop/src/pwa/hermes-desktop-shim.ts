@@ -15,10 +15,10 @@
  *   - WS URL minting        → `wss://<host>/api/ws?token=…` via the shared
  *     `buildHermesWebSocketUrl` helper
  *
- * Everything desktop-only (multi-window, git, terminal, local FS, updates,
- * bootstrap, pet overlay) degrades to inert stubs. A Proxy fallback catches
- * any facade member this file forgot, so a missed call logs a warning
- * instead of crashing the renderer.
+ * Required desktop-only members (multi-window, terminal, local FS, updates,
+ * bootstrap, pet overlay) degrade to inert stubs. Optional members such as
+ * git stay genuinely undefined so the renderer's feature detection remains
+ * accurate; the facade is deliberately not wrapped in a catch-all Proxy.
  *
  * This file is only ever imported by the PWA entry (`src/pwa/main.tsx`); the
  * Electron build is untouched.
@@ -276,11 +276,32 @@ export function installHermesDesktopShim(): void {
       if (typeof Notification === 'undefined' || Notification.permission !== 'granted') {
         return false
       }
-      new Notification(payload?.title || 'Hermes', {
+
+      const title = payload?.title || 'Hermes'
+
+      const options = {
         body: payload?.body || '',
         silent: Boolean(payload?.silent)
-      })
-      return true
+      }
+
+      try {
+        const registration = await navigator.serviceWorker?.getRegistration()
+
+        if (registration && typeof registration.showNotification === 'function') {
+          await registration.showNotification(title, options)
+
+          return true
+        }
+
+        new Notification(title, options)
+
+        return true
+      } catch {
+        // iOS does not support page-context Notification construction. A
+        // missing SW registration or any other unsupported browser path must
+        // fail as a feature check, not escape into the renderer.
+        return false
+      }
     },
     requestMicrophoneAccess: async () => {
       try {

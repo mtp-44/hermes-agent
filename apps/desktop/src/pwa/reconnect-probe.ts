@@ -1,7 +1,9 @@
 const ENABLE_KEY = 'hermes-pwa-reconnect-probe'
+const ENABLED_AT_KEY = 'hermes-pwa-reconnect-probe-enabled-at'
 const EVENT_NAME = 'hermes:gateway-state'
 const POLL_MS = 100
 const REQUEST_TIMEOUT_MS = 500
+export const RECONNECT_PROBE_TTL_MS = 24 * 60 * 60 * 1_000
 
 type GatewayStateDetail = { state?: string }
 
@@ -9,16 +11,46 @@ export function emitGatewayStateForReconnectProbe(state: string): void {
   window.dispatchEvent(new CustomEvent<GatewayStateDetail>(EVENT_NAME, { detail: { state } }))
 }
 
+function disableReconnectProbe(): void {
+  localStorage.removeItem(ENABLE_KEY)
+  localStorage.removeItem(ENABLED_AT_KEY)
+}
+
+function hasLiveReconnectProbePreference(now = Date.now()): boolean {
+  if (localStorage.getItem(ENABLE_KEY) !== '1') {
+    return false
+  }
+
+  let enabledAt = Number(localStorage.getItem(ENABLED_AT_KEY))
+
+  // Migrate the original boolean-only preference and recover safely from
+  // malformed/future timestamps by starting one final bounded window.
+  if (!Number.isFinite(enabledAt) || enabledAt <= 0 || enabledAt > now) {
+    enabledAt = now
+    localStorage.setItem(ENABLED_AT_KEY, String(enabledAt))
+  }
+
+  if (now - enabledAt < RECONNECT_PROBE_TTL_MS) {
+    return true
+  }
+
+  disableReconnectProbe()
+
+  return false
+}
+
 export function installReconnectProbe(): void {
   const parameter = new URLSearchParams(window.location.search).get('pwa-reconnect-probe')
+  const now = Date.now()
 
   if (parameter === '1') {
     localStorage.setItem(ENABLE_KEY, '1')
+    localStorage.setItem(ENABLED_AT_KEY, String(now))
   } else if (parameter === '0') {
-    localStorage.removeItem(ENABLE_KEY)
+    disableReconnectProbe()
   }
 
-  if (localStorage.getItem(ENABLE_KEY) !== '1') {
+  if (!hasLiveReconnectProbePreference(now)) {
     return
   }
 
@@ -31,6 +63,7 @@ export function installReconnectProbe(): void {
   let outageObserved = false
   let gatewayOpenedAt: number | null = null
   let status = 'waiting for a disconnect'
+  let active = true
   const samples: string[] = []
 
   const render = () => {
@@ -99,6 +132,10 @@ export function installReconnectProbe(): void {
   }
 
   window.addEventListener(EVENT_NAME, event => {
+    if (!active) {
+      return
+    }
+
     const state = (event as CustomEvent<GatewayStateDetail>).detail?.state
 
     if (state === 'closed' || state === 'error') {
@@ -137,6 +174,13 @@ export function installReconnectProbe(): void {
     render()
 
     const poll = async () => {
+      if (!hasLiveReconnectProbePreference()) {
+        active = false
+        panel.remove()
+
+        return
+      }
+
       await probe()
       window.setTimeout(() => void poll(), POLL_MS)
     }

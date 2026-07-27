@@ -79,21 +79,30 @@ async function install(worker: ReturnType<typeof loadWorker>) {
   await work
 }
 
-async function dispatchFetch(
+function dispatchFetchEvent(
   worker: ReturnType<typeof loadWorker>,
   request: { method?: string; mode?: string; url: string }
 ) {
   let response: Promise<Response> | undefined
+  let work: Promise<unknown> | undefined
   worker.listeners.get('fetch')!({
     request: {
       method: request.method ?? 'GET',
       mode: request.mode ?? 'cors',
       url: request.url
     },
-    respondWith: value => (response = value)
+    respondWith: value => (response = value),
+    waitUntil: value => (work = value)
   })
 
-  return response
+  return { response, work }
+}
+
+async function dispatchFetch(
+  worker: ReturnType<typeof loadWorker>,
+  request: { method?: string; mode?: string; url: string }
+) {
+  return dispatchFetchEvent(worker, request).response
 }
 
 describe('PWA service-worker cache contract', () => {
@@ -180,14 +189,17 @@ describe('PWA service-worker cache contract', () => {
     expect(worker.claim).toHaveBeenCalledOnce()
   })
 
-  it('still caches same-origin GET assets by their versioned URL', async () => {
+  it('keeps background asset cache writes alive with waitUntil', async () => {
     const worker = loadWorker()
     await install(worker)
     worker.fetchMock.mockResolvedValue(new Response('asset-v1', { status: 200 }))
     const request = { url: 'https://hermes.test/assets/app-hash.js' }
 
-    const first = await dispatchFetch(worker, request)
+    const firstEvent = dispatchFetchEvent(worker, request)
+    expect(firstEvent.work).toBeDefined()
+    const first = await firstEvent.response
     expect(await (await first!).text()).toBe('asset-v1')
+    await firstEvent.work
 
     const second = await dispatchFetch(worker, request)
     expect(await (await second!).text()).toBe('asset-v1')

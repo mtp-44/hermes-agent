@@ -29,6 +29,7 @@ describe('PWA Hermes desktop shim', () => {
   })
 
   afterEach(() => {
+    delete (navigator as unknown as { serviceWorker?: ServiceWorkerContainer }).serviceWorker
     vi.restoreAllMocks()
     vi.unstubAllGlobals()
   })
@@ -217,5 +218,52 @@ describe('PWA Hermes desktop shim', () => {
     expect(window.hermesDesktop!.git).toBeUndefined()
     expect(window.hermesDesktop!.gitRoot).toBeUndefined()
     expect(window.hermesDesktop!.revealPath).toBeUndefined()
+  })
+
+  it('prefers service-worker notification delivery when registration is available', async () => {
+    const pageNotification = vi.fn()
+    const showNotification = vi.fn().mockResolvedValue(undefined)
+    Object.defineProperty(navigator, 'serviceWorker', {
+      configurable: true,
+      value: { getRegistration: vi.fn().mockResolvedValue({ showNotification }) }
+    })
+    vi.stubGlobal(
+      'Notification',
+      class {
+        static permission = 'granted'
+
+        constructor(...args: unknown[]) {
+          pageNotification(...args)
+        }
+      }
+    )
+
+    installHermesDesktopShim()
+
+    await expect(window.hermesDesktop!.notify({ title: 'Background-safe', body: 'ready', silent: true })).resolves.toBe(
+      true
+    )
+    expect(showNotification).toHaveBeenCalledWith('Background-safe', {
+      body: 'ready',
+      silent: true
+    })
+    expect(pageNotification).not.toHaveBeenCalled()
+  })
+
+  it('returns false when page-context notification construction is unsupported', async () => {
+    vi.stubGlobal(
+      'Notification',
+      class {
+        static permission = 'granted'
+
+        constructor() {
+          throw new TypeError('Illegal constructor')
+        }
+      }
+    )
+
+    installHermesDesktopShim()
+
+    await expect(window.hermesDesktop!.notify({ title: 'Unsupported' })).resolves.toBe(false)
   })
 })

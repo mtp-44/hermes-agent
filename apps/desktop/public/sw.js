@@ -74,17 +74,19 @@ self.addEventListener('fetch', event => {
   // Static assets: cache-first (Vite hashes them, so staleness is impossible
   // for /assets/*; the handful of unhashed public files revalidate on
   // navigation-driven reloads).
-  event.respondWith(
-    caches.match(request).then(
-      hit =>
-        hit ||
-        fetch(request).then(response => {
-          if (response.ok) {
-            const copy = response.clone()
-            caches.open(VERSION).then(cache => cache.put(request, copy))
-          }
-          return response
-        })
-    )
+  let cacheWrite = Promise.resolve()
+  const response = caches.match(request).then(
+    hit =>
+      hit ||
+      fetch(request).then(networkResponse => {
+        if (networkResponse.ok) {
+          const copy = networkResponse.clone()
+          cacheWrite = caches.open(VERSION).then(cache => cache.put(request, copy))
+        }
+        return networkResponse
+      })
   )
+
+  event.respondWith(response)
+  event.waitUntil(response.then(() => cacheWrite))
 })
