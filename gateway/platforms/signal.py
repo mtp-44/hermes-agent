@@ -235,6 +235,26 @@ def _looks_like_e164_number(value: str) -> bool:
     return digits.isdigit() and 7 <= len(digits) <= 15
 
 
+def _redact_signal_chat_id(chat_id: str) -> str:
+    """Return a log-safe representation of a Signal chat identifier.
+
+    Direct chats are commonly keyed by E.164 number.  Redact here rather than
+    relying only on the process-wide log formatter so adapter logs stay safe
+    in focused tests and embedders that install their own logging handlers.
+    Group IDs and service IDs are also shortened because neither is useful in
+    full in routine operational logs.
+    """
+    value = str(chat_id or "")
+    if value.startswith("group:"):
+        group_id = value[6:]
+        return f"group:{group_id[:8]}…" if len(group_id) > 8 else value
+    if _looks_like_e164_number(value):
+        return redact_phone(value)
+    if len(value) > 12:
+        return f"{value[:8]}…{value[-4:]}"
+    return value
+
+
 def check_signal_requirements() -> bool:
     """Check if Signal is configured (has URL and account)."""
     return bool(os.getenv("SIGNAL_HTTP_URL") and os.getenv("SIGNAL_ACCOUNT"))
@@ -757,8 +777,12 @@ class SignalAdapter(BasePlatformAdapter):
             reply_to_is_own_message=reply_to_is_own,
         )
 
-        logger.debug("Signal: message from %s in %s: %s",
-                      redact_phone(sender), chat_id[:20], (text or "")[:50])
+        logger.debug(
+            "Signal: message from %s in %s: %s",
+            redact_phone(sender),
+            _redact_signal_chat_id(chat_id),
+            (text or "")[:50],
+        )
 
         await self.handle_message(event)
 
@@ -1072,7 +1096,11 @@ class SignalAdapter(BasePlatformAdapter):
         else:
             params["recipient"] = [await self._resolve_recipient(chat_id)]
 
-        logger.info("[Signal] Sending response (%d chars) to %s", len(plain_text), chat_id)
+        logger.info(
+            "[Signal] Sending response (%d chars) to %s",
+            len(plain_text),
+            _redact_signal_chat_id(chat_id),
+        )
         result = await self._rpc("send", params)
 
         if result is not None:
@@ -1189,7 +1217,7 @@ class SignalAdapter(BasePlatformAdapter):
         logger.info(
             "Signal send_multiple_images: received %d image(s) for %s — "
             "scheduler state: %s",
-            len(images), chat_id[:30], scheduler.state(),
+            len(images), _redact_signal_chat_id(chat_id), scheduler.state(),
         )
 
         await self._stop_typing_indicator(chat_id)
@@ -1579,7 +1607,11 @@ class SignalAdapter(BasePlatformAdapter):
         result = await self._rpc("sendReaction", params)
         if result is not None:
             return True
-        logger.debug("Signal: sendReaction failed (chat=%s, emoji=%s)", chat_id[:20], emoji)
+        logger.debug(
+            "Signal: sendReaction failed (chat=%s, emoji=%s)",
+            _redact_signal_chat_id(chat_id),
+            emoji,
+        )
         return False
 
     async def remove_reaction(

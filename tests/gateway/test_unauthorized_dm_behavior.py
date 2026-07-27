@@ -776,6 +776,62 @@ async def test_signal_with_allowlist_ignores_unauthorized_dm(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_signal_envelope_to_gateway_denies_unlisted_sender_before_hooks(
+    monkeypatch,
+):
+    """Exercise the real Signal envelope mapper and central gateway auth gate.
+
+    The synthetic sender is deliberately not a real Signal account.  This gives
+    WP2 an adversarial adapter→gateway proof without weakening the live
+    signal-cli identity policy, contacting another account, or writing to any
+    memory/capture hook.
+    """
+    from gateway.platforms.signal import SignalAdapter
+
+    _clear_auth_env(monkeypatch)
+    monkeypatch.setenv("SIGNAL_ALLOWED_USERS", "+15550000001")
+    monkeypatch.setenv("SIGNAL_REACTIONS", "true")
+
+    platform_config = PlatformConfig(
+        enabled=True,
+        extra={
+            "http_url": "http://127.0.0.1:18080",
+            "account": "+15550000002",
+        },
+    )
+    config = GatewayConfig(platforms={Platform.SIGNAL: platform_config})
+    runner, _placeholder = _make_runner(Platform.SIGNAL, config)
+    adapter = SignalAdapter(platform_config)
+    adapter.send = AsyncMock()
+    runner.adapters = {Platform.SIGNAL: adapter}
+
+    async def _dispatch(event):
+        return await runner._handle_message(event)
+
+    # Feed the real adapter mapper but keep transport offline and deterministic.
+    adapter.handle_message = _dispatch
+    await adapter._handle_envelope(
+        {
+            "envelope": {
+                "sourceNumber": "+15559999999",
+                "sourceName": "synthetic-unlisted",
+                "timestamp": 1785170000000,
+                "dataMessage": {
+                    "timestamp": 1785170000000,
+                    "message": "unauthorized synthetic probe",
+                    "attachments": [],
+                },
+            }
+        }
+    )
+
+    runner.pairing_store.generate_code.assert_not_called()
+    runner.hooks.dispatch.assert_not_awaited()
+    adapter.send.assert_not_awaited()
+    assert runner._running_agents == {}
+
+
+@pytest.mark.asyncio
 async def test_telegram_with_allowlist_ignores_unauthorized_dm(monkeypatch):
     """Same behavior for Telegram: allowlist ⟹ ignore unauthorized DMs."""
     _clear_auth_env(monkeypatch)

@@ -449,6 +449,27 @@ class TestSignalPhoneRedaction:
         assert "+12345" in result  # Too short to redact
 
 
+class TestSignalChatIdLogRedaction:
+    def test_direct_number_is_never_returned_verbatim(self):
+        from gateway.platforms.signal import _redact_signal_chat_id
+
+        raw = "+15551234567"
+        redacted = _redact_signal_chat_id(raw)
+
+        assert raw not in redacted
+        assert "****" in redacted
+        assert redacted.endswith("4567")
+
+    def test_group_and_service_ids_are_bounded(self):
+        from gateway.platforms.signal import _redact_signal_chat_id
+
+        assert _redact_signal_chat_id("group:abcdefghijklmnop") == "group:abcdefgh…"
+        service_id = "11111111-2222-3333-4444-555555555555"
+        redacted = _redact_signal_chat_id(service_id)
+        assert service_id not in redacted
+        assert redacted.endswith("5555")
+
+
 # ---------------------------------------------------------------------------
 # Authorization in run.py
 # ---------------------------------------------------------------------------

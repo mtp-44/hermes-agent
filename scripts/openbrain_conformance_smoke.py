@@ -7,7 +7,9 @@ actions, Telegram rendering, boundary capture, and the Open Brain memory
 provider. Live Open Brain tools/list probing is opt-in with --live-smoke;
 --oauth-smoke additionally drives the hosted endpoint's OAuth 2.1 path
 (checklist A4) via open_brain/scripts/oauth_smoke.py, so both auth paths —
-legacy x-brain-key and bearer token — are covered.
+legacy x-brain-key and bearer token — are covered.  The real Signal adapter
+smoke is a separate, explicitly guarded opt-in via --signal-e2e; the default
+offline run remains deterministic and never contacts signal-cli.
 """
 
 from __future__ import annotations
@@ -117,10 +119,36 @@ def main(argv: list[str] | None = None) -> int:
         default=[],
         help="Extra argument to append to the pytest command; repeat as needed.",
     )
+    parser.add_argument(
+        "--signal-e2e",
+        action="store_true",
+        help="Run the guarded real Signal adapter smoke after offline checks.",
+    )
+    parser.add_argument(
+        "--signal-e2e-secrets-file",
+        help="Mode-0600 Signal identifier handoff required by --signal-e2e.",
+    )
+    parser.add_argument(
+        "--signal-e2e-hermes-home",
+        help="Isolated non-production HERMES_HOME required by --signal-e2e.",
+    )
+    parser.add_argument(
+        "--signal-e2e-timeout",
+        type=float,
+        default=180.0,
+        help="Seconds to wait for the Signal reply (default: 180).",
+    )
     args = parser.parse_args(argv)
 
     if args.skip_guard and args.skip_tests:
         parser.error("--skip-guard and --skip-tests cannot both be set")
+    if args.signal_e2e and (
+        not args.signal_e2e_secrets_file or not args.signal_e2e_hermes_home
+    ):
+        parser.error(
+            "--signal-e2e requires --signal-e2e-secrets-file and "
+            "--signal-e2e-hermes-home"
+        )
 
     if not args.skip_guard:
         rc = _run("Hermes update guard", _guard_args(args))
@@ -144,6 +172,22 @@ def main(argv: list[str] | None = None) -> int:
         if proc.returncode:
             print(f"\nOAuth path smoke failed with exit code {proc.returncode}.")
             return proc.returncode
+
+    if args.signal_e2e:
+        cmd = [
+            _repo_python(),
+            "scripts/signal_e2e_smoke.py",
+            "--live",
+            "--secrets-file",
+            args.signal_e2e_secrets_file,
+            "--hermes-home",
+            args.signal_e2e_hermes_home,
+            "--timeout",
+            str(args.signal_e2e_timeout),
+        ]
+        rc = _run("Guarded Signal adapter E2E", cmd)
+        if rc:
+            return rc
 
     print("\nOpen Brain/Hermes conformance smoke passed.")
     return 0
