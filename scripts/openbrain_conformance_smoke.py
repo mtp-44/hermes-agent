@@ -3,8 +3,8 @@
 
 Runs the update guard plus the local tests that cover the Open Brain adapter
 surface: command registration, query formatting and feedback, generic message
-actions, Telegram rendering, boundary capture, and the Open Brain memory
-provider. Live Open Brain tools/list probing is opt-in with --live-smoke;
+actions, Telegram and Signal feedback delivery, boundary capture, and the Open
+Brain memory provider. Live Open Brain tools/list probing is opt-in with --live-smoke;
 --oauth-smoke additionally drives the hosted endpoint's OAuth 2.1 path
 (checklist A4) via open_brain/scripts/oauth_smoke.py, so both auth paths —
 legacy x-brain-key and bearer token — are covered.  The real Signal adapter
@@ -35,6 +35,10 @@ FOCUSED_TESTS = (
     "tests/plugins/memory/test_openbrain_provider.py",
     "tests/gateway/test_message_actions.py",
     "tests/gateway/test_telegram_open_brain_feedback.py",
+    # Signal reaction feedback is deterministic here: its adapter tests cover
+    # durable timestamp correlation, strict authorization, replay/replacement,
+    # expiry, and dispatch into the real Open Brain feedback handler.
+    "tests/gateway/test_signal.py",
     "tests/gateway/test_boundary_capture.py",
     "tests/gateway/test_capture_commands.py",
     "tests/gateway/test_session_boundary_hooks.py",

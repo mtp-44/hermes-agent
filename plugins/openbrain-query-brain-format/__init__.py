@@ -150,11 +150,11 @@ def _decorate_outbound(context: dict[str, Any]) -> list[dict[str, Any]] | None:
     Generic outbound-decorator seam consumer (Phase 5c.3 step 2): pops the
     feedback candidate captured for this turn and returns the two actions. The
     platform renders them and routes a press to ``_handle_feedback``.
-    Platforms: Telegram (inline keyboard) and the desktop/PWA renderer
+    Platforms: Telegram (inline keyboard), Signal (native reactions), and the desktop/PWA renderer
     (message-action chips over the ``/api/ws`` gateway + ``/api/actions/
     dispatch`` round-trip).
     """
-    if str(context.get("platform") or "").lower() not in {"telegram", "desktop"}:
+    if str(context.get("platform") or "").lower() not in {"telegram", "signal", "desktop"}:
         return None
     session_id = str(context.get("session_id") or "").strip()
     if not session_id:
@@ -168,14 +168,14 @@ def _decorate_outbound(context: dict[str, Any]) -> list[dict[str, Any]] | None:
         return None
     token = _register_feedback(candidate)
     return [
-        {"label": "👍 Good", "action_id": _FEEDBACK_GOOD, "token": token},
-        {"label": "👎 Bad", "action_id": _FEEDBACK_BAD, "token": token},
+        {"label": "👍 Good", "action_id": _FEEDBACK_GOOD, "token": token, "payload": candidate},
+        {"label": "👎 Bad", "action_id": _FEEDBACK_BAD, "token": token, "payload": candidate},
     ]
 
 
 async def _handle_feedback(action_id: str, token: str, _context: dict[str, Any]) -> str:
     """Record a query-feedback button press (generic action-handler consumer)."""
-    candidate = _resolve_feedback(token)
+    candidate = _resolve_feedback(token) or _context.get("action_payload")
     if not candidate:
         return "This feedback prompt expired."
     verdict = "good" if action_id == _FEEDBACK_GOOD else "bad"

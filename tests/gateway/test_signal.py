@@ -102,6 +102,166 @@ class TestSignalAdapterInit:
         assert adapter._account_normalized == "+15551234567"
 
 
+class TestSignalReactionFeedback:
+    """Reaction-only feedback must be authorized, durable, and one-shot."""
+
+    @staticmethod
+    def _reaction(sender, emoji, target, *, remove=False):
+        return {
+            "sourceNumber": sender,
+            "timestamp": 999,
+            "dataMessage": {
+                "reaction": {
+                    "emoji": emoji,
+                    "targetSentTimestamp": target,
+                    "isRemove": remove,
+                }
+            },
+        }
+
+    @pytest.mark.asyncio
+    async def test_query_reaction_survives_restart_and_reaches_open_brain(self, monkeypatch, tmp_path):
+        """A reaction-only envelope reaches the real query-feedback handler."""
+        sender = "+15550000001"
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        monkeypatch.setenv("SIGNAL_ALLOWED_USERS", sender)
+        monkeypatch.setenv("SIGNAL_REACTION_FEEDBACK", "true")
+        adapter = _make_signal_adapter(monkeypatch)
+        adapter._rpc, calls = _stub_rpc({"timestamp": 4242})
+        metadata = {"actions": [
+            {
+                "label": "👍 Good",
+                "action_id": "obg",
+                "token": "query-token",
+                "payload": {"query_id": "q1", "query_text": "test query", "source": "hermes"},
+            },
+            {
+                "label": "👎 Bad",
+                "action_id": "obb",
+                "token": "query-token",
+                "payload": {"query_id": "q1", "query_text": "test query", "source": "hermes"},
+            },
+        ]}
+
+        sent = await adapter.send(sender, "Answer", metadata=metadata)
+        assert sent.message_id == "4242"
+        send_call = next(call for call in calls if call["method"] == "send")
+        assert send_call["params"]["message"].endswith("React 👍 or 👎")
+
+        # New adapter instance proves the account/chat/timestamp correlation and
+        # query candidate payload survive a process restart.
+        restarted = _make_signal_adapter(monkeypatch)
+        import importlib.util
+        plugin_path = Path("plugins/openbrain-query-brain-format/__init__.py")
+        spec = importlib.util.spec_from_file_location("wp3_query_feedback", plugin_path)
+        plugin = importlib.util.module_from_spec(spec)
+        assert spec and spec.loader
+        spec.loader.exec_module(plugin)
+        recorded = {}
+
+        async def record_query_feedback(**kwargs):
+            recorded.update(kwargs)
+
+        import gateway.open_brain as open_brain
+        monkeypatch.setattr(open_brain, "record_query_feedback", record_query_feedback)
+
+        class Manager:
+            @staticmethod
+            def get_action_handler(action_id):
+                return plugin._handle_feedback if action_id in {"obg", "obb"} else None
+
+        import hermes_cli.plugins as plugins
+        monkeypatch.setattr(plugins, "get_plugin_manager", lambda: Manager())
+
+        await restarted._handle_envelope(self._reaction(sender, "👍", 4242))
+        assert recorded == {
+            "query_id": "q1",
+            "query_text": "test query",
+            "verdict": "good",
+            "source": "hermes",
+            "result_kind": None,
+            "result_id": None,
+            "response_verdict": None,
+        }
+
+        # Replay and replacement are one-shot even though query feedback itself
+        # already has a token registry: the persistent correlation is claimed.
+        await restarted._handle_envelope(self._reaction(sender, "👎", 4242))
+        assert recorded["verdict"] == "good"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("emoji", "action_id"),
+        [("👍", "obg"), ("👎", "obb"), ("✅", "prxa"), ("🙈", "prxd")],
+    )
+    async def test_maps_supported_emoji_once(self, monkeypatch, tmp_path, emoji, action_id):
+        sender = "+15550000001"
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        monkeypatch.setenv("SIGNAL_ALLOWED_USERS", sender)
+        monkeypatch.setenv("SIGNAL_REACTION_FEEDBACK", "true")
+        adapter = _make_signal_adapter(monkeypatch)
+        timestamp = {"obg": 1, "obb": 2, "prxa": 3, "prxd": 4}[action_id]
+        adapter._reaction_feedback_store.store_actions(
+            account=adapter.account,
+            chat_id=sender,
+            message_timestamp=timestamp,
+            actions=[{"action_id": action_id, "token": f"t{timestamp}"}],
+            ttl_seconds=60,
+        )
+        seen = []
+
+        async def handler(received_action, token, context):
+            seen.append((received_action, token, context["user_id"]))
+
+        class Manager:
+            @staticmethod
+            def get_action_handler(received_action):
+                return handler if received_action == action_id else None
+
+        import hermes_cli.plugins as plugins
+        monkeypatch.setattr(plugins, "get_plugin_manager", lambda: Manager())
+        await adapter._handle_envelope(self._reaction(sender, emoji, timestamp))
+        await adapter._handle_envelope(self._reaction(sender, emoji, timestamp))
+        assert seen == [(action_id, f"t{timestamp}", sender)]
+
+    @pytest.mark.asyncio
+    async def test_reaction_removal_unknown_unsupported_expired_and_unauthorized_are_safe(self, monkeypatch, tmp_path):
+        sender = "+15550000001"
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        monkeypatch.setenv("SIGNAL_ALLOWED_USERS", sender)
+        monkeypatch.setenv("SIGNAL_REACTION_FEEDBACK", "true")
+        adapter = _make_signal_adapter(monkeypatch)
+        for timestamp in (10, 11):
+            adapter._reaction_feedback_store.store_actions(
+                account=adapter.account,
+                chat_id=sender,
+                message_timestamp=timestamp,
+                actions=[{"action_id": "obg", "token": f"t{timestamp}"}],
+                ttl_seconds=60 if timestamp == 10 else -1,
+            )
+        seen = []
+
+        async def handler(action_id, token, context):
+            seen.append(token)
+
+        class Manager:
+            @staticmethod
+            def get_action_handler(action_id):
+                return handler
+
+        import hermes_cli.plugins as plugins
+        monkeypatch.setattr(plugins, "get_plugin_manager", lambda: Manager())
+
+        # A removal does not consume the action; the subsequent replacement does.
+        await adapter._handle_envelope(self._reaction(sender, "👍", 10, remove=True))
+        await adapter._handle_envelope(self._reaction(sender, "👍", 10))
+        await adapter._handle_envelope(self._reaction(sender, "❓", 10))
+        await adapter._handle_envelope(self._reaction(sender, "👍", 99999))
+        await adapter._handle_envelope(self._reaction(sender, "👍", 11))
+        await adapter._handle_envelope(self._reaction("+15550000002", "👍", 10))
+        assert seen == ["t10"]
+
+
 class TestSignalConnectCleanup:
     """Regression coverage for failed connect() cleanup."""
 
@@ -1092,7 +1252,7 @@ class TestSignalSendReturnsMessageId:
     """Signal send() should not pretend sent messages are editable."""
 
     @pytest.mark.asyncio
-    async def test_send_returns_none_message_id_even_with_timestamp(self, monkeypatch):
+    async def test_send_returns_timestamp_message_id(self, monkeypatch):
         adapter = _make_signal_adapter(monkeypatch)
         mock_rpc, _ = _stub_rpc({"timestamp": 1712345678000})
         adapter._rpc = mock_rpc
@@ -1101,7 +1261,7 @@ class TestSignalSendReturnsMessageId:
         result = await adapter.send(chat_id="+155****4567", content="hello")
 
         assert result.success is True
-        assert result.message_id is None
+        assert result.message_id == "1712345678000"
 
     @pytest.mark.asyncio
     async def test_send_returns_none_message_id_when_no_timestamp(self, monkeypatch):

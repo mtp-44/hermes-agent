@@ -56,6 +56,7 @@ from gateway.platforms.signal_rate_limit import (
     _signal_send_timeout,
     get_scheduler,
 )
+from gateway.platforms.signal_reaction_feedback import SignalReactionFeedbackStore
 
 logger = logging.getLogger(__name__)
 
@@ -302,6 +303,11 @@ class SignalAdapter(BasePlatformAdapter):
         # recorded at adapter level (run.py still enforces auth separately).
         dm_allowed_str = os.getenv("SIGNAL_ALLOWED_USERS", "*")
         self.dm_allow_from = set(_parse_comma_list(dm_allowed_str))
+        # Feedback reactions are privileged action dispatches. Keep them opt-in
+        # until the isolated G3 target enables them explicitly.
+        self.reaction_feedback_enabled = os.getenv(
+            "SIGNAL_REACTION_FEEDBACK", "false"
+        ).lower() in {"true", "1", "yes", "on"}
 
         # HTTP client
         self.client: Optional[httpx.AsyncClient] = None
@@ -350,10 +356,34 @@ class SignalAdapter(BasePlatformAdapter):
         self._recipient_uuid_by_number: Dict[str, str] = {}
         self._recipient_number_by_uuid: Dict[str, str] = {}
         self._recipient_cache_lock = asyncio.Lock()
+        self._staged_actions: Dict[str, Any] = {}
+        reaction_store_path = Path(os.getenv("HERMES_HOME", str(Path.home() / ".hermes"))) / "signal_reaction_feedback.sqlite3"
+        self._reaction_feedback_store = SignalReactionFeedbackStore(reaction_store_path)
 
         logger.info("Signal adapter initialized: url=%s account=%s groups=%s",
                      self.http_url, redact_phone(self.account),
                      "enabled" if self.group_allow_from else "disabled")
+
+    def stage_actions(self, session_key: str, actions: Any, *, generation: int | None = None) -> None:
+        """Stage generic actions for the final non-streamed Signal response."""
+        if not session_key or not actions:
+            return
+        self._staged_actions[session_key] = (int(generation), actions) if generation is not None else actions
+
+    def pop_staged_actions(self, session_key: str, *, generation: int | None = None) -> Any:
+        entry = self._staged_actions.get(session_key)
+        if entry is None:
+            return None
+        if isinstance(entry, tuple) and len(entry) == 2:
+            entry_generation, actions = entry
+            if generation is not None and int(entry_generation) != int(generation):
+                return None
+            self._staged_actions.pop(session_key, None)
+            return actions
+        if generation is not None:
+            return None
+        self._staged_actions.pop(session_key, None)
+        return entry
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -610,6 +640,22 @@ class SignalAdapter(BasePlatformAdapter):
         group_info = data_message.get("groupInfo")
         group_id = group_info.get("groupId") if group_info else None
         is_group = bool(group_id)
+
+        # Reactions carry no user text or attachment. They are not agent turns:
+        # after strict authorization, consume only a known, unexpired outbound
+        # correlation and invoke the generic registered action handler.
+        reaction = data_message.get("reaction")
+        if isinstance(reaction, dict):
+            chat_id = sender if not is_group else f"group:{group_id}"
+            await self._handle_feedback_reaction(
+                sender=sender,
+                sender_uuid=sender_uuid,
+                chat_id=chat_id,
+                is_group=is_group,
+                group_id=group_id,
+                reaction=reaction,
+            )
+            return
 
         # Group message filtering — derived from SIGNAL_GROUP_ALLOWED_USERS:
         # - No env var set → groups disabled (default safe behavior)
@@ -1065,6 +1111,105 @@ class SignalAdapter(BasePlatformAdapter):
                     return False, "Recipient delivery failed"
         return True, None
 
+    @staticmethod
+    def _reaction_actions(metadata: Optional[Dict[str, Any]]) -> list[dict[str, Any]]:
+        if not metadata or metadata.get("_signal_reaction_actions_consumed"):
+            return []
+        raw = metadata.get("actions")
+        if not isinstance(raw, list):
+            return []
+        return [action for action in raw if isinstance(action, dict) and action.get("action_id") and action.get("token")]
+
+    @staticmethod
+    def _reaction_prompt(actions: list[dict[str, Any]]) -> str:
+        ids = {str(action.get("action_id")) for action in actions}
+        if {"obg", "obb"}.issubset(ids):
+            return "React 👍 or 👎"
+        if {"prxa", "prxd"}.issubset(ids):
+            return "React ✅ or 🙈"
+        return ""
+
+    @staticmethod
+    def _reaction_feedback_ttl_seconds() -> float:
+        try:
+            configured = float(os.getenv("SIGNAL_REACTION_FEEDBACK_TTL_SECONDS", "604800"))
+        except ValueError:
+            configured = 604800.0
+        return max(60.0, min(configured, 30 * 24 * 60 * 60.0))
+
+    def _is_feedback_reactor_authorized(
+        self, sender: str, sender_uuid: str, *, is_group: bool, group_id: Optional[str]
+    ) -> bool:
+        # Unlike visual processing indicators, feedback dispatch must never
+        # inherit an open-mode wildcard. It is an action invocation, so require
+        # an explicit Signal identity before any correlation lookup.
+        if not self.reaction_feedback_enabled or not self.dm_allow_from or "*" in self.dm_allow_from:
+            return False
+        if is_group and (
+            not self.group_allow_from
+            or ("*" not in self.group_allow_from and group_id not in self.group_allow_from)
+        ):
+            # Group allowlisting is checked by the ordinary message path too;
+            # retain the same fail-closed posture for reaction-only envelopes.
+            return False
+        candidates = {sender, sender_uuid, self._recipient_number_by_uuid.get(sender_uuid, "")}
+        return bool(candidates.intersection(self.dm_allow_from))
+
+    async def _handle_feedback_reaction(
+        self,
+        *,
+        sender: str,
+        sender_uuid: str,
+        chat_id: str,
+        is_group: bool,
+        group_id: Optional[str],
+        reaction: dict[str, Any],
+    ) -> None:
+        if not self._is_feedback_reactor_authorized(
+            sender, sender_uuid, is_group=is_group, group_id=group_id
+        ):
+            logger.debug("Signal: ignored unauthorized reaction from %s", redact_phone(sender))
+            return
+        emoji = str(reaction.get("emoji") or "")
+        if reaction.get("isRemove") or reaction.get("remove") or not emoji:
+            return
+        action_id = {"👍": "obg", "👎": "obb", "✅": "prxa", "🙈": "prxd"}.get(emoji)
+        if not action_id:
+            return
+        target_timestamp = reaction.get("targetSentTimestamp") or reaction.get("targetTimestamp")
+        if target_timestamp is None:
+            return
+        claimed = self._reaction_feedback_store.claim(
+            account=self.account,
+            chat_id=chat_id,
+            message_timestamp=target_timestamp,
+            action_id=action_id,
+        )
+        if not claimed:
+            return
+        try:
+            from hermes_cli.plugins import get_plugin_manager
+            handler = get_plugin_manager().get_action_handler(action_id)
+        except Exception:
+            handler = None
+        if handler is None:
+            logger.warning("Signal: no registered feedback action handler for %s", action_id)
+            return
+        context = {
+            "platform": self.name,
+            "chat_id": chat_id,
+            "user_id": sender,
+            "token": claimed["token"],
+            "reaction_target_timestamp": str(target_timestamp),
+            "action_payload": claimed.get("payload"),
+        }
+        try:
+            result = handler(action_id, claimed["token"], context)
+            if asyncio.iscoroutine(result):
+                await result
+        except Exception as exc:
+            logger.warning("Signal feedback action handler failed for %s: %s", action_id, exc)
+
     # ------------------------------------------------------------------
     # Sending
     # ------------------------------------------------------------------
@@ -1079,6 +1224,10 @@ class SignalAdapter(BasePlatformAdapter):
         """Send a text message with native Signal formatting."""
         await self._stop_typing_indicator(chat_id)
 
+        actions = self._reaction_actions(metadata)
+        prompt = self._reaction_prompt(actions) if self.reaction_feedback_enabled else ""
+        if prompt:
+            content = f"{content.rstrip()}\n\n{prompt}"
         plain_text, text_styles = self._markdown_to_signal(content)
 
         params: Dict[str, Any] = {
@@ -1109,10 +1258,23 @@ class SignalAdapter(BasePlatformAdapter):
             if not success:
                 return SendResult(success=False, error=err_msg, raw_response=result)
             self._track_sent_timestamp(result)
-            # Signal has no editable message identifier. Returning None keeps the
-            # stream consumer on the non-edit fallback path instead of pretending
-            # future edits can remove an in-progress cursor from the chat thread.
-            return SendResult(success=True, message_id=None)
+            timestamp = result.get("timestamp") if isinstance(result, dict) else None
+            if timestamp is not None and actions and self.reaction_feedback_enabled:
+                try:
+                    self._reaction_feedback_store.store_actions(
+                        account=self.account,
+                        chat_id=chat_id,
+                        message_timestamp=timestamp,
+                        actions=actions,
+                        ttl_seconds=self._reaction_feedback_ttl_seconds(),
+                    )
+                    if metadata is not None:
+                        metadata["_signal_reaction_actions_consumed"] = True
+                except Exception as exc:
+                    logger.warning("Signal: failed to persist reaction feedback correlation: %s", exc)
+            # signal-cli's timestamp is the stable identifier used by quoting,
+            # reactions, and the durable feedback correlation above.
+            return SendResult(success=True, message_id=str(timestamp) if timestamp is not None else None)
         return SendResult(success=False, error="RPC send failed")
 
     def _track_sent_timestamp(self, rpc_result) -> None:

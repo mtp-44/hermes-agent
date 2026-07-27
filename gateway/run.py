@@ -19027,7 +19027,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # gateway is feature-neutral here — Open Brain query feedback is one
             # such decorator, owned entirely by its adapter plugin.
             _outbound_actions: list = []
-            if source.platform == Platform.TELEGRAM and session_id and result and result.get("final_response"):
+            if source.platform in {Platform.TELEGRAM, Platform.SIGNAL} and session_id and result and result.get("final_response"):
                 try:
                     from hermes_cli.plugins import get_plugin_manager
                     _decorators = get_plugin_manager().get_outbound_decorators()
@@ -19038,7 +19038,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     _deco_ctx = {
                         "session_id": session_id,
                         "session_key": session_key or session_id,
-                        "platform": "telegram",
+                        "platform": source.platform.value,
                         "text": result.get("final_response"),
                         "since": _turn_started_at,
                         "generation": run_generation,
