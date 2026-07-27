@@ -7,7 +7,8 @@ Outbound messages and actions use JSON-RPC 2.0 over HTTP.
 Based on PR #268 by ibhagwan, rebuilt with bug fixes.
 
 Requires:
-  - signal-cli installed and running: signal-cli daemon --http 127.0.0.1:8080
+  - signal-cli installed and running in restart-safe receive mode:
+    signal-cli daemon --http 127.0.0.1:8080 --receive-mode on-connection
   - SIGNAL_HTTP_URL and SIGNAL_ACCOUNT environment variables set
 """
 

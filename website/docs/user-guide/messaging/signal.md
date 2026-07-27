@@ -62,11 +62,12 @@ signal-cli link -n "HermesAgent"
 
 ```bash
 # Replace +1234567890 with your Signal phone number (E.164 format)
-signal-cli --account +1234567890 daemon --http 127.0.0.1:8080
+signal-cli --account +1234567890 daemon --http 127.0.0.1:8080 \
+  --receive-mode on-connection
 ```
 
 :::tip
-Keep this running in the background. You can use `systemd`, `tmux`, `screen`, or run it as a service.
+Keep this running in the background. You can use `systemd`, `tmux`, `screen`, or run it as a service. Keep `--receive-mode on-connection`: it prevents signal-cli from consuming queued messages before Hermes has connected its SSE listener after a restart.
 :::
 
 Verify it's running:
@@ -222,7 +223,7 @@ The adapter monitors the SSE connection and automatically reconnects if:
 
 | Problem | Solution |
 |---------|----------|
-| **"Cannot reach signal-cli"** during setup | Ensure signal-cli daemon is running: `signal-cli --account +YOUR_NUMBER daemon --http 127.0.0.1:8080` |
+| **"Cannot reach signal-cli"** during setup | Ensure signal-cli daemon is running: `signal-cli --account +YOUR_NUMBER daemon --http 127.0.0.1:8080 --receive-mode on-connection` |
 | **Messages not received** | Check that `SIGNAL_ALLOWED_USERS` includes the sender's number in E.164 format (with `+` prefix) |
 | **"signal-cli not found on PATH"** | Install signal-cli and ensure it's in your PATH, or use Docker |
 | **Connection keeps dropping** | Check signal-cli logs for errors. Ensure Java 17+ is installed. |

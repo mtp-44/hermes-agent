@@ -62,11 +62,12 @@ signal-cli link -n "HermesAgent"
 
 ```bash
 # 将 +1234567890 替换为你的 Signal 手机号（E.164 格式）
-signal-cli --account +1234567890 daemon --http 127.0.0.1:8080
+signal-cli --account +1234567890 daemon --http 127.0.0.1:8080 \
+  --receive-mode on-connection
 ```
 
 :::tip
-保持此进程在后台运行。你可以使用 `systemd`、`tmux`、`screen`，或将其作为服务运行。
+保持此进程在后台运行。你可以使用 `systemd`、`tmux`、`screen`，或将其作为服务运行。请保留 `--receive-mode on-connection`：它可防止 signal-cli 在 Hermes 重启后建立 SSE 监听之前消耗队列中的消息。
 :::
 
 验证是否正在运行：
@@ -217,7 +218,7 @@ Signal 消息以**原生格式**渲染，而非显示原始 markdown 字符。�
 
 | 问题 | 解决方案 |
 |------|----------|
-| 配置时提示 **"Cannot reach signal-cli"** | 确保 signal-cli 守护进程正在运行：`signal-cli --account +YOUR_NUMBER daemon --http 127.0.0.1:8080` |
+| 配置时提示 **"Cannot reach signal-cli"** | 确保 signal-cli 守护进程正在运行：`signal-cli --account +YOUR_NUMBER daemon --http 127.0.0.1:8080 --receive-mode on-connection` |
 | **消息未收到** | 检查 `SIGNAL_ALLOWED_USERS` 是否包含发送方号码（E.164 格式，带 `+` 前缀） |
 | **"signal-cli not found on PATH"** | 安装 signal-cli 并确保其在 PATH 中，或使用 Docker |
 | **连接持续断开** | 检查 signal-cli 日志中的错误信息，确保已安装 Java 17+。 |

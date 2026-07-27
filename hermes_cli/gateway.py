@@ -5759,7 +5759,14 @@ def _setup_signal():
         print()
         print_info("  After installing, link your account and start the daemon:")
         print_info('    signal-cli link -n "HermesAgent"')
-        print_info("    signal-cli --account +YOURNUMBER daemon --http 127.0.0.1:8080")
+        print_info(
+            "    signal-cli --account +YOURNUMBER daemon --http 127.0.0.1:8080 "
+            "--receive-mode on-connection"
+        )
+        print_info(
+            "    (on-connection keeps queued messages on Signal until Hermes "
+            "subscribes)"
+        )
         print()
 
     # HTTP URL

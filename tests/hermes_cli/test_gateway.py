@@ -1,6 +1,7 @@
 """Tests for hermes_cli.gateway."""
 
 import argparse
+import builtins
 import signal
 import sys
 from types import ModuleType, SimpleNamespace
@@ -8,6 +9,22 @@ from types import ModuleType, SimpleNamespace
 import pytest
 
 import hermes_cli.gateway as gateway
+
+
+def test_signal_setup_recommends_restart_safe_receive_mode(monkeypatch, capsys):
+    """The setup hint must not allow signal-cli to receive before SSE exists."""
+    monkeypatch.setattr(gateway.shutil, "which", lambda _name: None)
+
+    def cancel_at_url_prompt(_prompt):
+        raise EOFError
+
+    monkeypatch.setattr(builtins, "input", cancel_at_url_prompt)
+
+    gateway._setup_signal()
+
+    out = capsys.readouterr().out
+    assert "daemon --http 127.0.0.1:8080 --receive-mode on-connection" in out
+    assert "keeps queued messages on Signal until Hermes subscribes" in out
 
 
 def _install_fake_gateway_run(monkeypatch, start_gateway):
