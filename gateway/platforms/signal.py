@@ -357,12 +357,22 @@ class SignalAdapter(BasePlatformAdapter):
         self._recipient_number_by_uuid: Dict[str, str] = {}
         self._recipient_cache_lock = asyncio.Lock()
         self._staged_actions: Dict[str, Any] = {}
-        reaction_store_path = Path(os.getenv("HERMES_HOME", str(Path.home() / ".hermes"))) / "signal_reaction_feedback.sqlite3"
-        self._reaction_feedback_store = SignalReactionFeedbackStore(reaction_store_path)
+        # Built lazily: while the opt-in is off, the adapter must leave no
+        # correlation database behind in HERMES_HOME.
+        self._reaction_feedback_store_instance: Optional[SignalReactionFeedbackStore] = None
 
         logger.info("Signal adapter initialized: url=%s account=%s groups=%s",
                      self.http_url, redact_phone(self.account),
                      "enabled" if self.group_allow_from else "disabled")
+
+    @property
+    def _reaction_feedback_store(self) -> SignalReactionFeedbackStore:
+        if self._reaction_feedback_store_instance is None:
+            path = Path(
+                os.getenv("HERMES_HOME", str(Path.home() / ".hermes"))
+            ) / "signal_reaction_feedback.sqlite3"
+            self._reaction_feedback_store_instance = SignalReactionFeedbackStore(path)
+        return self._reaction_feedback_store_instance
 
     def stage_actions(self, session_key: str, actions: Any, *, generation: int | None = None) -> None:
         """Stage generic actions for the final non-streamed Signal response."""

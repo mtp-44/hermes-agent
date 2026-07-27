@@ -261,6 +261,38 @@ class TestSignalReactionFeedback:
         await adapter._handle_envelope(self._reaction("+15550000002", "👍", 10))
         assert seen == ["t10"]
 
+    @pytest.mark.asyncio
+    async def test_disabled_feedback_writes_no_correlation_database(self, monkeypatch, tmp_path):
+        """While the opt-in is off the adapter must not touch HERMES_HOME."""
+        sender = "+15550000001"
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        monkeypatch.setenv("SIGNAL_ALLOWED_USERS", sender)
+        monkeypatch.delenv("SIGNAL_REACTION_FEEDBACK", raising=False)
+        adapter = _make_signal_adapter(monkeypatch)
+        assert adapter.reaction_feedback_enabled is False
+
+        adapter._rpc, calls = _stub_rpc({"timestamp": 4242})
+        sent = await adapter.send(
+            sender,
+            "Answer",
+            metadata={"actions": [{"label": "👍 Good", "action_id": "obg", "token": "tok"}]},
+        )
+        # The stable outbound identifier is still exposed; only feedback is off.
+        assert sent.message_id == "4242"
+        send_call = next(call for call in calls if call["method"] == "send")
+        assert "React" not in send_call["params"]["message"]
+
+        class Manager:
+            @staticmethod
+            def get_action_handler(action_id):  # pragma: no cover - must not run
+                raise AssertionError("disabled feedback dispatched an action")
+
+        import hermes_cli.plugins as plugins
+        monkeypatch.setattr(plugins, "get_plugin_manager", lambda: Manager())
+        await adapter._handle_envelope(self._reaction(sender, "👍", 4242))
+
+        assert list(tmp_path.glob("signal_reaction_feedback.sqlite3*")) == []
+
 
 class TestSignalConnectCleanup:
     """Regression coverage for failed connect() cleanup."""
