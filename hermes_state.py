@@ -122,7 +122,7 @@ T = TypeVar("T")
 
 DEFAULT_DB_PATH = get_hermes_home() / "state.db"
 
-SCHEMA_VERSION = 17
+SCHEMA_VERSION = 18
 
 # Cap on user-controlled FTS5 query input before regex/sanitizer processing.
 # Search queries do not need to be arbitrarily large, and bounding them keeps
@@ -776,12 +776,34 @@ CREATE TABLE IF NOT EXISTS compression_locks (
     expires_at REAL NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS client_inbox_items (
+    event_id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    created_at REAL NOT NULL,
+    kind TEXT NOT NULL,
+    priority TEXT NOT NULL DEFAULT 'normal',
+    body TEXT NOT NULL,
+    reference_json TEXT,
+    actions_json TEXT NOT NULL DEFAULT '[]',
+    read_at REAL,
+    acted_at REAL,
+    dismissed_at REAL,
+    expires_at REAL,
+    updated_at REAL NOT NULL,
+    action_callback_id TEXT,
+    action_ack TEXT
+);
+
 CREATE INDEX IF NOT EXISTS idx_sessions_source ON sessions(source);
 CREATE INDEX IF NOT EXISTS idx_sessions_source_id ON sessions(source, id);
 CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_started ON sessions(started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, timestamp);
 CREATE INDEX IF NOT EXISTS idx_compression_locks_expires ON compression_locks(expires_at);
+CREATE INDEX IF NOT EXISTS idx_client_inbox_session_order
+    ON client_inbox_items(session_id, created_at DESC, event_id DESC);
+CREATE INDEX IF NOT EXISTS idx_client_inbox_session_updated
+    ON client_inbox_items(session_id, updated_at);
 """
 
 # Indexes that reference columns added in later schema versions must be
@@ -2316,6 +2338,311 @@ class SessionDB:
             )
             row = cursor.fetchone()
         return dict(row) if row else None
+
+    @staticmethod
+    def _decode_client_inbox_row(row: sqlite3.Row | Dict[str, Any]) -> Dict[str, Any]:
+        item = dict(row)
+        for source, target, fallback in (
+            ("reference_json", "reference", None),
+            ("actions_json", "actions", []),
+        ):
+            raw = item.pop(source, None)
+            try:
+                item[target] = json.loads(raw) if raw else fallback
+            except (TypeError, ValueError):
+                item[target] = fallback
+        return item
+
+    def create_client_inbox_item(
+        self,
+        *,
+        event_id: str,
+        session_id: str,
+        created_at: float,
+        kind: str,
+        priority: str,
+        body: str,
+        reference: Optional[Dict[str, Any]] = None,
+        actions: Optional[List[Dict[str, str]]] = None,
+        expires_at: Optional[float] = None,
+    ) -> Tuple[Dict[str, Any], bool]:
+        """Persist one idempotent proactive-inbox record.
+
+        ``event_id`` is the producer's stable idempotency key. A retry with the
+        same immutable payload returns the original row and ``created=False``;
+        reusing the key for different content raises ``ValueError``.
+        """
+        reference_json = (
+            json.dumps(reference, sort_keys=True, separators=(",", ":"))
+            if reference is not None
+            else None
+        )
+        actions_json = json.dumps(actions or [], sort_keys=True, separators=(",", ":"))
+
+        def _do(conn):
+            existing = conn.execute(
+                "SELECT * FROM client_inbox_items WHERE event_id = ?",
+                (event_id,),
+            ).fetchone()
+            if existing is not None:
+                immutable = (
+                    "session_id",
+                    "kind",
+                    "priority",
+                    "body",
+                    "reference_json",
+                    "actions_json",
+                    "expires_at",
+                )
+                expected = {
+                    "session_id": session_id,
+                    "kind": kind,
+                    "priority": priority,
+                    "body": body,
+                    "reference_json": reference_json,
+                    "actions_json": actions_json,
+                    "expires_at": expires_at,
+                }
+                if any(existing[name] != expected[name] for name in immutable):
+                    raise ValueError(
+                        f"client inbox event_id {event_id!r} was reused with a different payload"
+                    )
+                return self._decode_client_inbox_row(existing), False
+
+            conn.execute(
+                """
+                INSERT INTO client_inbox_items (
+                    event_id, session_id, created_at, kind, priority, body,
+                    reference_json, actions_json, expires_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    event_id,
+                    session_id,
+                    created_at,
+                    kind,
+                    priority,
+                    body,
+                    reference_json,
+                    actions_json,
+                    expires_at,
+                    created_at,
+                ),
+            )
+            row = conn.execute(
+                "SELECT * FROM client_inbox_items WHERE event_id = ?",
+                (event_id,),
+            ).fetchone()
+            return self._decode_client_inbox_row(row), True
+
+        return self._execute_write(_do)
+
+    def get_client_inbox_item(
+        self,
+        event_id: str,
+        *,
+        session_id: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        query = "SELECT * FROM client_inbox_items WHERE event_id = ?"
+        values: List[Any] = [event_id]
+        if session_id is not None:
+            query += " AND session_id = ?"
+            values.append(session_id)
+        with self._lock:
+            row = self._conn.execute(query, values).fetchone()
+        return self._decode_client_inbox_row(row) if row else None
+
+    def list_client_inbox_items(
+        self,
+        session_id: str,
+        *,
+        limit: int = 100,
+        include_expired: bool = False,
+        now: Optional[float] = None,
+    ) -> List[Dict[str, Any]]:
+        clauses = ["session_id = ?"]
+        values: List[Any] = [session_id]
+        if not include_expired:
+            clauses.append("(expires_at IS NULL OR expires_at > ?)")
+            values.append(time.time() if now is None else now)
+        values.append(max(1, min(int(limit), 200)))
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM client_inbox_items WHERE "
+                + " AND ".join(clauses)
+                + " ORDER BY created_at DESC, event_id DESC LIMIT ?",
+                values,
+            ).fetchall()
+        return [self._decode_client_inbox_row(row) for row in rows]
+
+    def list_client_inbox_changes(
+        self,
+        session_id: str,
+        *,
+        updated_after: float,
+        after_event_id: str = "",
+        limit: int = 200,
+    ) -> List[Dict[str, Any]]:
+        """Return a deterministic ascending change feed for live subscribers."""
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT * FROM client_inbox_items
+                WHERE session_id = ?
+                  AND (
+                    updated_at > ?
+                    OR (updated_at = ? AND event_id > ?)
+                  )
+                ORDER BY updated_at ASC, event_id ASC
+                LIMIT ?
+                """,
+                (
+                    session_id,
+                    updated_after,
+                    updated_after,
+                    after_event_id,
+                    max(1, min(int(limit), 200)),
+                ),
+            ).fetchall()
+        return [self._decode_client_inbox_row(row) for row in rows]
+
+    def update_client_inbox_item(
+        self,
+        event_id: str,
+        session_id: str,
+        *,
+        mark_read: bool = False,
+        dismiss: bool = False,
+        now: Optional[float] = None,
+    ) -> Optional[Dict[str, Any]]:
+        changed_at = time.time() if now is None else now
+
+        def _do(conn):
+            row = conn.execute(
+                "SELECT event_id FROM client_inbox_items "
+                "WHERE event_id = ? AND session_id = ?",
+                (event_id, session_id),
+            ).fetchone()
+            if row is None:
+                return None
+            assignments = ["updated_at = ?"]
+            values: List[Any] = [changed_at]
+            if mark_read or dismiss:
+                assignments.append("read_at = COALESCE(read_at, ?)")
+                values.append(changed_at)
+            if dismiss:
+                assignments.append("dismissed_at = COALESCE(dismissed_at, ?)")
+                values.append(changed_at)
+            values.extend((event_id, session_id))
+            conn.execute(
+                f"UPDATE client_inbox_items SET {', '.join(assignments)} "
+                "WHERE event_id = ? AND session_id = ?",
+                values,
+            )
+            updated = conn.execute(
+                "SELECT * FROM client_inbox_items "
+                "WHERE event_id = ? AND session_id = ?",
+                (event_id, session_id),
+            ).fetchone()
+            return self._decode_client_inbox_row(updated)
+
+        return self._execute_write(_do)
+
+    def claim_client_inbox_action(
+        self,
+        event_id: str,
+        session_id: str,
+        callback_id: str,
+        *,
+        now: Optional[float] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Atomically claim an action so two clients cannot execute it twice."""
+        changed_at = time.time() if now is None else now
+
+        def _do(conn):
+            result = conn.execute(
+                """
+                UPDATE client_inbox_items
+                SET acted_at = ?, read_at = COALESCE(read_at, ?),
+                    action_callback_id = ?, updated_at = ?
+                WHERE event_id = ? AND session_id = ? AND acted_at IS NULL
+                  AND dismissed_at IS NULL
+                  AND (expires_at IS NULL OR expires_at > ?)
+                """,
+                (
+                    changed_at,
+                    changed_at,
+                    callback_id,
+                    changed_at,
+                    event_id,
+                    session_id,
+                    changed_at,
+                ),
+            )
+            if result.rowcount != 1:
+                return None
+            row = conn.execute(
+                "SELECT * FROM client_inbox_items "
+                "WHERE event_id = ? AND session_id = ?",
+                (event_id, session_id),
+            ).fetchone()
+            return self._decode_client_inbox_row(row)
+
+        return self._execute_write(_do)
+
+    def finish_client_inbox_action(
+        self,
+        event_id: str,
+        session_id: str,
+        callback_id: str,
+        ack: str,
+        *,
+        now: Optional[float] = None,
+    ) -> Optional[Dict[str, Any]]:
+        changed_at = time.time() if now is None else now
+
+        def _do(conn):
+            conn.execute(
+                """
+                UPDATE client_inbox_items
+                SET action_ack = ?, updated_at = ?
+                WHERE event_id = ? AND session_id = ?
+                  AND action_callback_id = ? AND acted_at IS NOT NULL
+                """,
+                (ack, changed_at, event_id, session_id, callback_id),
+            )
+            row = conn.execute(
+                "SELECT * FROM client_inbox_items "
+                "WHERE event_id = ? AND session_id = ?",
+                (event_id, session_id),
+            ).fetchone()
+            return self._decode_client_inbox_row(row) if row else None
+
+        return self._execute_write(_do)
+
+    def release_client_inbox_action(
+        self,
+        event_id: str,
+        session_id: str,
+        callback_id: str,
+        *,
+        now: Optional[float] = None,
+    ) -> None:
+        """Release a failed claim so a transient handler error can be retried."""
+        changed_at = time.time() if now is None else now
+
+        def _do(conn):
+            conn.execute(
+                """
+                UPDATE client_inbox_items
+                SET acted_at = NULL, action_callback_id = NULL, updated_at = ?
+                WHERE event_id = ? AND session_id = ?
+                  AND action_callback_id = ? AND action_ack IS NULL
+                """,
+                (changed_at, event_id, session_id, callback_id),
+            )
+
+        self._execute_write(_do)
 
     def resolve_session_id(self, session_id_or_prefix: str) -> Optional[str]:
         """Resolve an exact or uniquely prefixed session ID to the full ID.

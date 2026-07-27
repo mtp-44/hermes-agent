@@ -273,7 +273,7 @@ class DeliveryRouter:
             # spams logs. Self-healing: a later successful send clears the flag.
             # LOCAL/origin-without-chat targets are never dead-tracked.
             if (
-                target.platform != Platform.LOCAL
+                target.platform not in (Platform.LOCAL, Platform.CLIENT_INBOX)
                 and target.chat_id
                 and self.dead_targets.is_dead(target.platform.value, target.chat_id)
             ):
@@ -291,10 +291,38 @@ class DeliveryRouter:
             try:
                 if target.platform == Platform.LOCAL:
                     result = self._deliver_local(content, job_id, job_name, metadata)
+                elif target.platform == Platform.CLIENT_INBOX:
+                    from gateway.client_inbox import enqueue_client_inbox_item
+
+                    inbox_metadata = dict(metadata or {})
+                    result_item, created = enqueue_client_inbox_item(
+                        event_id=inbox_metadata.get("event_id") or job_id or "",
+                        body=content,
+                        kind=inbox_metadata.get("kind") or job_name or "proactive",
+                        priority=inbox_metadata.get("priority") or "normal",
+                        reference=inbox_metadata.get("reference"),
+                        actions=inbox_metadata.get("actions"),
+                        expires_at=inbox_metadata.get("expires_at"),
+                        created_at=inbox_metadata.get("created_at"),
+                        session_id=target.chat_id or inbox_metadata.get("session_id"),
+                        session_platform=inbox_metadata.get("session_platform"),
+                        chat_id=inbox_metadata.get("session_chat_id"),
+                        thread_id=inbox_metadata.get("session_thread_id"),
+                        user_id=inbox_metadata.get("session_user_id"),
+                    )
+                    result = {
+                        "event_id": result_item["event_id"],
+                        "session_id": result_item["session_id"],
+                        "created": created,
+                    }
                 else:
                     result = await self._deliver_to_platform(target, content, metadata)
                     # Successful platform delivery — clear any stale dead flag.
-                    if target.chat_id and not _send_result_failed(result):
+                    if (
+                        target.platform != Platform.CLIENT_INBOX
+                        and target.chat_id
+                        and not _send_result_failed(result)
+                    ):
                         self.dead_targets.clear(target.platform.value, target.chat_id)
                 
                 results[target.to_string()] = {
@@ -304,7 +332,7 @@ class DeliveryRouter:
             except Exception as e:
                 # A hard failure raises here. If the platform reported a
                 # whole-chat death, record it so future deliveries short-circuit.
-                if target.platform != Platform.LOCAL and target.chat_id:
+                if target.platform not in (Platform.LOCAL, Platform.CLIENT_INBOX) and target.chat_id:
                     dead_kind = _classify_dead_from_error_text(str(e))
                     if dead_kind:
                         self.dead_targets.mark_dead(

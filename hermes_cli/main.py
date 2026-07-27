@@ -11925,7 +11925,7 @@ _BUILTIN_SUBCOMMANDS = frozenset(
     {
         "acp", "auth", "backup", "bundles", "checkpoints", "claw", "completion",
         "computer-use",
-        "config", "cron", "curator", "dashboard", "serve", "debug", "doctor",
+        "client-inbox", "config", "cron", "curator", "dashboard", "serve", "debug", "doctor",
         "dump", "fallback", "gateway", "hooks", "import", "insights",
         "gui", "desktop", "kanban", "login", "logout", "logs", "lsp", "mcp", "memory", "migrate", "moa",
         "journey", "memory-graph", "learning",
@@ -12662,6 +12662,13 @@ def main():
     # cron command  (parser built in hermes_cli/subcommands/cron.py)
     # =========================================================================
     build_cron_parser(subparsers, cmd_cron=cmd_cron)
+
+    # =========================================================================
+    # client-inbox command — generic durable proactive delivery
+    # =========================================================================
+    from gateway.client_inbox import add_parser as _add_client_inbox_parser
+
+    _add_client_inbox_parser(subparsers)
 
     # =========================================================================
     # webhook command  (parser built in hermes_cli/subcommands/webhook.py)

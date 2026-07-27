@@ -142,6 +142,7 @@ class Platform(Enum):
     are cached in ``_value2member_map_`` for identity-stable comparisons.
     """
     LOCAL = "local"
+    CLIENT_INBOX = "client_inbox"
     TELEGRAM = "telegram"
     DISCORD = "discord"
     WHATSAPP = "whatsapp"

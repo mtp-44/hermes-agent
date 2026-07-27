@@ -8,6 +8,7 @@ import { Tip } from '@/components/ui/tooltip'
 import { useI18n } from '@/i18n'
 import { triggerHaptic } from '@/lib/haptics'
 import { cn } from '@/lib/utils'
+import { $clientInboxOpen, $clientInboxUnread, toggleClientInbox } from '@/store/client-inbox'
 import { $hapticsMuted, toggleHapticsMuted } from '@/store/haptics'
 import { toggleKeybindPanel } from '@/store/keybinds'
 import {
@@ -54,6 +55,8 @@ export function TitlebarControls({ leftTools = [], tools = [], onOpenSettings }:
   const fileBrowserOpen = useStore($fileBrowserOpen)
   const sidebarOpen = useStore($sidebarOpen)
   const panesFlipped = useStore($panesFlipped)
+  const clientInboxOpen = useStore($clientInboxOpen)
+  const clientInboxUnread = useStore($clientInboxUnread)
 
   const toggleHaptics = () => {
     if (!hapticsMuted) {
@@ -111,6 +114,28 @@ export function TitlebarControls({ leftTools = [], tools = [], onOpenSettings }:
 
   // Static system tools — always pinned to the screen's right edge.
   const systemTools: TitlebarTool[] = [
+    {
+      active: clientInboxOpen,
+      icon: (
+        <span className="relative">
+          <Codicon name="inbox" />
+          {clientInboxUnread > 0 && (
+            <span
+              aria-label={`${clientInboxUnread} unread inbox items`}
+              className="absolute -right-2 -top-2 min-w-3.5 rounded-full bg-(--ui-accent) px-1 text-center text-[0.58rem] font-semibold leading-3.5 text-white"
+            >
+              {clientInboxUnread > 99 ? '99+' : clientInboxUnread}
+            </span>
+          )}
+        </span>
+      ),
+      id: 'client-inbox',
+      label: clientInboxUnread > 0 ? `Open inbox (${clientInboxUnread} unread)` : 'Open inbox',
+      onSelect: () => {
+        triggerHaptic('open')
+        toggleClientInbox()
+      }
+    },
     {
       active: hapticsMuted,
       icon: <Codicon name={hapticsMuted ? 'mute' : 'unmute'} />,

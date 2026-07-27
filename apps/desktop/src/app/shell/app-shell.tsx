@@ -19,6 +19,7 @@ import { $paneWidthOverride } from '@/store/panes'
 import { $connection } from '@/store/session'
 import { isSecondaryWindow } from '@/store/windows'
 
+import { ClientInboxPanel } from '../client-inbox/client-inbox-panel'
 import { SIDEBAR_COLLAPSE_MEDIA_QUERY } from '../layout-constants'
 
 import { useWindowControlsOverlayWidth } from './hooks/use-window-controls-overlay-width'
@@ -134,7 +135,7 @@ export function AppShell({
   // between the pane-tool cluster and the system cluster so they don't sit
   // flush against each other. Modeled as N gaps (N - 1 inner + 1 trailing)
   // to keep the formula generic for any pane-tool count.
-  const SYSTEM_TOOL_COUNT = 4
+  const SYSTEM_TOOL_COUNT = 5
   const paneToolCount = titlebarTools?.filter(tool => !tool.hidden).length ?? 0
   const systemToolsWidth = `calc(${SYSTEM_TOOL_COUNT} * (var(--titlebar-control-size) + 0.25rem))`
 
@@ -224,6 +225,8 @@ export function AppShell({
 
       {/* Keybind map dialog (titlebar ⌨ button / ⌘/). */}
       <KeybindPanel />
+
+      {!hideTitlebarControls && <ClientInboxPanel />}
 
       {/* Mounted at the shell root (after overlays) so success/error toasts
           surface above every route and overlay — not just the chat view. */}

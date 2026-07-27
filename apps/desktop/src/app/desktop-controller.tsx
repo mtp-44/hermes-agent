@@ -15,10 +15,16 @@ import { cn } from '@/lib/utils'
 import { useSkinCommand } from '@/themes/use-skin-command'
 
 import { formatRefValue } from '../components/assistant-ui/directive-text'
-import { getSessionMessages, triggerCronJob } from '../hermes'
+import { getSessionMessages, type RpcEvent, triggerCronJob } from '../hermes'
 import { type ChatMessage, chatMessageText, preserveLocalAssistantErrors, toChatMessages } from '../lib/chat-messages'
 import { storedSessionIdForNotification } from '../lib/session-ids'
 import { latestSessionTodos } from '../lib/todos'
+import {
+  clearClientInbox,
+  type ClientInboxItem,
+  replaceClientInbox,
+  upsertClientInboxItem
+} from '../store/client-inbox'
 import { $commandPaletteOpen } from '../store/command-palette'
 import { setCronFocusJobId } from '../store/cron'
 import {
@@ -539,6 +545,50 @@ export function DesktopController() {
     selectedStoredSessionId
   })
 
+  const handleAppGatewayEvent = useCallback(
+    (event: RpcEvent) => {
+      if (event.type === 'client_inbox.changed') {
+        const item = (event.payload as { item?: ClientInboxItem } | undefined)?.item
+
+        if (item?.event_id && item.session_id === selectedStoredSessionIdRef.current) {
+          upsertClientInboxItem(item)
+        }
+
+        return
+      }
+
+      handleDesktopGatewayEvent(event)
+    },
+    [handleDesktopGatewayEvent, selectedStoredSessionIdRef]
+  )
+
+  useEffect(() => {
+    let cancelled = false
+    clearClientInbox()
+
+    if (gatewayState !== 'open' || !selectedStoredSessionId) {
+      return () => {
+        cancelled = true
+      }
+    }
+
+    void requestGateway<{ items?: ClientInboxItem[] }>('client_inbox.subscribe', {
+      session_id: selectedStoredSessionId
+    })
+      .then(result => {
+        if (!cancelled) {
+          replaceClientInbox(result.items ?? [])
+        }
+      })
+      .catch(() => {
+        // Inbox is additive. A backend without WP6 must not disturb chat.
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [gatewayState, requestGateway, selectedStoredSessionId])
+
   const {
     archiveSession,
     branchCurrentSession,
@@ -814,7 +864,7 @@ export function DesktopController() {
   }, [])
 
   useGatewayBoot({
-    handleGatewayEvent: handleDesktopGatewayEvent,
+    handleGatewayEvent: handleAppGatewayEvent,
     onConnectionReady: c => {
       connectionRef.current = c
     },

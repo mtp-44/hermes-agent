@@ -140,6 +140,9 @@ _cfg_cache: dict | None = None
 _cfg_mtime: float | None = None
 _cfg_path = None
 _session_resume_lock = threading.Lock()
+_client_inbox_subscribers: dict[str, dict[Transport, tuple[float, str]]] = {}
+_client_inbox_subscribers_lock = threading.Lock()
+_client_inbox_poller_started = False
 try:
     _slash_timeout = float(os.environ.get("HERMES_TUI_SLASH_TIMEOUT_S") or "45")
 except (ValueError, TypeError):
@@ -891,6 +894,85 @@ def _db_unavailable_error(rid, *, code: int):
     return _err(rid, code, f"state.db unavailable: {detail}")
 
 
+def _unsubscribe_client_inbox_transport(transport: Transport) -> None:
+    """Remove every durable-inbox subscription owned by a closed socket."""
+    with _client_inbox_subscribers_lock:
+        for session_id in list(_client_inbox_subscribers):
+            subscribers = _client_inbox_subscribers[session_id]
+            subscribers.pop(transport, None)
+            if not subscribers:
+                _client_inbox_subscribers.pop(session_id, None)
+
+
+def _start_client_inbox_poller() -> None:
+    """Fan persisted inbox changes to all connected subscribers.
+
+    Producers may run in another process, so persistence is the source of
+    truth. Polling state.db also makes process restart/reconnect semantics
+    explicit: live sockets receive changes; initial subscribe always rehydrates
+    the complete current list.
+    """
+    global _client_inbox_poller_started
+    with _client_inbox_subscribers_lock:
+        if _client_inbox_poller_started:
+            return
+        _client_inbox_poller_started = True
+
+    def _loop() -> None:
+        while True:
+            time.sleep(0.5)
+            with _client_inbox_subscribers_lock:
+                snapshot = {
+                    session_id: dict(subscribers)
+                    for session_id, subscribers in _client_inbox_subscribers.items()
+                }
+            if not snapshot:
+                continue
+            db = _get_db()
+            if db is None:
+                continue
+            for session_id, subscribers in snapshot.items():
+                for transport, cursor in subscribers.items():
+                    try:
+                        changes = db.list_client_inbox_changes(
+                            session_id,
+                            updated_after=cursor[0],
+                            after_event_id=cursor[1],
+                        )
+                    except Exception as exc:
+                        logger.debug("client inbox poll failed: %s", exc)
+                        continue
+                    last = cursor
+                    delivered = True
+                    for item in changes:
+                        delivered = transport.write({
+                            "jsonrpc": "2.0",
+                            "method": "event",
+                            "params": {
+                                "type": "client_inbox.changed",
+                                "session_id": session_id,
+                                "payload": {"item": item},
+                            },
+                        })
+                        if not delivered:
+                            break
+                        last = (float(item["updated_at"]), str(item["event_id"]))
+                    with _client_inbox_subscribers_lock:
+                        current = _client_inbox_subscribers.get(session_id, {})
+                        if not delivered:
+                            current.pop(transport, None)
+                        elif transport in current:
+                            current[transport] = last
+                        if not current:
+                            _client_inbox_subscribers.pop(session_id, None)
+
+    threading.Thread(
+        target=_loop,
+        daemon=True,
+        name="client-inbox-poller",
+    ).start()
+
+
 # ── per-session profile scoping (global remote mode) ───────────────────────────
 # One dashboard normally serves its launch profile. But the desktop's app-global
 # remote mode points every profile at this single backend, so resume/prompt must
@@ -1072,6 +1154,29 @@ def method(name: str):
         return fn
 
     return dec
+
+
+@method("client_inbox.subscribe")
+def _(rid, params: dict) -> dict:
+    session_id = str(params.get("session_id") or "").strip()
+    transport = current_transport()
+    if not session_id or transport is None:
+        return _err(rid, 4000, "session_id and websocket transport are required")
+    db = _get_db()
+    if db is None:
+        return _db_unavailable_error(rid, code=5000)
+    if not db.get_session(session_id):
+        return _err(rid, 4040, "session not found")
+    items = db.list_client_inbox_items(session_id, limit=200)
+    cursor = max(
+        ((float(item["updated_at"]), str(item["event_id"])) for item in items),
+        default=(0.0, ""),
+    )
+    _unsubscribe_client_inbox_transport(transport)
+    with _client_inbox_subscribers_lock:
+        _client_inbox_subscribers.setdefault(session_id, {})[transport] = cursor
+    _start_client_inbox_poller()
+    return _ok(rid, {"session_id": session_id, "items": items})
 
 
 def _normalize_request(req: Any) -> tuple[Any, str, dict] | dict:

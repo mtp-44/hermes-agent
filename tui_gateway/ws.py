@@ -427,6 +427,7 @@ async def handle_ws(ws: Any) -> None:
         detached_sessions = 0
         if transport is not None:
             transport.close()
+            server._unsubscribe_client_inbox_transport(transport)
 
             # Reap sessions this transport owned (close_on_disconnect sidecar
             # sessions) or detach the rest to the drop sentinel so later emits

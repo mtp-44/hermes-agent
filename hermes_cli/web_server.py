@@ -921,6 +921,59 @@ class ActionDispatchRequest(BaseModel):
     """A pressed message-action chip (``act:<action_id>:<token>``)."""
 
     callback_id: str
+    inbox_event_id: Optional[str] = None
+    session_id: Optional[str] = None
+
+
+class ClientInboxUpdateRequest(BaseModel):
+    session_id: str
+    read: bool = False
+    dismissed: bool = False
+
+
+@app.get("/api/client-inbox")
+async def list_client_inbox(session_id: str, request: Request):
+    """Rehydrate the durable inbox for one authenticated home session."""
+    _require_token(request)
+    from hermes_state import SessionDB
+
+    db = SessionDB()
+    try:
+        if not db.get_session(session_id):
+            raise HTTPException(status_code=404, detail="Session not found")
+        return {
+            "session_id": session_id,
+            "items": db.list_client_inbox_items(session_id, limit=200),
+        }
+    finally:
+        db.close()
+
+
+@app.patch("/api/client-inbox/{event_id}")
+async def update_client_inbox(
+    event_id: str,
+    payload: ClientInboxUpdateRequest,
+    request: Request,
+):
+    """Persist read/dismiss state; repeated updates are idempotent."""
+    _require_token(request)
+    if not payload.read and not payload.dismissed:
+        raise HTTPException(status_code=400, detail="No inbox state change requested")
+    from hermes_state import SessionDB
+
+    db = SessionDB()
+    try:
+        item = db.update_client_inbox_item(
+            event_id,
+            payload.session_id,
+            mark_read=payload.read,
+            dismiss=payload.dismissed,
+        )
+        if item is None:
+            raise HTTPException(status_code=404, detail="Inbox item not found")
+        return {"ok": True, "item": item}
+    finally:
+        db.close()
 
 
 @app.post("/api/actions/dispatch")
@@ -943,6 +996,46 @@ async def dispatch_message_action(payload: ActionDispatchRequest, request: Reque
         raise HTTPException(status_code=400, detail="Malformed action callback")
     action_id, action_token = decoded
 
+    inbox_db = None
+    if payload.inbox_event_id is not None:
+        if not payload.session_id:
+            raise HTTPException(
+                status_code=400,
+                detail="session_id is required for an inbox action",
+            )
+        from hermes_state import SessionDB
+
+        inbox_db = SessionDB()
+        item = inbox_db.get_client_inbox_item(
+            payload.inbox_event_id,
+            session_id=payload.session_id,
+        )
+        if item is None:
+            inbox_db.close()
+            raise HTTPException(status_code=404, detail="Inbox item not found")
+        valid_callbacks = {
+            str(action.get("callback_id") or "")
+            for action in item.get("actions") or []
+            if isinstance(action, dict)
+        }
+        if payload.callback_id not in valid_callbacks:
+            inbox_db.close()
+            raise HTTPException(
+                status_code=400,
+                detail="Action does not belong to that inbox item",
+            )
+        claimed_inbox_item = inbox_db.claim_client_inbox_action(
+            payload.inbox_event_id,
+            payload.session_id,
+            payload.callback_id,
+        )
+        if claimed_inbox_item is None:
+            inbox_db.close()
+            raise HTTPException(
+                status_code=409,
+                detail="Inbox action is stale or already handled",
+            )
+
     try:
         from hermes_cli.plugins import get_plugin_manager
 
@@ -950,7 +1043,16 @@ async def dispatch_message_action(payload: ActionDispatchRequest, request: Reque
     except Exception:
         handler = None
     if handler is None:
-        raise HTTPException(status_code=404, detail="No handler registered for that action")
+        if inbox_db is not None:
+            inbox_db.release_client_inbox_action(
+                payload.inbox_event_id,
+                payload.session_id,
+                payload.callback_id,
+            )
+            inbox_db.close()
+        raise HTTPException(
+            status_code=404, detail="No handler registered for that action"
+        )
 
     try:
         result = handler(action_id, action_token, {"platform": "desktop"})
@@ -958,9 +1060,29 @@ async def dispatch_message_action(payload: ActionDispatchRequest, request: Reque
             result = await result
     except Exception as exc:
         logging.getLogger(__name__).warning("Message-action handler failed: %s", exc)
+        if inbox_db is not None:
+            inbox_db.release_client_inbox_action(
+                payload.inbox_event_id,
+                payload.session_id,
+                payload.callback_id,
+            )
+            inbox_db.close()
         raise HTTPException(status_code=500, detail="Action handler failed")
 
-    return {"ok": True, "ack": str(result or "")}
+    ack = str(result or "")
+    item = None
+    if inbox_db is not None:
+        item = inbox_db.finish_client_inbox_action(
+            payload.inbox_event_id,
+            payload.session_id,
+            payload.callback_id,
+            ack,
+        )
+        inbox_db.close()
+    response = {"ok": True, "ack": ack}
+    if item is not None:
+        response["item"] = item
+    return response
 
 
 class ManagedFileDelete(BaseModel):
