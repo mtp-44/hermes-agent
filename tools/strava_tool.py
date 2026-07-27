@@ -13,6 +13,8 @@ OAuth refresh so the newest refresh_token is always persisted there.
 
 Tools registered:
   strava_sync        Fetch recent activities from Strava and sync to open brain
+                     (reconcile=true instead re-checks already-synced rows against
+                     Strava: rename/stat updates and removal of deleted activities)
   strava_activities  List/search synced activities already in open brain
 """
 
@@ -20,6 +22,7 @@ import json
 import logging
 import os
 import time
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 import httpx
@@ -264,6 +267,54 @@ def _insert_activity(url: str, key: str, activity: Dict) -> Dict:
     return rows[0] if rows else {}
 
 
+def _rows_since(url: str, key: str, since_date: str, limit: int = 2000) -> List[Dict]:
+    """Every synced Strava row dated on/after since_date (YYYY-MM-DD)."""
+    resp = httpx.get(
+        f"{url}/rest/v1/thoughts",
+        headers=_sb_headers(key, with_prefer=False),
+        params={
+            "metadata->>source": "eq.strava",
+            "metadata->>date": f"gte.{since_date}",
+            "select": "id,content,metadata,created_at",
+            "order": "created_at.asc",
+            "limit": str(limit),
+        },
+        timeout=30,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
+def _update_activity(
+    url: str, key: str, row_id: str, content: str, metadata: Dict, reembed: bool
+) -> None:
+    payload: Dict[str, Any] = {"content": content, "metadata": metadata}
+    if reembed:
+        embedding = _embed_content(content)
+        if embedding:
+            payload["embedding"] = embedding
+        else:
+            logger.warning("Row %s updated but embedding refresh failed — vector is stale", row_id)
+    resp = httpx.patch(
+        f"{url}/rest/v1/thoughts",
+        headers=_sb_headers(key, with_prefer=False),
+        params={"id": f"eq.{row_id}"},
+        json=payload,
+        timeout=30,
+    )
+    resp.raise_for_status()
+
+
+def _delete_row(url: str, key: str, row_id: str) -> None:
+    resp = httpx.delete(
+        f"{url}/rest/v1/thoughts",
+        headers=_sb_headers(key, with_prefer=False),
+        params={"id": f"eq.{row_id}"},
+        timeout=15,
+    )
+    resp.raise_for_status()
+
+
 def _query_activities(
     url: str,
     key: str,
@@ -298,6 +349,9 @@ def _query_activities(
 # ── Tool handlers ───────────────────────────────────────────────────────────────
 
 def _handle_strava_sync(args: dict, **_kw) -> str:
+    if args.get("reconcile"):
+        return _handle_strava_reconcile(args)
+
     count = min(int(args.get("count", 30)), 2000)
     activity_types = args.get("activity_types")  # None = all
 
@@ -348,6 +402,174 @@ def _handle_strava_sync(args: dict, **_kw) -> str:
         "new_activities": synced,
         "error_details": errors,
     })
+
+
+# Deleting is the one irreversible half of reconcile: an activity removed on
+# Strava can never be re-synced. A large phantom count almost always means the
+# Strava fetch came back short, not that the rides really went away.
+_MAX_DELETES_ABSOLUTE = 20
+_MAX_DELETES_RATIO = 0.25
+
+
+def _row_summary(row: Dict, reason: str) -> Dict:
+    meta = row.get("metadata", {})
+    return {
+        "row_id": row.get("id"),
+        "strava_id": meta.get("strava_id"),
+        "date": meta.get("date"),
+        "name": meta.get("name"),
+        "distance_km": round((meta.get("distance_m") or 0) / 1000, 1),
+        "reason": reason,
+    }
+
+
+def _handle_strava_reconcile(args: dict) -> str:
+    """Re-check already-synced rows against Strava.
+
+    strava_sync only ever inserts, so anything you change on Strava after a sync
+    leaves the brain wrong: a renamed ride keeps its old name, and an activity
+    you delete (a double upload from two head units, say) lingers forever as a
+    phantom row. This pass repairs all three directions — update, insert, delete
+    — over a trailing window.
+    """
+    days = max(1, min(int(args.get("reconcile_days", 30)), 730))
+    confirm_deletes = bool(args.get("confirm_deletes", False))
+
+    supabase_url, supabase_key = _get_supabase_config()
+    if not supabase_url or not supabase_key:
+        return tool_error("SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY must be set in ~/.hermes/.env")
+
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    since_date = cutoff.date().isoformat()
+    # Fetch two days wider than the window we judge, so an activity sitting on
+    # the boundary (Strava filters on UTC, rows are stamped local) is never
+    # mistaken for one that was deleted.
+    after_epoch = int((cutoff - timedelta(days=2)).timestamp())
+
+    try:
+        live = _fetch_activities(count=2000, after_epoch=after_epoch)
+    except httpx.HTTPStatusError as e:
+        return tool_error(f"Strava API error {e.response.status_code}: {e.response.text[:200]}")
+    except Exception as e:
+        return tool_error(f"Failed to fetch Strava activities: {e}")
+
+    live_by_id = {a["id"]: a for a in live if a.get("id")}
+
+    try:
+        rows = _rows_since(supabase_url, supabase_key, since_date)
+    except Exception as e:
+        return tool_error(f"Failed to read synced activities from open brain: {e}")
+
+    phantoms: List[Dict] = []
+    duplicates: List[Dict] = []
+    changed: List[tuple] = []
+    seen: Dict[int, Dict] = {}
+
+    for row in rows:
+        raw_id = (row.get("metadata") or {}).get("strava_id")
+        try:
+            strava_id = int(raw_id)
+        except (TypeError, ValueError):
+            continue  # not a synced Strava activity row
+        if strava_id in seen:
+            duplicates.append(row)  # same activity stored twice — keep the oldest
+            continue
+        seen[strava_id] = row
+
+        activity = live_by_id.get(strava_id)
+        if activity is None:
+            phantoms.append(row)
+            continue
+
+        new_content = _format_content(activity)
+        # Merge rather than replace: keeps detail-only fields (calories, suffer
+        # score) that the activity-list endpoint doesn't return.
+        new_metadata = {**(row.get("metadata") or {}), **_build_metadata(activity)}
+        if new_content != row.get("content") or new_metadata != row.get("metadata"):
+            changed.append((row, activity, new_content, new_metadata))
+
+    missing = [
+        a for strava_id, a in live_by_id.items()
+        if strava_id not in seen and (a.get("start_date_local") or "")[:10] >= since_date
+    ]
+
+    removable = (
+        [(row, "deleted on Strava") for row in phantoms]
+        + [(row, "duplicate row for the same activity") for row in duplicates]
+    )
+    delete_guard: Optional[str] = None
+    if len(removable) > max(_MAX_DELETES_ABSOLUTE, len(rows) * _MAX_DELETES_RATIO):
+        delete_guard = (
+            f"{len(removable)} of {len(rows)} rows in the window look deleted — that is more "
+            "likely a short Strava fetch than a real bulk delete. Nothing was removed. "
+            "Re-run with a smaller reconcile_days to inspect a narrower window."
+        )
+
+    updated, inserted, deleted, errors = [], [], [], []
+
+    for row, activity, new_content, new_metadata in changed:
+        try:
+            _update_activity(
+                supabase_url, supabase_key, row["id"], new_content, new_metadata,
+                reembed=new_content != row.get("content"),
+            )
+            updated.append({
+                "strava_id": (row.get("metadata") or {}).get("strava_id"),
+                "date": new_metadata.get("date"),
+                "was": row.get("content"),
+                "now": new_content,
+            })
+        except Exception as e:
+            errors.append({"row_id": row.get("id"), "op": "update", "error": str(e)})
+            logger.error("Reconcile failed to update row %s: %s", row.get("id"), e)
+
+    for activity in missing:
+        try:
+            _insert_activity(supabase_url, supabase_key, activity)
+            inserted.append({
+                "strava_id": activity.get("id"),
+                "date": (activity.get("start_date_local") or "")[:10],
+                "name": activity.get("name"),
+                "distance_km": round(activity.get("distance", 0) / 1000, 1),
+            })
+        except Exception as e:
+            errors.append({"strava_id": activity.get("id"), "op": "insert", "error": str(e)})
+            logger.error("Reconcile failed to insert activity %s: %s", activity.get("id"), e)
+
+    pending = [_row_summary(row, reason) for row, reason in removable]
+
+    if removable and confirm_deletes and not delete_guard:
+        for row, reason in removable:
+            try:
+                _delete_row(supabase_url, supabase_key, row["id"])
+                deleted.append(_row_summary(row, reason))
+            except Exception as e:
+                errors.append({"row_id": row.get("id"), "op": "delete", "error": str(e)})
+                logger.error("Reconcile failed to delete row %s: %s", row.get("id"), e)
+        pending = []
+
+    result: Dict[str, Any] = {
+        "mode": "reconcile",
+        "window_days": days,
+        "since": since_date,
+        "strava_activities_in_window": len(live_by_id),
+        "brain_rows_in_window": len(rows),
+        "updated": updated,
+        "inserted": inserted,
+        "deleted": deleted,
+        "errors": errors,
+    }
+    if delete_guard:
+        result["delete_guard"] = delete_guard
+        result["pending_deletes"] = pending
+    elif pending:
+        result["pending_deletes"] = pending
+        result["next_step"] = (
+            "These rows point at activities that no longer exist on Strava and deleting them "
+            "cannot be undone. Show them to the user, and only re-run with confirm_deletes=true "
+            "once they agree."
+        )
+    return json.dumps(result)
 
 
 def _handle_strava_activities(args: dict, **_kw) -> str:
@@ -403,11 +625,35 @@ STRAVA_SYNC_SCHEMA = {
     "description": (
         "Fetch recent Strava activities and sync them to the open brain so they can be "
         "searched and compared later. Already-synced activities are skipped (deduplication "
-        "by Strava activity ID). Returns a summary of what was synced."
+        "by Strava activity ID). Returns a summary of what was synced.\n"
+        "Set reconcile=true instead to repair already-synced rows over a trailing window: "
+        "renames and corrected stats are patched, activities deleted on Strava (double "
+        "uploads, for instance) are flagged for removal, and anything missing is inserted. "
+        "Use it whenever the brain disagrees with Strava — e.g. a ride shows up twice. "
+        "Deletions are only carried out when the user has agreed and confirm_deletes=true."
     ),
     "parameters": {
         "type": "object",
         "properties": {
+            "reconcile": {
+                "type": "boolean",
+                "description": "Run a reconcile pass over already-synced rows instead of a plain sync (default false).",
+                "default": False,
+            },
+            "reconcile_days": {
+                "type": "integer",
+                "description": "How many trailing days the reconcile pass covers (default 30, max 730).",
+                "default": 30,
+            },
+            "confirm_deletes": {
+                "type": "boolean",
+                "description": (
+                    "Reconcile only. Actually delete the rows whose Strava activity is gone. "
+                    "Leave false first to see them under pending_deletes, show the user, and "
+                    "only set true once they have agreed — deletion cannot be undone."
+                ),
+                "default": False,
+            },
             "count": {
                 "type": "integer",
                 "description": "How many recent activities to fetch from Strava (default 30, max 2000). Use a large value to backfill full history.",
