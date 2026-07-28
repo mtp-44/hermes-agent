@@ -30,6 +30,10 @@ DEFAULT_OPEN_BRAIN_ROOT = Path(
 FOCUSED_TESTS = (
     "tests/test_conftest_session_home.py",
     "tests/scripts/test_hermes_update_guard_feedback_wiring.py",
+    # These tests load plugins by path, so a green run does not prove the
+    # deployed tree carries the wiring (WP3, 2026-07-27). The discovered-plugin
+    # guard tests pin the check that closes that gap.
+    "tests/scripts/test_hermes_update_guard_discovered_plugin.py",
     "tests/plugins/test_openbrain_commands_plugin.py",
     "tests/plugins/test_openbrain_query_brain_format_plugin.py",
     "tests/plugins/memory/test_openbrain_provider.py",

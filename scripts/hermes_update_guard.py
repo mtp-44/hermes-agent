@@ -9,6 +9,7 @@ summary without exposing secrets.
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import os
 import plistlib
@@ -125,6 +126,18 @@ LOCAL_DELTA_PATTERNS: tuple[tuple[str, str | tuple[str, ...]], ...] = (
     ("scripts/hermes_health_monitor.py", "_check_openbrain"),
 )
 
+# Platform gates that must survive in the plugin copy the gateway actually
+# *discovers*. Each entry is (relative_path, function_name, required_platform).
+#
+# Substring markers alone cannot catch this class of failure: WP3 (2026-07-27)
+# found the isolated gateway running a pre-Signal copy of the query-feedback
+# plugin, which still contained every marker in LOCAL_DELTA_PATTERNS and only
+# differed by the platform set inside the outbound decorator. Assert the gate
+# itself, parsed from the discovered file.
+DISCOVERED_PLUGIN_GATES: tuple[tuple[str, str, str], ...] = (
+    ("plugins/openbrain-query-brain-format/__init__.py", "_decorate_outbound", "signal"),
+)
+
 LAUNCH_AGENT_LABELS = (
     "ai.hermes.gateway",
     "com.mh.hermes-dashboard",
@@ -178,6 +191,54 @@ def _read_text(path: Path) -> str:
         return path.read_text(encoding="utf-8")
     except OSError:
         return ""
+
+
+def _resolve_bundled_plugins_dir() -> tuple[Path | None, str, str]:
+    """Resolve the bundled plugin root exactly as plugin discovery does.
+
+    Returns ``(root, hermes_cli_plugins_file, error)``. The root comes from
+    ``hermes_cli.plugins.get_bundled_plugins_dir()``, so it honours
+    ``HERMES_BUNDLED_PLUGINS`` and — crucially — follows whichever checkout the
+    interpreter resolved ``hermes_cli`` from. A shared or symlinked venv can
+    bind that package to a different checkout than this repo.
+    """
+    try:
+        from hermes_cli.plugins import get_bundled_plugins_dir
+    except Exception as exc:  # ImportError or a failed transitive import
+        return None, "", f"could not import hermes_cli.plugins: {exc}"
+    module = sys.modules.get("hermes_cli.plugins")
+    module_file = str(getattr(module, "__file__", "") or "")
+    try:
+        return Path(get_bundled_plugins_dir()), module_file, ""
+    except Exception as exc:
+        return None, module_file, f"get_bundled_plugins_dir() failed: {exc}"
+
+
+def _gate_platforms(source: str, func_name: str) -> set[str] | None:
+    """Collect the string constants of set literals inside ``func_name``.
+
+    Returns ``None`` when the source does not parse or has no such function,
+    which the caller reports as a failure rather than a silent pass.
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return None
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if node.name != func_name:
+            continue
+        found: set[str] = set()
+        for inner in ast.walk(node):
+            if isinstance(inner, ast.Set):
+                found.update(
+                    elt.value
+                    for elt in inner.elts
+                    if isinstance(elt, ast.Constant) and isinstance(elt.value, str)
+                )
+        return found
+    return None
 
 
 def _load_dotenv(path: Path) -> dict[str, str]:
@@ -360,6 +421,7 @@ class HermesUpdateGuard:
         self._check_repo_identity()
         self._check_git_state()
         self._check_local_delta_surface()
+        self._check_discovered_plugin_delta()
         self._check_config()
         self._check_ssl_guard_inputs()
         self._check_launch_agents()
@@ -367,6 +429,7 @@ class HermesUpdateGuard:
     def _post_checks(self) -> None:
         self._check_repo_identity()
         self._check_runtime_gateway()
+        self._check_discovered_plugin_delta()
         self._check_health_monitor()
         self._check_config()
         self._check_launch_agents()
@@ -478,6 +541,113 @@ class HermesUpdateGuard:
             self.add("local-delta-patterns", "fail", f"expected integration markers missing: {', '.join(missing_patterns)}")
         else:
             self.add("local-delta-patterns", "pass", f"{marker_count} integration markers present")
+
+    def _discovered_plugin_roots(self) -> list[Path]:
+        """Override roots consulted after the bundled root, lowest priority first.
+
+        Mirrors ``PluginRegistry._discover_and_load_inner``: user plugins under
+        ``$HERMES_HOME/plugins`` override bundled ones, and project plugins
+        override those again when explicitly enabled.
+        """
+        roots = [self.hermes_home / "plugins"]
+        if os.getenv("HERMES_ENABLE_PROJECT_PLUGINS", "").strip().lower() in {"1", "true", "yes", "on"}:
+            roots.append(Path.cwd() / ".hermes" / "plugins")
+        return roots
+
+    def _check_discovered_plugin_delta(self) -> None:
+        """Assert the wiring in the plugin copy the gateway *discovers*.
+
+        ``local-delta-patterns`` reads files under this repo. That is not the
+        tree the gateway necessarily loads: the bundled root is derived from
+        the installed ``hermes_cli`` package, and ``$HERMES_HOME/plugins``
+        overrides it per plugin. WP3 (2026-07-27) hit both halves of that gap —
+        a symlinked venv resolved ``hermes_cli`` to another checkout, so the
+        gateway silently ran a pre-Signal query-feedback decorator while the
+        repository file was correct and the path-loading tests passed.
+        """
+        bundled, hermes_cli_file, error = _resolve_bundled_plugins_dir()
+        if bundled is None:
+            self.add("discovered-plugin-root", "fail", error)
+            return
+
+        repo_plugins = (REPO_ROOT / "plugins").resolve()
+        bundled_root = bundled.resolve()
+        if bundled_root != repo_plugins:
+            self.add(
+                "discovered-plugin-root",
+                "fail",
+                f"plugin discovery resolves to {bundled_root}, not this repo's {repo_plugins}; "
+                f"hermes_cli loaded from {hermes_cli_file or '<unknown>'}",
+                bundled_root=str(bundled_root),
+                repo_plugins=str(repo_plugins),
+                hermes_cli=hermes_cli_file,
+            )
+        else:
+            self.add(
+                "discovered-plugin-root",
+                "pass",
+                f"bundled plugin root is this repo ({repo_plugins})",
+                hermes_cli=hermes_cli_file,
+            )
+
+        override_roots = self._discovered_plugin_roots()
+
+        def _discovered_path(rel_path: str) -> Path:
+            plugin_rel = Path(rel_path).relative_to("plugins")
+            winner = bundled / plugin_rel
+            for root in override_roots:
+                if (root / plugin_rel.parts[0]).is_dir():
+                    winner = root / plugin_rel
+            return winner
+
+        missing_patterns: list[str] = []
+        marker_count = 0
+        overridden: dict[str, str] = {}
+        for rel_path, required in LOCAL_DELTA_PATTERNS:
+            if not rel_path.startswith("plugins/"):
+                continue
+            path = _discovered_path(rel_path)
+            if not path.resolve().is_relative_to(repo_plugins):
+                overridden[rel_path] = str(path)
+            text = _read_text(path)
+            if not text:
+                missing_patterns.append(f"{rel_path}:<unreadable at {path}>")
+                continue
+            needles = (required,) if isinstance(required, str) else tuple(required)
+            for needle in needles:
+                marker_count += 1
+                if needle not in text:
+                    missing_patterns.append(f"{path}:{needle}")
+
+        gate_failures: list[str] = []
+        for rel_path, func_name, platform in DISCOVERED_PLUGIN_GATES:
+            path = _discovered_path(rel_path)
+            platforms = _gate_platforms(_read_text(path), func_name)
+            if platforms is None:
+                gate_failures.append(f"{path}:{func_name} not found or unparseable")
+            elif platform not in platforms:
+                gate_failures.append(
+                    f"{path}:{func_name} does not gate on {platform!r} (found: {sorted(platforms) or 'none'})"
+                )
+
+        if missing_patterns or gate_failures:
+            self.add(
+                "discovered-plugin-delta",
+                "fail",
+                "discovered plugin copy is stale: " + "; ".join([*missing_patterns, *gate_failures]),
+                markers_checked=marker_count,
+                overrides=overridden,
+            )
+        else:
+            self.add(
+                "discovered-plugin-delta",
+                "pass",
+                f"{marker_count} marker(s) and {len(DISCOVERED_PLUGIN_GATES)} platform gate(s) "
+                f"present in the discovered plugin copies"
+                + (f"; overridden outside this repo: {', '.join(sorted(overridden))}" if overridden else ""),
+                markers_checked=marker_count,
+                overrides=overridden,
+            )
 
     def _check_config(self) -> None:
         config_path = self.hermes_home / "config.yaml"
