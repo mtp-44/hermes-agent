@@ -70,6 +70,9 @@ SSE_RETRY_DELAY_INITIAL = 2.0
 SSE_RETRY_DELAY_MAX = 60.0
 HEALTH_CHECK_INTERVAL = 30.0  # seconds between health checks
 HEALTH_CHECK_STALE_THRESHOLD = 120.0  # seconds without SSE activity before concern
+# Acknowledges a recorded feedback reaction. Kept distinct from the four
+# feedback emoji (👍/👎/✅/🙈) so an ack can never be read as a second vote.
+FEEDBACK_ACK_EMOJI = "💾"
 
 
 # ---------------------------------------------------------------------------
@@ -1219,6 +1222,32 @@ class SignalAdapter(BasePlatformAdapter):
                 await result
         except Exception as exc:
             logger.warning("Signal feedback action handler failed for %s: %s", action_id, exc)
+            return
+        await self._ack_feedback_reaction(chat_id, target_timestamp)
+
+    async def _ack_feedback_reaction(self, chat_id: str, target_timestamp: Any) -> None:
+        """Confirm a recorded feedback reaction in place, with no chat message.
+
+        Without this, a reaction produces no observable result at all: a dead
+        feedback path looks exactly like a working one from the phone, and only
+        a database read tells them apart (WP3, 2026-07-27).
+
+        Reacts to Hermes' own outbound answer — the message that was reacted to —
+        so the target author is this account. The ack emoji is deliberately not
+        one of the four feedback emoji (👍/👎/✅/🙈): on a proactive nudge an ✅
+        ack would sit beside the user's own ✅ press and read as a second vote.
+
+        Best-effort by design. The feedback record is already written by the time
+        this runs, so a failed ack must never turn into a failed dispatch.
+        """
+        if not self._reactions_enabled():
+            return
+        try:
+            await self.send_reaction(
+                chat_id, FEEDBACK_ACK_EMOJI, self.account, int(target_timestamp)
+            )
+        except Exception as exc:
+            logger.debug("Signal: feedback ack reaction failed: %s", exc)
 
     # ------------------------------------------------------------------
     # Sending

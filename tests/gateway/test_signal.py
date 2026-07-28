@@ -6,6 +6,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch, AsyncMock
 from urllib.parse import quote
 
+import gateway.platforms.signal as signal_module
 from gateway.config import Platform, PlatformConfig
 
 
@@ -260,6 +261,115 @@ class TestSignalReactionFeedback:
         await adapter._handle_envelope(self._reaction(sender, "👍", 11))
         await adapter._handle_envelope(self._reaction("+15550000002", "👍", 10))
         assert seen == ["t10"]
+
+    @staticmethod
+    def _ack_calls(calls):
+        return [
+            call for call in calls
+            if call["method"] == "sendReaction"
+            and call["params"].get("emoji") == signal_module.FEEDBACK_ACK_EMOJI
+        ]
+
+    async def _dispatch_reaction(self, monkeypatch, tmp_path, *, handler, emoji="👍"):
+        """Store one correlation, react to it, and return the captured RPC calls."""
+        sender = "+15550000001"
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        monkeypatch.setenv("SIGNAL_ALLOWED_USERS", sender)
+        monkeypatch.setenv("SIGNAL_REACTION_FEEDBACK", "true")
+        adapter = _make_signal_adapter(monkeypatch)
+        adapter._reaction_feedback_store.store_actions(
+            account=adapter.account,
+            chat_id=sender,
+            message_timestamp=4242,
+            actions=[{"action_id": "obg", "token": "tok"}],
+            ttl_seconds=60,
+        )
+        adapter._rpc, calls = _stub_rpc({"timestamp": 1})
+
+        class Manager:
+            @staticmethod
+            def get_action_handler(action_id):
+                return handler
+
+        import hermes_cli.plugins as plugins
+        monkeypatch.setattr(plugins, "get_plugin_manager", lambda: Manager())
+        await adapter._handle_envelope(self._reaction(sender, emoji, 4242))
+        return adapter, calls
+
+    @pytest.mark.asyncio
+    async def test_recorded_feedback_is_acknowledged_with_a_reaction(self, monkeypatch, tmp_path):
+        """A recorded reaction confirms in place — no chat message, no second vote."""
+        async def handler(action_id, token, context):
+            return None
+
+        adapter, calls = await self._dispatch_reaction(monkeypatch, tmp_path, handler=handler)
+
+        assert not [call for call in calls if call["method"] == "send"]
+        acks = self._ack_calls(calls)
+        assert len(acks) == 1
+        params = acks[0]["params"]
+        # The reacted message is Hermes' own answer, so it authored the target.
+        assert params["targetAuthor"] == adapter.account
+        assert params["targetTimestamp"] == 4242
+        assert params["recipient"] == ["+15550000001"]
+        # An ack must never collide with a feedback press.
+        assert signal_module.FEEDBACK_ACK_EMOJI not in {"👍", "👎", "✅", "🙈"}
+
+    @pytest.mark.asyncio
+    async def test_failed_handler_is_not_acknowledged(self, monkeypatch, tmp_path):
+        """No feedback record, no ack — silence is the failure signal."""
+        async def handler(action_id, token, context):
+            raise RuntimeError("open brain unavailable")
+
+        _, calls = await self._dispatch_reaction(monkeypatch, tmp_path, handler=handler)
+        assert self._ack_calls(calls) == []
+
+    @pytest.mark.asyncio
+    async def test_ack_failure_does_not_break_dispatch(self, monkeypatch, tmp_path):
+        """The record is already written; a failed ack must stay best-effort."""
+        seen = []
+
+        async def handler(action_id, token, context):
+            seen.append(token)
+
+        sender = "+15550000001"
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        monkeypatch.setenv("SIGNAL_ALLOWED_USERS", sender)
+        monkeypatch.setenv("SIGNAL_REACTION_FEEDBACK", "true")
+        adapter = _make_signal_adapter(monkeypatch)
+        adapter._reaction_feedback_store.store_actions(
+            account=adapter.account,
+            chat_id=sender,
+            message_timestamp=4242,
+            actions=[{"action_id": "obg", "token": "tok"}],
+            ttl_seconds=60,
+        )
+
+        async def exploding_send_reaction(*args, **kwargs):
+            raise RuntimeError("signal-cli down")
+
+        adapter.send_reaction = exploding_send_reaction
+
+        class Manager:
+            @staticmethod
+            def get_action_handler(action_id):
+                return handler
+
+        import hermes_cli.plugins as plugins
+        monkeypatch.setattr(plugins, "get_plugin_manager", lambda: Manager())
+        await adapter._handle_envelope(self._reaction(sender, "👍", 4242))
+        assert seen == ["tok"]
+
+    @pytest.mark.asyncio
+    async def test_ack_respects_the_global_reactions_toggle(self, monkeypatch, tmp_path):
+        """SIGNAL_REACTIONS=false silences the ack like every other reaction."""
+        monkeypatch.setenv("SIGNAL_REACTIONS", "false")
+
+        async def handler(action_id, token, context):
+            return None
+
+        _, calls = await self._dispatch_reaction(monkeypatch, tmp_path, handler=handler)
+        assert self._ack_calls(calls) == []
 
     @pytest.mark.asyncio
     async def test_disabled_feedback_writes_no_correlation_database(self, monkeypatch, tmp_path):
