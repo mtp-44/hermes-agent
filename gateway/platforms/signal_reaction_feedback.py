@@ -59,6 +59,31 @@ class SignalReactionFeedbackStore:
                 ON signal_reaction_feedback (expires_at)
                 """
             )
+            # Numbered actions (WP4) are a separate table on purpose. A digest
+            # offers three choices per commitment, so the message-wide atomic
+            # claim above — right for one binary verdict per answer — would let
+            # acting on item 1 silently consume items 2..n.
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS signal_numbered_actions (
+                    account TEXT NOT NULL,
+                    chat_id TEXT NOT NULL,
+                    message_timestamp TEXT NOT NULL,
+                    ordinal INTEGER NOT NULL,
+                    action_id TEXT NOT NULL,
+                    token TEXT NOT NULL,
+                    label TEXT NOT NULL,
+                    expires_at REAL NOT NULL,
+                    PRIMARY KEY (account, chat_id, message_timestamp, ordinal, action_id)
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_signal_numbered_actions_lookup
+                ON signal_numbered_actions (account, chat_id, expires_at)
+                """
+            )
         try:
             os.chmod(self.path, 0o600)
         except OSError:
@@ -104,6 +129,76 @@ class SignalReactionFeedbackStore:
                 """,
                 rows,
             )
+
+    def store_numbered_actions(
+        self,
+        *,
+        account: str,
+        chat_id: str,
+        message_timestamp: str | int,
+        numbered: Iterable[tuple[int, str, str, str]],
+        ttl_seconds: float,
+    ) -> int:
+        """Record ``(ordinal, action_id, token, label)`` for one outbound message.
+
+        Returns the number of rows stored. Ordinals are only meaningful with the
+        message that showed them, so the newest message in a chat wins on lookup
+        — a fresh digest renumbers, and yesterday's "3" must not resolve against
+        today's list.
+        """
+        now = time.time()
+        expires_at = now + ttl_seconds
+        rows = [
+            (account, chat_id, str(message_timestamp), int(ordinal), action_id, token, label, expires_at)
+            for ordinal, action_id, token, label in numbered
+            if action_id and token
+        ]
+        if not rows:
+            return 0
+        with self._connect() as conn:
+            conn.execute("DELETE FROM signal_numbered_actions WHERE expires_at <= ?", (now,))
+            conn.executemany(
+                """
+                INSERT OR REPLACE INTO signal_numbered_actions
+                    (account, chat_id, message_timestamp, ordinal, action_id, token, label, expires_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                rows,
+            )
+        return len(rows)
+
+    def resolve_numbered_action(
+        self,
+        *,
+        account: str,
+        chat_id: str,
+        ordinal: int,
+        action_id: str,
+    ) -> dict[str, Any] | None:
+        """Look up one numbered action from the most recent message that offered it.
+
+        Not one-shot: these replace buttons that stayed pressable, so correcting
+        a snooze to a done must keep working until the correlation expires.
+        """
+        now = time.time()
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT token, label, message_timestamp FROM signal_numbered_actions
+                WHERE account = ? AND chat_id = ? AND ordinal = ? AND action_id = ?
+                  AND expires_at > ?
+                ORDER BY CAST(message_timestamp AS INTEGER) DESC
+                LIMIT 1
+                """,
+                (account, chat_id, int(ordinal), action_id, now),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "token": row["token"],
+            "label": row["label"],
+            "message_timestamp": row["message_timestamp"],
+        }
 
     def claim(
         self,

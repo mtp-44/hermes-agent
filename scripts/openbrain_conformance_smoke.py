@@ -43,6 +43,10 @@ FOCUSED_TESTS = (
     # durable timestamp correlation, strict authorization, replay/replacement,
     # expiry, and dispatch into the real Open Brain feedback handler.
     "tests/gateway/test_signal.py",
+    # The digest's commitment actions are multi-choice, so on Signal they are
+    # numbered reply commands rather than reactions (WP4, 2026-07-28). Same
+    # generic action seam, same fail-closed authorization.
+    "tests/gateway/test_signal_numbered_actions.py",
     "tests/gateway/test_boundary_capture.py",
     "tests/gateway/test_capture_commands.py",
     "tests/gateway/test_session_boundary_hooks.py",

@@ -18,6 +18,7 @@ import json
 import logging
 import os
 import random
+import re
 import shutil
 import subprocess
 import tempfile
@@ -73,6 +74,11 @@ HEALTH_CHECK_STALE_THRESHOLD = 120.0  # seconds without SSE activity before conc
 # Acknowledges a recorded feedback reaction. Kept distinct from the four
 # feedback emoji (👍/👎/✅/🙈) so an ack can never be read as a second vote.
 FEEDBACK_ACK_EMOJI = "💾"
+# Numbered reply commands (WP4): the fallback for multi-choice actions that a
+# binary reaction cannot represent. Verbs map onto the generic action ids the
+# openbrain-commands plugin already registers for digest commitments.
+NUMBERED_COMMAND_NAME = "c"
+NUMBERED_COMMAND_VERBS = {"cdone": "done", "cdrop": "drop", "cseen": "seen"}
 
 
 # ---------------------------------------------------------------------------
@@ -731,6 +737,26 @@ class SignalAdapter(BasePlatformAdapter):
                 # intentional newlines in a multi-line message are preserved.
                 text = text.replace("  ", " ").strip()
 
+        # Numbered commands (WP4) are the Signal fallback for multi-choice
+        # actions. Like a reaction they are an action dispatch, not an agent
+        # turn, so they are consumed here — before session/agent work — and
+        # only when the text is exactly one of them.
+        if self.reaction_feedback_enabled and text:
+            parsed_command = self.parse_numbered_command(text)
+            if parsed_command is not None:
+                ordinal, command_action_id = parsed_command
+                handled = await self._handle_numbered_command(
+                    sender=sender,
+                    sender_uuid=sender_uuid,
+                    chat_id=chat_id,
+                    is_group=is_group,
+                    group_id=group_id,
+                    ordinal=ordinal,
+                    action_id=command_action_id,
+                )
+                if handled:
+                    return
+
         # Extract quote (reply-to) context from Signal dataMessage. Signal's
         # quote.id is the timestamp of the quoted message; quote.author points
         # at the quoted sender when available. Preserve both so the gateway can
@@ -1143,6 +1169,45 @@ class SignalAdapter(BasePlatformAdapter):
         return ""
 
     @staticmethod
+    def _numbered_actions(actions: list[dict[str, Any]]) -> list[tuple[int, str, str, str]]:
+        """Actions whose labels are numbered — the multi-choice case (WP4).
+
+        A Signal reaction is one binary choice on one message, so it cannot
+        express "done / drop / snooze, for item 3 of 5". Those actions are
+        surfaced as numbered reply commands instead. The ordinal comes from the
+        producer's own label ("2 ✅" → 2), which is the number the reader sees
+        in the text above the legend.
+        """
+        numbered: list[tuple[int, str, str, str]] = []
+        for action in actions:
+            action_id = str(action.get("action_id") or "").strip()
+            token = str(action.get("token") or "").strip()
+            label = str(action.get("label") or "").strip()
+            if action_id not in NUMBERED_COMMAND_VERBS or not token:
+                continue
+            match = re.match(r"^(\d+)", label)
+            if not match:
+                continue
+            numbered.append((int(match.group(1)), action_id, token, label))
+        return numbered
+
+    @staticmethod
+    def _numbered_command_prompt(numbered: list[tuple[int, str, str, str]]) -> str:
+        if not numbered:
+            return ""
+        ordinals = sorted({ordinal for ordinal, _, _, _ in numbered})
+        verbs = [
+            verb
+            for action_id, verb in NUMBERED_COMMAND_VERBS.items()
+            if any(action_id == aid for _, aid, _, _ in numbered)
+        ]
+        if not verbs:
+            return ""
+        span = f"{ordinals[0]}–{ordinals[-1]}" if len(ordinals) > 1 else str(ordinals[0])
+        verb_list = " · ".join(f"/{NUMBERED_COMMAND_NAME} <n> {verb}" for verb in verbs)
+        return f"Reply: {verb_list}   (n = {span})"
+
+    @staticmethod
     def _reaction_feedback_ttl_seconds() -> float:
         try:
             configured = float(os.getenv("SIGNAL_REACTION_FEEDBACK_TTL_SECONDS", "604800"))
@@ -1225,6 +1290,99 @@ class SignalAdapter(BasePlatformAdapter):
             return
         await self._ack_feedback_reaction(chat_id, target_timestamp)
 
+    @staticmethod
+    def parse_numbered_command(text: str) -> Optional[tuple[int, str]]:
+        """Parse ``/c <n> <verb>`` → ``(ordinal, action_id)``.
+
+        Also accepts ``/c done 3`` because that is what people type. Returns
+        ``None`` for anything else, so ordinary chat is never intercepted.
+        """
+        stripped = (text or "").strip()
+        if not stripped.startswith("/"):
+            return None
+        parts = stripped[1:].split()
+        if len(parts) != 3 or parts[0].lower() != NUMBERED_COMMAND_NAME:
+            return None
+        verb_by_name = {verb: action_id for action_id, verb in NUMBERED_COMMAND_VERBS.items()}
+        first, second = parts[1].lower(), parts[2].lower()
+        if first.isdigit() and second in verb_by_name:
+            return int(first), verb_by_name[second]
+        if second.isdigit() and first in verb_by_name:
+            return int(second), verb_by_name[first]
+        return None
+
+    async def _handle_numbered_command(
+        self,
+        *,
+        sender: str,
+        sender_uuid: str,
+        chat_id: str,
+        is_group: bool,
+        group_id: Optional[str],
+        ordinal: int,
+        action_id: str,
+    ) -> bool:
+        """Dispatch one numbered command. ``True`` means it was consumed here.
+
+        Authorization is the same fail-closed check reactions use: this invokes
+        a registered action, so it must never inherit a wildcard allowlist.
+        """
+        if not self._is_feedback_reactor_authorized(
+            sender, sender_uuid, is_group=is_group, group_id=group_id
+        ):
+            logger.debug(
+                "Signal: ignored numbered command from unauthorized %s", redact_phone(sender)
+            )
+            return False
+
+        resolved = self._reaction_feedback_store.resolve_numbered_action(
+            account=self.account,
+            chat_id=chat_id,
+            ordinal=ordinal,
+            action_id=action_id,
+        )
+        verb = NUMBERED_COMMAND_VERBS.get(action_id, action_id)
+        if not resolved:
+            await self.send(
+                chat_id,
+                f"No item {ordinal} to mark {verb} — it may have expired or been renumbered "
+                f"by a newer digest.",
+            )
+            return True
+
+        try:
+            from hermes_cli.plugins import get_plugin_manager
+            handler = get_plugin_manager().get_action_handler(action_id)
+        except Exception:
+            handler = None
+        if handler is None:
+            logger.warning("Signal: no registered action handler for %s", action_id)
+            await self.send(chat_id, f"⚠️ Can't mark {ordinal} {verb} — no handler is registered.")
+            return True
+
+        context = {
+            "platform": self.name,
+            "chat_id": chat_id,
+            "user_id": sender,
+            "token": resolved["token"],
+            "numbered_ordinal": ordinal,
+            "numbered_source_timestamp": resolved.get("message_timestamp"),
+        }
+        try:
+            result = handler(action_id, resolved["token"], context)
+            if asyncio.iscoroutine(result):
+                result = await result
+        except Exception as exc:
+            logger.warning("Signal numbered action handler failed for %s: %s", action_id, exc)
+            await self.send(chat_id, f"⚠️ Couldn't mark {ordinal} {verb}.")
+            return True
+
+        # The handler's own reply is the acknowledgement — unlike a reaction,
+        # a typed command already has a visible place for an answer.
+        reply = str(result).strip() if result else f"Marked {ordinal} {verb}"
+        await self.send(chat_id, f"{ordinal}: {reply}")
+        return True
+
     async def _ack_feedback_reaction(self, chat_id: str, target_timestamp: Any) -> None:
         """Confirm a recorded feedback reaction in place, with no chat message.
 
@@ -1264,7 +1422,10 @@ class SignalAdapter(BasePlatformAdapter):
         await self._stop_typing_indicator(chat_id)
 
         actions = self._reaction_actions(metadata)
+        numbered = self._numbered_actions(actions) if self.reaction_feedback_enabled else []
         prompt = self._reaction_prompt(actions) if self.reaction_feedback_enabled else ""
+        if not prompt and numbered:
+            prompt = self._numbered_command_prompt(numbered)
         if prompt:
             content = f"{content.rstrip()}\n\n{prompt}"
         plain_text, text_styles = self._markdown_to_signal(content)
@@ -1307,6 +1468,18 @@ class SignalAdapter(BasePlatformAdapter):
                         actions=actions,
                         ttl_seconds=self._reaction_feedback_ttl_seconds(),
                     )
+                    if numbered:
+                        stored = self._reaction_feedback_store.store_numbered_actions(
+                            account=self.account,
+                            chat_id=chat_id,
+                            message_timestamp=timestamp,
+                            numbered=numbered,
+                            ttl_seconds=self._reaction_feedback_ttl_seconds(),
+                        )
+                        logger.info(
+                            "[Signal] Stored %d numbered action correlation(s) for the sent message",
+                            stored,
+                        )
                     if metadata is not None:
                         metadata["_signal_reaction_actions_consumed"] = True
                 except Exception as exc:

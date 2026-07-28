@@ -619,6 +619,13 @@ class WebhookAdapter(BasePlatformAdapter):
                 ),
                 "payload": payload,
             }
+            # Opt-in per route: let the producer attach generic message actions
+            # (the ``act:<id>:<token>`` seam) so a push keeps its interactive
+            # affordances — Telegram renders buttons, Signal renders numbered
+            # reply commands. Off by default: an authenticated pusher should
+            # not gain action dispatch on a route that only asked to send text.
+            if route_config.get("forward_actions"):
+                delivery["actions"] = self._payload_actions(payload)
             logger.info(
                 "[webhook] direct-deliver event=%s route=%s target=%s msg_len=%d delivery=%s",
                 event_type,
@@ -996,6 +1003,28 @@ class WebhookAdapter(BasePlatformAdapter):
             logger.error("[webhook] github_comment delivery error: %s", e)
             return SendResult(success=False, error=str(e))
 
+    @staticmethod
+    def _payload_actions(payload: dict) -> list[dict]:
+        """Validate the ``actions``/``action_rows`` a producer sent.
+
+        Normalized through the same coercion the platform renderers use, so a
+        malformed entry is dropped here rather than reaching an adapter.
+        """
+        from gateway.platforms.actions import action_rows_from_metadata
+
+        rows = action_rows_from_metadata(
+            {
+                key: payload[key]
+                for key in ("action_rows", "actions")
+                if isinstance(payload.get(key), list)
+            }
+        )
+        return [
+            {"label": action.label, "action_id": action.action_id, "token": action.token}
+            for row in rows
+            for action in row
+        ]
+
     async def _deliver_cross_platform(
         self, platform_name: str, content: str, delivery: dict
     ) -> SendResult:
@@ -1038,5 +1067,9 @@ class WebhookAdapter(BasePlatformAdapter):
         thread_id = extra.get("message_thread_id") or extra.get("thread_id")
         if thread_id:
             metadata = {"thread_id": thread_id}
+        actions = delivery.get("actions")
+        if actions:
+            metadata = dict(metadata or {})
+            metadata["actions"] = actions
 
         return await adapter.send(chat_id, content, metadata=metadata)

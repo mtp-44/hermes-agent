@@ -469,3 +469,141 @@ class TestDirectDeliverUnit:
             )
             assert result.success is True
             mock_gh.assert_awaited_once()
+
+
+# ===================================================================
+# WP4: forwarding generic message actions with a direct delivery
+# ===================================================================
+
+class TestDeliverOnlyActionForwarding:
+    """A push can keep its interactive affordances, but only if the route says so.
+
+    The 21:00 digest needs its commitment actions to survive the hop so the
+    target surface can render them — buttons on Telegram, numbered reply
+    commands on Signal.
+    """
+
+    _ACTIONS = [
+        {"label": "1 ✅", "action_id": "cdone", "token": "c-1"},
+        {"label": "1 🗑", "action_id": "cdrop", "token": "c-1"},
+    ]
+
+    def _routes(self, **overrides):
+        route = {
+            "secret": _INSECURE_NO_AUTH,
+            "deliver": "telegram",
+            "deliver_only": True,
+            "deliver_extra": {"chat_id": "c-1"},
+            "prompt": "{text}",
+        }
+        route.update(overrides)
+        return {"digest": route}
+
+    @pytest.mark.asyncio
+    async def test_actions_forwarded_when_the_route_opts_in(self):
+        adapter = _make_adapter(self._routes(forward_actions=True))
+        mock_target = _wire_mock_target(adapter)
+
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.post(
+                "/webhooks/digest",
+                json={"text": "daily brief", "actions": self._ACTIONS},
+                headers={"X-Request-ID": "open-brain:daily-digest:2026-07-28"},
+            )
+            assert resp.status == 200
+
+        assert mock_target.send.await_args.args[1] == "daily brief"
+        assert mock_target.send.await_args.kwargs["metadata"]["actions"] == self._ACTIONS
+
+    @pytest.mark.asyncio
+    async def test_actions_ignored_by_default(self):
+        adapter = _make_adapter(self._routes())
+        mock_target = _wire_mock_target(adapter)
+
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.post(
+                "/webhooks/digest",
+                json={"text": "daily brief", "actions": self._ACTIONS},
+                headers={"X-Request-ID": "d-noopt"},
+            )
+            assert resp.status == 200
+
+        assert mock_target.send.await_args.kwargs["metadata"] is None
+
+    @pytest.mark.asyncio
+    async def test_malformed_actions_are_dropped_not_forwarded(self):
+        adapter = _make_adapter(self._routes(forward_actions=True))
+        mock_target = _wire_mock_target(adapter)
+
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.post(
+                "/webhooks/digest",
+                json={
+                    "text": "daily brief",
+                    "actions": [
+                        {"label": "ok", "action_id": "cdone", "token": "c-1"},
+                        {"label": "", "action_id": "cdone", "token": "c-2"},
+                        {"label": "no id", "token": "c-3"},
+                        "not-a-dict",
+                    ],
+                },
+                headers={"X-Request-ID": "d-malformed"},
+            )
+            assert resp.status == 200
+
+        assert mock_target.send.await_args.kwargs["metadata"]["actions"] == [
+            {"label": "ok", "action_id": "cdone", "token": "c-1"}
+        ]
+
+    @pytest.mark.asyncio
+    async def test_action_rows_are_flattened_in_order(self):
+        adapter = _make_adapter(self._routes(forward_actions=True))
+        mock_target = _wire_mock_target(adapter)
+
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.post(
+                "/webhooks/digest",
+                json={
+                    "text": "daily brief",
+                    "action_rows": [
+                        [{"label": "1 ✅", "action_id": "cdone", "token": "c-1"}],
+                        [{"label": "2 ✅", "action_id": "cdone", "token": "c-2"}],
+                    ],
+                },
+                headers={"X-Request-ID": "d-rows"},
+            )
+            assert resp.status == 200
+
+        assert [a["token"] for a in mock_target.send.await_args.kwargs["metadata"]["actions"]] == [
+            "c-1",
+            "c-2",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_repeated_delivery_id_does_not_deliver_twice(self):
+        """The receiver's own retry guard, independent of the producer's ledger."""
+        adapter = _make_adapter(self._routes(forward_actions=True))
+        mock_target = _wire_mock_target(adapter)
+
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            first = await cli.post(
+                "/webhooks/digest",
+                json={"text": "daily brief", "actions": self._ACTIONS},
+                headers={"X-Request-ID": "open-brain:daily-digest:2026-07-28"},
+            )
+            first_body = await first.json()
+            second = await cli.post(
+                "/webhooks/digest",
+                json={"text": "daily brief", "actions": self._ACTIONS},
+                headers={"X-Request-ID": "open-brain:daily-digest:2026-07-28"},
+            )
+            second_body = await second.json()
+
+        assert first_body["status"] == "delivered"
+        assert second_body["status"] == "duplicate"
+        assert mock_target.send.await_count == 1
