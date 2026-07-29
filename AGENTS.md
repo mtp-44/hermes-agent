@@ -1,3 +1,16 @@
+> Estate map: /Users/mh/ai/README.md
+> Cross-repo decisions: /Users/mh/ai/DECISIONS.md
+> Status + what's next: /Users/mh/ai/way_of_working_multiple_ai/STATUS.md
+> This repo's decisions: /Users/mh/ai/hermes-agent/docs/INDEX.md
+
+<!-- FORK DIVERGENCE, deliberate. This four-line point-up block is the estate doc
+     spine's entry hook and is documented in docs/FORK_POLICY.md and
+     docs/decisions/0001-agents-md-fork-divergence.md. On an upstream sync this
+     is the ONE place in this file where the standing resolution is "ours".
+     Everything below the marker is upstream's and is resolved normally. -->
+
+<!-- END ESTATE POINT-UP BLOCK — upstream content follows -->
+
 # Hermes Agent - Development Guide
 
 Instructions for AI coding assistants and developers working on the hermes-agent codebase.

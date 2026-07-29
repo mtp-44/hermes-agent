@@ -29,6 +29,45 @@
    `tests/plugins/test_routing_classifier_plugin.py` before the live gateway
    moves.
 
+## Permitted known divergences
+
+Divergence from upstream is a cost, and this list is the whole of it. Keep it
+short; anything not on it is a bug.
+
+### 1. `AGENTS.md` — the estate point-up block (2026-07-29)
+
+**What.** A 13-line block prepended to the top of `AGENTS.md`: four `>` lines
+naming the estate map, the cross-repo decision ledger, `STATUS.md` and this
+repo's `docs/INDEX.md` by absolute path, plus an HTML comment explaining itself
+and an `END ESTATE POINT-UP BLOCK` marker.
+
+**Why it is worth a divergence.** `AGENTS.md` is upstream-tracked and 71 KB, and
+policy 1 above says pull only for security. Prepending to it guarantees a
+conflict at the top of the file on every future sync. The alternative — leaving
+this repo out of the estate doc spine — means the fork is *invisible* to the
+spine: an agent entering `~/ai/hermes-agent` gets no route upward to the estate
+map or the decision ledger, and `docs_check.py` cannot assert the link exists.
+A four-line, always-"ours" conflict is a fair price for the fork not being a
+blind spot. Ruled 2026-07-29 during Phase 4 of the `~/ai` rebuild.
+
+**Standing resolution rule.** On any upstream sync that conflicts here:
+
+> **Take "ours" for everything above the `END ESTATE POINT-UP BLOCK` marker, and
+> "theirs" for everything below it.**
+
+The marker exists precisely so this is mechanical rather than a judgement call.
+If upstream ever adds its own content above the first `#` heading, merge it
+*below* the marker. Never resolve by dropping the block — that silently
+un-links the fork from the estate, and nothing will fail loudly.
+
+**Verification.** `/Users/mh/ai/bootstrap/scripts/docs_check.py` asserts the
+block is present and that all four absolute targets resolve. Run
+`cd /Users/mh/ai/bootstrap && make check` after any sync that touches
+`AGENTS.md`.
+
+Recorded as an ADR at
+[`docs/decisions/0001-agents-md-fork-divergence.md`](decisions/0001-agents-md-fork-divergence.md).
+
 ## Designated successor (evaluated 2026-07-02)
 
 If/when rule 3 fires, the concrete swap candidate is
