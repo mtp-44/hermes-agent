@@ -488,3 +488,121 @@ def test_stream_upload_cleans_temp_on_cancellation(forced_files_client):
     # ... and no .upload temp file was left behind.
     leftovers = [p.name for p in target.parent.iterdir() if ".upload" in p.name]
     assert leftovers == [], f"temp upload files leaked on cancellation: {leftovers}"
+
+
+def test_sensitive_env_files_hidden_from_listing(forced_files_client):
+    """Regression test for #57505: .env files must not appear in directory listings."""
+    client, root = forced_files_client
+
+    # Create a regular file and .env variants including shorthand suffixes.
+    root.mkdir(parents=True, exist_ok=True)
+    regular = root / "config.txt"
+    regular.write_text("safe content")
+    env_file = root / ".env"
+    env_file.write_text("SECRET_KEY=abc123")
+    env_local = root / ".env.local"
+    env_local.write_text("LOCAL_SECRET=def456")
+    env_prod = root / ".env.prod"
+    env_prod.write_text("PROD_SECRET=ghi789")
+
+    listing = client.get("/api/files", params={"path": str(root)})
+    assert listing.status_code == 200
+    names = [e["name"] for e in listing.json()["entries"]]
+    assert "config.txt" in names
+    assert ".env" not in names
+    assert ".env.local" not in names
+    assert ".env.prod" not in names
+
+
+def test_sensitive_env_files_blocked_read(forced_files_client):
+    """Regression test for #57505: .env files must not be readable."""
+    client, root = forced_files_client
+
+    root.mkdir(parents=True, exist_ok=True)
+    env_file = root / ".env"
+    env_file.write_text("SECRET_KEY=abc123")
+
+    resp = client.get("/api/files/read", params={"path": str(env_file)})
+    assert resp.status_code == 403
+
+
+def test_sensitive_env_files_blocked_download(forced_files_client):
+    """Regression test for #57505: .env files must not be downloadable."""
+    client, root = forced_files_client
+
+    root.mkdir(parents=True, exist_ok=True)
+    env_file = root / ".env"
+    env_file.write_text("SECRET_KEY=abc123")
+
+    resp = client.get("/api/files/download", params={"path": str(env_file)})
+    assert resp.status_code == 403
+
+
+def test_sensitive_env_suffix_variants_blocked(forced_files_client):
+    """Regression: .env.<suffix> shorthand variants (e.g. .env.prod) must also be blocked."""
+    client, root = forced_files_client
+
+    root.mkdir(parents=True, exist_ok=True)
+    for suffix in ("prod", "dev", "staging.local", "ci"):
+        p = root / f".env.{suffix}"
+        p.write_text(f"SECRET_{suffix}=abc123")
+        assert client.get("/api/files/read", params={"path": str(p)}).status_code == 403
+        assert client.get("/api/files/download", params={"path": str(p)}).status_code == 403
+
+
+def test_sensitive_env_case_insensitive_blocked(forced_files_client):
+    """Regression: .ENV / .Env.local casings must be blocked too (case-insensitive FS mounts)."""
+    client, root = forced_files_client
+
+    root.mkdir(parents=True, exist_ok=True)
+    for name in (".ENV", ".Env.local", ".eNv.PROD"):
+        p = root / name
+        p.write_text("SECRET=abc123")
+        assert client.get("/api/files/read", params={"path": str(p)}).status_code == 403
+        assert client.get("/api/files/download", params={"path": str(p)}).status_code == 403
+
+
+def test_envrc_blocked(forced_files_client):
+    """Regression: .envrc (direnv) is a distinct basename from .env.<suffix> and
+    was not caught by the old ``== ".env" or startswith(".env.")`` check."""
+    client, root = forced_files_client
+
+    root.mkdir(parents=True, exist_ok=True)
+    p = root / ".envrc"
+    p.write_text("export SECRET_KEY=abc123")
+
+    listing = client.get("/api/files", params={"path": str(root)})
+    assert ".envrc" not in [e["name"] for e in listing.json()["entries"]]
+    assert client.get("/api/files/read", params={"path": str(p)}).status_code == 403
+    assert client.get("/api/files/download", params={"path": str(p)}).status_code == 403
+
+
+def test_other_credential_store_basenames_blocked(forced_files_client):
+    """Regression: the managed-files guard must cover the same credential
+    basenames as gateway.platforms.base._ROOT_CREDENTIAL_FILES and
+    agent.file_safety.get_read_block_error, not just .env — an operator can
+    point the managed root at HERMES_HOME itself (#57505), which contains
+    all of these live secret stores."""
+    client, root = forced_files_client
+    root.mkdir(parents=True, exist_ok=True)
+
+    for name in (
+        "auth.json",
+        "auth.lock",
+        "credentials",
+        "config.yaml",
+        ".anthropic_oauth.json",
+        "google_token.json",
+        "google_oauth_pending.json",
+        "google_oauth.json",
+        "webhook_subscriptions.json",
+        "bws_cache.json",
+    ):
+        p = root / name
+        p.write_text("SECRET=abc123")
+        assert client.get("/api/files/read", params={"path": str(p)}).status_code == 403, name
+        assert client.get("/api/files/download", params={"path": str(p)}).status_code == 403, name
+
+    listing = client.get("/api/files", params={"path": str(root)})
+    names = [e["name"] for e in listing.json()["entries"]]
+    assert names == []
