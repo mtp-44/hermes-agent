@@ -23,6 +23,7 @@ The chat gateway. Fork of NousResearch/hermes-agent. Serves the desktop client, 
 | | ID | Date | Verdict |
 |---|---|---|---|
 | ✅ | [`HA-0001`](decisions/0001-agents-md-fork-divergence.md) | 2026-07-29 | Accept a permanent 13-line divergence at the top of the upstream-tracked AGENTS.md so the fork is visible to the estate doc spine; resolve it 'ours' above the END ESTATE POINT-UP BLOCK marker on every sync. |
+| ✅ | [`HA-0002`](decisions/0002-security-sync-2026-07-22-merge.md) | 2026-07-30 | Merge PR #7 sync/security-2026-07-22 (credential-header stripping on redirects, dashboard .env/credential-store guards, aiohttp/raft body-size caps, CI ref-injection fix) into the live branch fix/session-capture-signal-gate; sync gate passed, zero test regressions across the full suite, all three claimed fixes exercised and confirmed, deployed to all three live services same day. |
 
 ## Documents
 
@@ -36,6 +37,7 @@ The chat gateway. Fork of NousResearch/hermes-agent. Serves the desktop client, 
 - [Full Non-Security Upstream Merge Checkpoint — 2026-07-02](cleanup/2026-07-02-full-merge.md)
 - [/resume Hardening Checkpoint — 2026-07-02](cleanup/2026-07-02-resume-hardening.md)
 - [Upstream Security Sync Checkpoint — 2026-07-02](cleanup/2026-07-02-security-sync.md)
+- [2026-07-22 security-only upstream sync — notes + cleanup checklist](cleanup/2026-07-22-security-sync.md)
 - [Profile Builder — Dashboard-Native, Full-Featured Profile Creation](design/profile-builder.md)
 - [Handoff: Upstream Security Sync — resume here](handoff-upstream-security-sync-2026-07-02.md)
 - [Hermes Update Runbook](hermes-update-runbook.md)
