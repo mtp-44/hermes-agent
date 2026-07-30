@@ -29,6 +29,33 @@
    `tests/plugins/test_routing_classifier_plugin.py` before the live gateway
    moves.
 
+## Sync history
+
+Upstream pulls under policy 1 (security fixes only). Newest first.
+
+### 2026-07-30 — PR #7 `sync/security-2026-07-22` merged into the live branch
+
+13 commits (12 non-merge + the PR merge), authored 2026-07-22, sat unmerged in
+production for 8 days because the live tree was mid-`~/ai`-rebuild:
+credential-header stripping on cross-host redirects (`fetch_models`),
+dashboard `.env`/credential-store read guards (widened across three
+successive commits — case-insensitivity, suffix variants, other basenames),
+a shared local-file credential-read guard for vision/image-gen inputs,
+explicit `client_max_size` caps on three previously-uncapped aiohttp
+servers, a chunked-body size limit on the Raft adapter, and a CI fix
+routing untrusted refs through `env:` instead of `run:` interpolation.
+
+Merged into `fix/session-capture-signal-gate` (the branch production actually
+runs) rather than `main` — see policy 1, this fork does not track `main`
+directly. Sync gate (`scripts/openbrain_conformance_smoke.py` +
+`tests/plugins/test_routing_classifier_plugin.py`) passed; full suite
+diffed pre/post-merge with zero regressions (one previously-flaky test
+newly passing). All 9 new/extended security test files exercised directly
+and confirmed passing, not just process-start checked. Deployed to all
+three live services (`ai.hermes.gateway`, `com.mh.hermes-pwa`,
+`com.mh.hermes-dashboard`) same day. Full account: ADR
+[`HA-0002`](decisions/0002-security-sync-2026-07-22-merge.md).
+
 ## Permitted known divergences
 
 Divergence from upstream is a cost, and this list is the whole of it. Keep it
