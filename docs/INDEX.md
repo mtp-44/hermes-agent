@@ -24,6 +24,7 @@ The chat gateway. Fork of NousResearch/hermes-agent. Serves the desktop client, 
 |---|---|---|---|
 | ✅ | [`HA-0001`](decisions/0001-agents-md-fork-divergence.md) | 2026-07-29 | Accept a permanent 13-line divergence at the top of the upstream-tracked AGENTS.md so the fork is visible to the estate doc spine; resolve it 'ours' above the END ESTATE POINT-UP BLOCK marker on every sync. |
 | ✅ | [`HA-0002`](decisions/0002-security-sync-2026-07-22-merge.md) | 2026-07-30 | Merge PR #7 sync/security-2026-07-22 (credential-header stripping on redirects, dashboard .env/credential-store guards, aiohttp/raft body-size caps, CI ref-injection fix) into the live branch fix/session-capture-signal-gate; sync gate passed, zero test regressions across the full suite, all three claimed fixes exercised and confirmed, deployed to all three live services same day. |
+| ✅ | [`HA-0003`](decisions/0003-production-returns-to-main.md) | 2026-07-31 | Fast-forward origin/main onto fix/session-capture-signal-gate and run production from main; the branch was 45 ahead / 0 behind so the move was a pure ref advance onto the already-deployed commits, changing no file and redeploying nothing. FORK_POLICY's stated reason for keeping production off main — 'this fork does not track main directly' — did not hold: policy 1 governs upstream pull cadence, and this fork has no upstream remote configured at all. |
 
 ## Documents
 

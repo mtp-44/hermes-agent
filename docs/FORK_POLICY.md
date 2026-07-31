@@ -45,9 +45,14 @@ explicit `client_max_size` caps on three previously-uncapped aiohttp
 servers, a chunked-body size limit on the Raft adapter, and a CI fix
 routing untrusted refs through `env:` instead of `run:` interpolation.
 
-Merged into `fix/session-capture-signal-gate` (the branch production actually
-runs) rather than `main` — see policy 1, this fork does not track `main`
-directly. Sync gate (`scripts/openbrain_conformance_smoke.py` +
+Merged into `fix/session-capture-signal-gate`, the branch production ran at
+the time, rather than `main`. **That reasoning was wrong and was corrected on
+2026-07-31 — see [`HA-0003`](decisions/0003-production-returns-to-main.md).**
+It cited policy 1, but policy 1 governs upstream pull cadence and says nothing
+about which branch is production; this fork has no upstream remote configured
+at all, so `main` was not tracking upstream either. `main` has since been
+fast-forwarded onto that branch and production runs from `main`. Future
+security pulls target `main`. Sync gate (`scripts/openbrain_conformance_smoke.py` +
 `tests/plugins/test_routing_classifier_plugin.py`) passed; full suite
 diffed pre/post-merge with zero regressions (one previously-flaky test
 newly passing). All 9 new/extended security test files exercised directly
