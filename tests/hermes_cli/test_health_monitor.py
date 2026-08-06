@@ -4,7 +4,15 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-from scripts.hermes_health_monitor import CheckResult, HealthMonitor, RestartResult, _check_config, _check_pwa
+from scripts.hermes_health_monitor import (
+    CheckResult,
+    HealthMonitor,
+    RestartResult,
+    _check_config,
+    _check_pwa,
+    _parse_hosted_mcp_url,
+    _send_telegram_alert,
+)
 
 
 def _now() -> datetime:
@@ -201,3 +209,65 @@ def test_check_pwa_rejects_stamp_that_does_not_match_current_target(tmp_path):
 
     assert result.ok is False
     assert result.fingerprint == "release:stamp-mismatch"
+
+
+def _clear_openbrain_env(monkeypatch):
+    for name in ("OPEN_BRAIN_MCP_URL", "OPENBRAIN_MCP_URL", "SUPABASE_URL"):
+        monkeypatch.delenv(name, raising=False)
+
+
+def test_probe_url_explicit_env_wins(monkeypatch):
+    _clear_openbrain_env(monkeypatch)
+    monkeypatch.setenv("OPEN_BRAIN_MCP_URL", "http://localhost:9999")
+    monkeypatch.setenv("SUPABASE_URL", "https://example.supabase.co")
+
+    assert _parse_hosted_mcp_url() == "http://localhost:9999"
+
+
+def test_probe_url_accepts_plugin_spelling(monkeypatch):
+    _clear_openbrain_env(monkeypatch)
+    monkeypatch.setenv("OPENBRAIN_MCP_URL", "http://localhost:8765")
+    monkeypatch.setenv("SUPABASE_URL", "https://example.supabase.co")
+
+    assert _parse_hosted_mcp_url() == "http://localhost:8765"
+
+
+def test_probe_url_prefers_gateway_config_over_supabase(monkeypatch):
+    # Regression: post-F5 (2026-07-11) the hosted Supabase front door is sealed
+    # and 401s every key; the probe must follow the gateway's configured URL,
+    # not derive a hosted URL from SUPABASE_URL.
+    _clear_openbrain_env(monkeypatch)
+    monkeypatch.setenv("SUPABASE_URL", "https://example.supabase.co")
+    monkeypatch.setattr(
+        "scripts.hermes_health_monitor.read_raw_config",
+        lambda: {"mcp_servers": {"open_brain": {"url": "http://localhost:8765"}}},
+    )
+
+    assert _parse_hosted_mcp_url() == "http://localhost:8765"
+
+
+def test_probe_url_falls_back_to_supabase_when_unconfigured(monkeypatch):
+    _clear_openbrain_env(monkeypatch)
+    monkeypatch.setenv("SUPABASE_URL", "https://example.supabase.co/")
+    monkeypatch.setattr("scripts.hermes_health_monitor.read_raw_config", lambda: {})
+
+    assert _parse_hosted_mcp_url() == "https://example.supabase.co/functions/v1/open-brain-mcp"
+
+
+def test_alert_detail_names_the_missing_piece(monkeypatch):
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "token")
+    for name in ("HERMES_HEALTH_ALERT_CHAT_ID", "TELEGRAM_HOME_CHANNEL"):
+        monkeypatch.delenv(name, raising=False)
+
+    result = _send_telegram_alert("test")
+
+    assert result.ok is False
+    assert "HERMES_HEALTH_ALERT_CHAT_ID" in result.detail
+
+    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+    monkeypatch.setenv("HERMES_HEALTH_ALERT_CHAT_ID", "12345")
+
+    result = _send_telegram_alert("test")
+
+    assert result.ok is False
+    assert result.detail == "missing TELEGRAM_BOT_TOKEN"

@@ -155,18 +155,30 @@ def _parse_http_payload(raw: str) -> Any:
 
 
 def _parse_hosted_mcp_url() -> str | None:
-    explicit = os.getenv("OPEN_BRAIN_MCP_URL", "").strip()
-    if explicit:
-        return explicit
+    # Explicit override wins. Both spellings are honored: OPEN_BRAIN_MCP_URL is
+    # this monitor's historical name; OPENBRAIN_MCP_URL is the spelling the
+    # plugins/memory/openbrain surface documents for ~/.hermes/.env.
+    for name in ("OPEN_BRAIN_MCP_URL", "OPENBRAIN_MCP_URL"):
+        explicit = os.getenv(name, "").strip()
+        if explicit:
+            return explicit
+
+    # Prefer the URL the gateway actually talks to (mcp_servers.open_brain.url).
+    # Since the F5 cutover (2026-07-11) that is the local server; the
+    # SUPABASE_URL-derived hosted front door is sealed (401 for every key), so
+    # deriving the probe URL from SUPABASE_URL ahead of the gateway config made
+    # this check report an outage the gateway never had. Keep the Supabase
+    # derivation only as a last-resort legacy fallback.
+    raw_config = read_raw_config()
+    server = (((raw_config.get("mcp_servers") or {}).get("open_brain") or {}))
+    url = str(server.get("url") or "").strip()
+    if url:
+        return url
 
     supabase_url = os.getenv("SUPABASE_URL", "").strip()
     if supabase_url:
         return f"{supabase_url.rstrip('/')}/functions/v1/open-brain-mcp"
-
-    raw_config = read_raw_config()
-    server = (((raw_config.get("mcp_servers") or {}).get("open_brain") or {}))
-    url = str(server.get("url") or "").strip()
-    return url or None
+    return None
 
 
 def _parse_telegram_target(value: str) -> tuple[str, int | None]:
@@ -399,8 +411,15 @@ def _send_telegram_alert(message: str) -> RestartResult:
         os.getenv("HERMES_HEALTH_ALERT_CHAT_ID", "").strip()
         or os.getenv("TELEGRAM_HOME_CHANNEL", "").strip()
     )
-    if not token or not target:
-        return RestartResult(False, "missing TELEGRAM_BOT_TOKEN or alert chat target")
+    if not token and not target:
+        return RestartResult(False, "missing TELEGRAM_BOT_TOKEN and alert chat target")
+    if not token:
+        return RestartResult(False, "missing TELEGRAM_BOT_TOKEN")
+    if not target:
+        return RestartResult(
+            False,
+            "missing alert chat target (set HERMES_HEALTH_ALERT_CHAT_ID or TELEGRAM_HOME_CHANNEL)",
+        )
 
     chat_id, thread_id = _parse_telegram_target(target)
     body: dict[str, Any] = {
