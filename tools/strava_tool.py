@@ -614,8 +614,20 @@ def _handle_strava_activities(args: dict, **_kw) -> str:
 # ── Availability check ──────────────────────────────────────────────────────────
 
 def check_strava_requirements() -> bool:
+    # Both tools read/write the open-brain rows over Supabase REST, so the
+    # Supabase creds are as load-bearing as the Strava ones. Post-L6 (hosted
+    # stack closed) the creds disappear from ~/.hermes/.env and this gate is
+    # what unregisters the tools cleanly instead of advertising schemas that
+    # die as hung TCP connects.
     cfg = _get_strava_config()
-    return bool(cfg["client_id"] and cfg["client_secret"] and cfg["refresh_token"])
+    supabase_url, supabase_key = _get_supabase_config()
+    return bool(
+        cfg["client_id"]
+        and cfg["client_secret"]
+        and cfg["refresh_token"]
+        and supabase_url
+        and supabase_key
+    )
 
 
 # ── Schemas ─────────────────────────────────────────────────────────────────────
