@@ -453,8 +453,14 @@ class TestSignalStreamingPatch:
         assert SignalAdapter.SUPPORTS_MESSAGE_EDITING is False
 
     @pytest.mark.asyncio
-    async def test_send_returns_no_message_id(self, monkeypatch):
-        """send() returns message_id=None so stream consumer uses no-edit path."""
+    async def test_send_returns_timestamp_message_id(self, monkeypatch):
+        """send() returns the signal-cli timestamp as message_id.
+
+        The timestamp is the stable identifier used by quoting, reactions,
+        and the reaction-feedback correlation. Edit safety no longer relies
+        on message_id being None — SUPPORTS_MESSAGE_EDITING=False makes the
+        gateway skip the streaming/edit path for Signal entirely.
+        """
         monkeypatch.setenv("SIGNAL_GROUP_ALLOWED_USERS", "")
         from gateway.platforms.signal import SignalAdapter
 
@@ -475,4 +481,4 @@ class TestSignalStreamingPatch:
             chat_id="+15559876543",
             content="Hello",
         )
-        assert result.message_id is None
+        assert result.message_id == "1234567890"

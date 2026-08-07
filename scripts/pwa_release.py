@@ -567,7 +567,7 @@ def _launchd_runtime(plist_path: Path) -> tuple[Path | None, tuple[str, ...]]:
         raise ReleaseError(f"launchd runtime configuration has no Label: {plist_path}")
     return (
         Path(working_directory),
-        ("launchctl", "kickstart", "-k", f"gui/{os.getuid()}/{label}"),
+        ("launchctl", "kickstart", "-k", f"gui/{os.getuid()}/{label}"),  # windows-footgun: ok — launchctl is macOS-only
     )
 
 

@@ -54,7 +54,7 @@ def _require_private_file(path: Path) -> None:
         raise ValueError("protected handoff file does not exist") from exc
     if path.is_symlink() or not stat.S_ISREG(info.st_mode):
         raise ValueError("protected handoff must be a regular, non-symlink file")
-    if info.st_uid != os.getuid():
+    if info.st_uid != os.getuid():  # windows-footgun: ok — POSIX-only smoke against a local signal-cli daemon
         raise ValueError("protected handoff must be owned by the current user")
     if stat.S_IMODE(info.st_mode) & 0o077:
         raise ValueError("protected handoff permissions must be 0600 or stricter")
