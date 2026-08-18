@@ -773,6 +773,39 @@ def is_shared_multi_user_session(
     return not group_sessions_per_user
 
 
+# Adapter-supplied identifiers (chat_id, thread_id, user_id) are embedded in
+# session keys, and session keys are used to derive filesystem paths — so
+# `_is_path_unsafe` rejects any key containing "/", "\\" or ".." as CWE-22
+# directory traversal. Signal group ids are standard base64 of a 32-byte group
+# identifier, and standard base64's alphabet includes "/", so a large fraction
+# of Signal groups produced a key that `SessionEntry.from_dict` refused to load.
+# The entry was then skipped on every gateway start, never entered
+# `SessionStore._entries`, and was therefore invisible to the session-expiry
+# watcher: the group session could never be finalized, never reached a capture
+# boundary, and its state.db row stayed open forever. Found 2026-08-18 on a
+# group session that had been open since 2026-07-28.
+#
+# The mapping is the standard base64url substitution, which is injective over
+# base64 ids ("-" and "_" are not in the standard alphabet, so no two distinct
+# group ids can collide). It is a no-op for every other identifier shape in use
+# — Telegram's signed integers, Signal/Matrix UUIDs, WhatsApp JIDs — so existing
+# keys are byte-identical and no other platform is re-keyed.
+_KEY_SEGMENT_TRANSLATION = str.maketrans({"+": "-", "/": "_"})
+
+
+def _path_safe_session_key(key: str) -> str:
+    """Return ``key`` with path-unsafe characters neutralised.
+
+    Applied to the fully assembled key: the character-level substitutions leave
+    the ``:`` separators and positional layout untouched, so ``parts[2]`` is
+    still the platform for every downstream parser.
+    """
+    safe = key.translate(_KEY_SEGMENT_TRANSLATION).replace("\\", "_")
+    while ".." in safe:
+        safe = safe.replace("..", "_")
+    return safe
+
+
 def _session_key_namespace(profile: Optional[str]) -> str:
     """Return the ``agent:<ns>`` namespace prefix for a session key.
 
@@ -799,9 +832,35 @@ def build_session_key(
     thread_sessions_per_user: bool = False,
     profile: Optional[str] = None,
 ) -> str:
+    """Build a deterministic, path-safe session key from a message source.
+
+    Thin wrapper over :func:`_build_session_key_raw` that guarantees the result
+    is path-safe (see :func:`_path_safe_session_key`). Wrapping rather than
+    sanitising at each ``return`` keeps the guarantee total: there is exactly one
+    place a key can leave this module, so no future branch can reintroduce an
+    unloadable key.
+    """
+    return _path_safe_session_key(
+        _build_session_key_raw(
+            source,
+            group_sessions_per_user=group_sessions_per_user,
+            thread_sessions_per_user=thread_sessions_per_user,
+            profile=profile,
+        )
+    )
+
+
+def _build_session_key_raw(
+    source: SessionSource,
+    group_sessions_per_user: bool = True,
+    thread_sessions_per_user: bool = False,
+    profile: Optional[str] = None,
+) -> str:
     """Build a deterministic session key from a message source.
 
-    This is the single source of truth for session key construction.
+    This is the single source of truth for session key construction. Callers
+    should use :func:`build_session_key`, which additionally guarantees the key
+    is path-safe.
 
     ``profile`` selects the key namespace (see :func:`_session_key_namespace`).
     It defaults to ``None`` ⇒ the legacy ``agent:main`` namespace, so callers

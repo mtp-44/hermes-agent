@@ -1580,3 +1580,89 @@ class TestGatewaySessionDbRecovery:
         assert reset.session_id != entry.session_id
         assert reset.was_auto_reset is True
         assert reset.auto_reset_reason == "idle"
+
+
+class TestPathSafeSessionKeys:
+    """Session keys must always survive SessionEntry.from_dict's traversal guard.
+
+    Regression guard for the 2026-08-18 finding: Signal group ids are standard
+    base64 of a 32-byte group identifier, and standard base64's alphabet includes
+    "/", which `_is_path_unsafe` rejects as CWE-22 directory traversal. The entry
+    was skipped on every gateway start, never entered `SessionStore._entries`,
+    and was therefore invisible to the session-expiry watcher — so the group
+    session could never be finalized and never reached a capture boundary. One
+    real group session had been open since 2026-07-28 as a result.
+    """
+
+    # Synthetic stand-ins. The property under test is only "a standard-base64
+    # group id containing '/'", so a real group id would add nothing but would
+    # publish a private identifier — this fork is public.
+    SIGNAL_GROUP = "group:AbCd+EfGhIjKlMnOpQr/StUvWxYz0123456789AbCd="
+    MARK = "00000000-0000-4000-8000-000000000000"
+
+    def test_signal_group_key_is_loadable(self):
+        from gateway.session import SessionEntry, _is_path_unsafe
+
+        source = SessionSource(
+            platform=Platform.SIGNAL, chat_type="group",
+            chat_id=self.SIGNAL_GROUP, user_id=self.MARK,
+        )
+        key = build_session_key(source)
+        assert not _is_path_unsafe(key), f"key still unloadable: {key}"
+
+        # The end-to-end contract: from_dict used to raise ValueError here.
+        entry = SessionEntry.from_dict({
+            "session_key": key,
+            "session_id": "20260818_120000_abcdef12",
+            "created_at": "2026-08-18T12:00:00",
+            "updated_at": "2026-08-18T12:00:00",
+        })
+        assert entry.session_key == key
+
+    def test_positional_layout_is_preserved(self):
+        """The expiry watcher reads platform from parts[2]; sanitising must not shift it."""
+        source = SessionSource(
+            platform=Platform.SIGNAL, chat_type="group",
+            chat_id=self.SIGNAL_GROUP, user_id=self.MARK,
+        )
+        assert build_session_key(source).split(":")[2] == "signal"
+
+    def test_other_platforms_are_not_rekeyed(self):
+        """The substitution is a no-op for every non-base64 identifier shape."""
+        unchanged = [
+            (Platform.TELEGRAM, "group", "-1001234567890", "1234567890"),
+            (Platform.TELEGRAM, "dm", "1234567890", "1234567890"),
+            (Platform.SIGNAL, "dm", self.MARK, self.MARK),
+        ]
+        for platform, chat_type, chat_id, user_id in unchanged:
+            source = SessionSource(
+                platform=platform, chat_type=chat_type,
+                chat_id=chat_id, user_id=user_id,
+            )
+            key = build_session_key(source)
+            assert chat_id in key, f"{platform} chat_id was altered in {key}"
+
+    def test_distinct_base64_ids_do_not_collide(self):
+        """base64url substitution is injective over the standard base64 alphabet."""
+        from gateway.session import _path_safe_session_key
+
+        a = _path_safe_session_key("agent:main:signal:group:group:AA/BB+CC=")
+        b = _path_safe_session_key("agent:main:signal:group:group:AA_BB-CC=")
+        assert a == b, "sanity: these two only differ by the substituted chars"
+        # ...which is why "_" and "-" must never appear in a *standard* base64 id.
+        # Guard the property we actually rely on:
+        import base64
+        alphabet = set(base64.b64encode(bytes(range(256))).decode())
+        assert "_" not in alphabet and "-" not in alphabet
+
+    def test_traversal_payloads_are_neutralised(self):
+        """A hostile chat_id must not survive as a usable relative path."""
+        from gateway.session import _is_path_unsafe
+
+        for hostile in ("../../etc/passwd", "..", "a/../../b", "x\\y"):
+            source = SessionSource(
+                platform=Platform.SIGNAL, chat_type="group",
+                chat_id=hostile, user_id=self.MARK,
+            )
+            key = build_session_key(source)
+            assert not _is_path_unsafe(key), f"traversal survived: {key}"
