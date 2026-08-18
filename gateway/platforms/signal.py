@@ -1257,6 +1257,14 @@ class SignalAdapter(BasePlatformAdapter):
         target_timestamp = reaction.get("targetSentTimestamp") or reaction.get("targetTimestamp")
         if target_timestamp is None:
             return
+        # Arrival marker (added 2026-08-18). Every exit below this point used to
+        # be silent, so an unclaimed row was indistinguishable from a reaction
+        # envelope that signal-cli never delivered at all. Fires only for an
+        # authorized sender using one of the four supported emoji, so it is rare.
+        logger.info(
+            "Signal: feedback reaction received emoji=%s action=%s chat=%s target_ts=%s",
+            emoji, action_id, chat_id[:24], target_timestamp,
+        )
         claimed = self._reaction_feedback_store.claim(
             account=self.account,
             chat_id=chat_id,
@@ -1264,6 +1272,19 @@ class SignalAdapter(BasePlatformAdapter):
             action_id=action_id,
         )
         if not claimed:
+            # The reaction arrived and was authorized, but matched no live
+            # correlation: already claimed (one-shot, by design), expired past
+            # SIGNAL_REACTION_FEEDBACK_TTL_SECONDS, or stored under a different
+            # (account, chat_id, message_timestamp) key than the one computed
+            # here — the last of which is a bug, not a no-op. Silent until
+            # 2026-08-18, which is why 20 stored correlations with 0 claims read
+            # as disinterest rather than as a broken inbound leg.
+            logger.info(
+                "Signal: feedback reaction matched no live correlation "
+                "action=%s chat=%s target_ts=%s (already claimed, expired, or "
+                "key mismatch)",
+                action_id, chat_id[:24], target_timestamp,
+            )
             return
         try:
             from hermes_cli.plugins import get_plugin_manager
