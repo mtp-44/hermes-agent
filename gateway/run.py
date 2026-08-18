@@ -12037,6 +12037,14 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         source = getattr(entry, "origin", None)
         session_id = getattr(entry, "session_id", None)
         if source is None or not session_id:
+            # Silent until 2026-08-18. A restored entry missing its origin is
+            # unroutable for capture, and staying quiet about it made the whole
+            # boundary look like it never fired.
+            logger.info(
+                "Session-end capture skipped (reason=%s): entry has no %s",
+                reason,
+                "origin" if source is None else "session_id",
+            )
             return
 
         capturer = getattr(self, "_boundary_capturer", None)
@@ -12049,6 +12057,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             logger.warning("Failed to load transcript for session-end capture %s: %s", session_id, exc)
             return
         if not messages:
+            logger.info(
+                "Session-end capture skipped (reason=%s): transcript for %s is "
+                "empty",
+                reason,
+                session_id,
+            )
             return
 
         try:

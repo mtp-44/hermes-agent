@@ -162,3 +162,47 @@ def test_provider_exception_is_swallowed():
         session_id="s", platform="cli", messages=_MESSAGES,
         boundary_reason="reset",
     ) is True
+
+
+def test_failed_bind_does_not_latch_off_permanently(monkeypatch):
+    """A bind failure must be retried on the next boundary, not cached forever.
+
+    Regression guard for the 2026-08-18 estate feature-usage audit finding.
+    ``_manager_or_none`` used to set ``self._bound = True`` *before* attempting
+    the bind, so a single transient failure (plugin not yet importable, config
+    read racing startup) permanently disabled session-boundary capture for the
+    rest of the gateway process — and two of its exit branches logged nothing,
+    so the symptom was "expiry boundaries fire, no capture, no error".
+    """
+    attempts = []
+
+    def _flaky_loader(name):
+        attempts.append(name)
+        # Fail the first bind, succeed on the retry.
+        return None if len(attempts) == 1 else _FakeProvider()
+
+    import plugins.memory
+    monkeypatch.setattr(plugins.memory, "load_memory_provider", _flaky_loader)
+
+    cap = GatewayBoundaryCapturer(provider_name="fake")
+
+    assert cap._manager_or_none() is None
+    assert cap._bound is False, "a failed bind must not be cached"
+
+    manager = cap._manager_or_none()
+    assert manager is not None, "the retry must be allowed to succeed"
+    assert cap._bound is True, "a successful bind is cached"
+    assert len(attempts) == 2
+
+    # Third call reuses the bound manager rather than loading again.
+    assert cap._manager_or_none() is manager
+    assert len(attempts) == 2
+
+
+def test_missing_provider_name_is_cached_and_logged(caplog):
+    """An empty provider name is a settled state, so it *is* cached — but loudly."""
+    cap = GatewayBoundaryCapturer(provider_name="")
+    with caplog.at_level("INFO", logger="gateway.boundary_capture"):
+        assert cap._manager_or_none() is None
+    assert cap._bound is True
+    assert any("no memory provider configured" in r.message for r in caplog.records)

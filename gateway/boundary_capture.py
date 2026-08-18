@@ -68,11 +68,24 @@ class GatewayBoundaryCapturer:
             return ""
 
     def _manager_or_none(self):
+        # Only a *successful* bind is cached. Setting the flag before the attempt
+        # (as this did until 2026-08-18) made one transient failure permanent for
+        # the process lifetime: every later boundary returned a cached ``None``
+        # and capture went silently dead until the next gateway restart. Session
+        # boundaries are rare (a few per day), so retrying is cheap and strictly
+        # better than a latched-off capture pipeline.
         if self._bound:
             return self._manager
-        self._bound = True
         provider_name = self._resolve_provider_name()
         if not provider_name:
+            # Reachable when `enabled` was true at the call site but config
+            # changed underneath, or when an explicit "" provider was injected.
+            logger.info(
+                "Gateway boundary capture skipped: no memory provider configured "
+                "(memory.provider is empty)"
+            )
+            self._bound = True
+            self._manager = None
             return None
         try:
             from agent.memory_manager import MemoryManager
@@ -80,6 +93,15 @@ class GatewayBoundaryCapturer:
 
             provider = load_memory_provider(provider_name)
             if provider is None:
+                # Unlogged until 2026-08-18. This is the branch that makes a
+                # correctly-configured provider look like "no capture happened":
+                # the name resolves, `enabled` is True, and yet nothing is bound.
+                logger.warning(
+                    "Gateway boundary capture disabled: memory provider '%s' is "
+                    "configured but failed to load (plugin missing or import "
+                    "error) — no session-boundary capture will run",
+                    provider_name,
+                )
                 return None
             # Initialize once before the availability check: is_available() is
             # config-dependent and a provider may only resolve its credentials
@@ -108,6 +130,11 @@ class GatewayBoundaryCapturer:
             manager = MemoryManager()
             manager.add_provider(provider)
             self._manager = manager
+            self._bound = True
+            logger.info(
+                "Gateway boundary capture bound to memory provider '%s'",
+                provider_name,
+            )
         except Exception as exc:
             logger.warning(
                 "Gateway boundary capture: failed to bind provider '%s': %s",
