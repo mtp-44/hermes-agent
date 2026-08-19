@@ -9,6 +9,19 @@
      is the ONE place in this file where the standing resolution is "ours".
      Everything below the marker is upstream's and is resolved normally. -->
 
+> **Estate-local operational note (2026-08-19).** **Any commit in this repo blocks
+> in-chat model switching until the gateway restarts — including a docs-only one.**
+> The running gateway records the sha it booted from and refuses `/model` and
+> `/tier` if the checkout has moved, to avoid a stale-module crash:
+> *"running code from `<boot sha>` but the checkout on disk is now `<head>`"*. The
+> guard compares **shas, not content**, so two `.md` files trip it exactly like a
+> core change. Order the work accordingly — **commit here first, restart last** —
+> and after any commit run `hermes gateway restart` (SIGUSR1, drains in-flight runs
+> up to `agent.restart_drain_timeout`; not `launchctl kickstart -k`, which SIGKILLs
+> them). No other repo in `~/ai` affects the gateway this way. Found the hard way:
+> a `/tier m` in Signal was blocked by the commit of `HA-0004`, which is a decision
+> record and touches no code.
+
 <!-- END ESTATE POINT-UP BLOCK — upstream content follows -->
 
 # Hermes Agent - Development Guide

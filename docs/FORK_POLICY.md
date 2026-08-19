@@ -68,7 +68,9 @@ short; anything not on it is a bug.
 
 ### 1. `AGENTS.md` — the estate point-up block (2026-07-29)
 
-**What.** A 13-line block prepended to the top of `AGENTS.md`: four `>` lines
+**What.** A block prepended to the top of `AGENTS.md` — 13 lines originally, 25
+since 2026-08-19, and expected to grow; **resolve by the END ESTATE POINT-UP BLOCK
+marker, not by counting lines**: four `>` lines
 naming the estate map, the cross-repo decision ledger, `STATUS.md` and this
 repo's `docs/INDEX.md` by absolute path, plus an HTML comment explaining itself
 and an `END ESTATE POINT-UP BLOCK` marker.

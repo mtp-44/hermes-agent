@@ -4,7 +4,7 @@ date: 2026-07-29
 repo: hermes-agent
 status: active
 tags: [fork-policy, doc-spine, upstream-sync]
-verdict: "Accept a permanent 13-line divergence at the top of the upstream-tracked AGENTS.md so the fork is visible to the estate doc spine; resolve it 'ours' above the END ESTATE POINT-UP BLOCK marker on every sync."
+verdict: "Accept a permanent 13-line divergence at the top of the upstream-tracked AGENTS.md so the fork is visible to the estate doc spine; resolve it 'ours' above the END ESTATE POINT-UP BLOCK marker on every sync. **Extended to 25 lines on 2026-08-19** — the marker, not the count, is the boundary: an estate-local operational note was added inside the block recording that any commit here blocks in-chat model switching until the gateway restarts. The ruling is unchanged; only the size is."
 ---
 
 # Prepend the estate point-up block to the upstream-tracked `AGENTS.md`
@@ -65,7 +65,9 @@ judgement call by marking where the divergence ends:
 **Standing resolution rule on any conflicting sync: take "ours" above the
 marker, "theirs" below it.**
 
-Total divergence: 13 lines, at a fixed location, self-documenting.
+Total divergence: 13 lines at first, 25 as of 2026-08-19, at a fixed location and
+self-documenting. **Resolve by the marker, never by line count** — the block is
+expected to grow as estate-local operational notes accumulate.
 
 ## Consequences
 
