@@ -12017,6 +12017,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         kwargs.update(self._capture_flags_for_entry(entry))
         return kwargs
 
+    @staticmethod
+    def _platform_token(platform: object) -> str:
+        """Normalise a Platform enum (or str) to its wire value for logging."""
+        return str(getattr(platform, "value", platform) or "")
+
     async def _capture_session_summary_if_eligible(self, entry, *, reason: str) -> None:
         """Best-effort session-end capture that respects per-session privacy flags.
 
@@ -12069,7 +12074,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             await asyncio.to_thread(
                 capturer.capture,
                 session_id=session_id,
-                platform=str(getattr(source, "platform", "") or ""),
+                # `.value`, not `str()`: Platform is a plain Enum, so str() yields
+                # "Platform.SIGNAL" while every other capture path logs "signal".
+                # That split made `platform=signal` fail to match the gateway
+                # boundary path's own log lines, and on 2026-08-18 it cost a wrong
+                # diagnosis — five expiry captures were read as "produced no log
+                # output" when each had logged normally under the other spelling.
+                platform=self._platform_token(getattr(source, "platform", "")),
                 messages=messages,
                 boundary_reason=reason,
                 eligible=not flags["capture_private"],
