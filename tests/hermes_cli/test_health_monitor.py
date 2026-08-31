@@ -271,3 +271,118 @@ def test_alert_detail_names_the_missing_piece(monkeypatch):
 
     assert result.ok is False
     assert result.detail == "missing TELEGRAM_BOT_TOKEN"
+
+
+# --- Task B (`OB-0012`): cheap /health every cycle, full contract daily -----
+
+import scripts.hermes_health_monitor as hhm
+
+
+def _openbrain_env(monkeypatch, tmp_path):
+    monkeypatch.setenv("OPEN_BRAIN_MCP_URL", "http://localhost:8765")
+    monkeypatch.setenv("MCP_ACCESS_KEY", "k")
+    monkeypatch.setattr(hhm, "OPENBRAIN_CONTRACT_STATE_PATH", tmp_path / "contract.json")
+
+
+def _stub_http(monkeypatch, calls, *, health=(200, {"status": "ok", "database": "ok", "version": "1.0.0"}),
+               unauth=(401, {"error": "Unauthorized"}), auth=(200, {"result": {"tools": [{}, {}, {}]}})):
+    def fake(url, *, method="GET", headers=None, body=None, timeout=None):
+        calls.append((method, url, (body or {}).get("method")))
+        if url.endswith("/health"):
+            return health
+        if headers and "x-brain-key" in headers:
+            return auth
+        return unauth
+
+    monkeypatch.setattr(hhm, "_http_json", fake)
+
+
+def test_the_routine_cycle_sends_one_health_request_not_two_tools_list(monkeypatch, tmp_path):
+    _openbrain_env(monkeypatch, tmp_path)
+    calls: list = []
+    _stub_http(monkeypatch, calls)
+
+    first = hhm._check_openbrain()          # first run: contract is due
+    assert first.ok
+    assert any(c[2] == "tools/list" for c in calls)
+
+    calls.clear()
+    second = hhm._check_openbrain()         # steady state
+    assert second.ok
+    assert calls == [("GET", "http://localhost:8765/health", None)]
+    assert second.metadata["probe"] == "health"
+
+
+def test_a_database_outage_fails_the_cheap_probe_immediately(monkeypatch, tmp_path):
+    _openbrain_env(monkeypatch, tmp_path)
+    _stub_http(monkeypatch, [], health=(503, {"status": "degraded", "database": "unavailable"}))
+    result = hhm._check_openbrain()
+    assert not result.ok
+    assert result.fingerprint == "health:http:503"
+
+
+def test_a_dead_server_fails_the_cheap_probe_immediately(monkeypatch, tmp_path):
+    _openbrain_env(monkeypatch, tmp_path)
+
+    def boom(*a, **k):
+        raise ConnectionRefusedError("no listener")
+
+    monkeypatch.setattr(hhm, "_http_json", boom)
+    result = hhm._check_openbrain()
+    assert not result.ok
+    assert result.fingerprint == "health:ConnectionRefusedError"
+
+
+def test_an_open_auth_gate_is_still_caught_by_the_contract_probe(monkeypatch, tmp_path):
+    # The unauthenticated half of the old check is kept, not dropped: it is the
+    # only assertion that the gate is closed. Retiring it to save a request
+    # would be a security check removed under the banner of noise reduction.
+    _openbrain_env(monkeypatch, tmp_path)
+    _stub_http(monkeypatch, [], unauth=(200, {"result": {"tools": []}}))
+    result = hhm._check_openbrain()
+    assert not result.ok
+    assert result.fingerprint == "unauth:http:200"
+
+
+def test_a_broken_tool_contract_is_caught(monkeypatch, tmp_path):
+    _openbrain_env(monkeypatch, tmp_path)
+    _stub_http(monkeypatch, [], auth=(200, {"result": {}}))
+    result = hhm._check_openbrain()
+    assert not result.ok
+    assert result.fingerprint == "auth:tools"
+
+
+def test_a_failed_contract_is_retried_next_cycle_rather_than_next_day(monkeypatch, tmp_path):
+    _openbrain_env(monkeypatch, tmp_path)
+    _stub_http(monkeypatch, [], auth=(200, {"result": {}}))
+    assert not hhm._check_openbrain().ok
+    calls: list = []
+    _stub_http(monkeypatch, calls, auth=(200, {"result": {}}))
+    assert not hhm._check_openbrain().ok
+    assert any(c[2] == "tools/list" for c in calls), "a failed contract must not wait a day"
+
+
+def test_a_deploy_reruns_the_contract_immediately(monkeypatch, tmp_path):
+    _openbrain_env(monkeypatch, tmp_path)
+    _stub_http(monkeypatch, [])
+    hhm._check_openbrain()                                   # settles at v1.0.0
+    calls: list = []
+    _stub_http(monkeypatch, calls,
+               health=(200, {"status": "ok", "database": "ok", "version": "1.1.0"}))
+    result = hhm._check_openbrain()
+    assert result.ok
+    assert result.metadata["reason"] == "version-changed"
+    assert any(c[2] == "tools/list" for c in calls)
+
+
+def test_the_contract_comes_due_again_after_a_day():
+    day = hhm.OPENBRAIN_CONTRACT_INTERVAL_SECONDS
+    fresh = {"last_ok_at": 1000.0, "last_status": "ok", "version": "1.0.0"}
+    assert hhm._openbrain_contract_due(fresh, "1.0.0", 1000.0 + day - 1) == (False, "")
+    assert hhm._openbrain_contract_due(fresh, "1.0.0", 1000.0 + day)[0] is True
+
+
+def test_a_server_predating_the_db_probe_still_passes(monkeypatch, tmp_path):
+    _openbrain_env(monkeypatch, tmp_path)
+    _stub_http(monkeypatch, [], health=(200, {"status": "ok", "version": "1.0.0"}))
+    assert hhm._check_openbrain().ok

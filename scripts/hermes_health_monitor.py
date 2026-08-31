@@ -10,6 +10,7 @@ import shutil
 import socket
 import ssl
 import subprocess
+import time
 import sys
 import urllib.error
 import urllib.parse
@@ -632,13 +633,47 @@ def _check_telegram() -> CheckResult:
     return CheckResult("telegram", True, f"ok ({username})", "ok")
 
 
-def _check_openbrain() -> CheckResult:
-    url = _parse_hosted_mcp_url()
-    key = os.getenv("MCP_ACCESS_KEY", "").strip()
-    if not url or not key:
-        return CheckResult("openbrain", True, "openbrain not configured", "skip", skipped=True)
+# How often the *full* auth + tool-contract probe runs. Every 300 s run does
+# the cheap `/health` check instead. Task B of `OB-0012`: the old shape sent an
+# unauthenticated `tools/list` (expecting 401) plus an authenticated one on
+# every cycle — 576 tool-discovery requests a day, and 12,185 of them in the
+# 2026-08-31 audit window, to learn that a daemon was up.
+OPENBRAIN_CONTRACT_INTERVAL_SECONDS = 24 * 60 * 60
+OPENBRAIN_CONTRACT_STATE_PATH = Path.home() / ".hermes" / "openbrain-contract-state.json"
 
-    timeout = _parse_float_env("HERMES_HEALTH_HTTP_TIMEOUT_SECONDS", DEFAULT_HTTP_TIMEOUT_SECONDS)
+
+def _openbrain_health_url(url: str) -> str:
+    return f"{url.rstrip('/')}/health"
+
+
+def _openbrain_contract_due(state: dict[str, Any], version: str, now: float) -> tuple[bool, str]:
+    """Daily, after a deploy, or after the contract last failed.
+
+    "After deploys" is read off the server version `/health` returns, so a
+    restart carrying new code is probed immediately rather than up to a day
+    later — the plan asks for daily *and* post-deploy, and a version change is
+    the only post-deploy signal available without a hook.
+    """
+    if not state.get("last_ok_at"):
+        return True, "first-run"
+    if state.get("last_status") != "ok":
+        return True, "retry-after-failure"
+    if version and state.get("version") != version:
+        return True, "version-changed"
+    if now - float(state.get("last_ok_at") or 0) >= OPENBRAIN_CONTRACT_INTERVAL_SECONDS:
+        return True, "daily"
+    return False, ""
+
+
+def _check_openbrain_contract(url: str, key: str, timeout: float) -> CheckResult:
+    """The expensive probe, now run daily instead of every 300 s.
+
+    Deliberately keeps **both** halves of the old check. The unauthenticated
+    request is not redundant with the authenticated one: it is the only thing
+    asserting that the auth gate is actually closed, and dropping it to save a
+    request would quietly retire a security check under the banner of noise
+    reduction.
+    """
     request_body = {"jsonrpc": "2.0", "id": "health-monitor", "method": "tools/list"}
     try:
         unauth_status, unauth_payload = _http_json(url, method="POST", body=request_body, timeout=timeout)
@@ -653,7 +688,7 @@ def _check_openbrain() -> CheckResult:
         auth_status, auth_payload = _http_json(
             url,
             method="POST",
-            headers={"x-brain-key": key},
+            headers={"x-brain-key": key, "x-brain-client": "hermes-health-monitor"},
             body=request_body,
             timeout=timeout,
         )
@@ -665,7 +700,72 @@ def _check_openbrain() -> CheckResult:
     tools = result.get("tools") if isinstance(result, dict) else None
     if not isinstance(tools, list):
         return CheckResult("openbrain", False, "authenticated probe missing tools payload", "auth:tools")
-    return CheckResult("openbrain", True, f"ok ({len(tools)} tool(s))", "ok", {"tool_count": len(tools)})
+    return CheckResult("openbrain", True, f"contract ok ({len(tools)} tool(s))", "ok", {"tool_count": len(tools)})
+
+
+def _check_openbrain() -> CheckResult:
+    """Cheap every cycle, full contract daily and after a deploy.
+
+    The cheap probe is one authenticated `GET /health`, which since 2026-08-31
+    answers all three liveness questions at once: the process is serving, the
+    key is accepted, and Postgres — the system of record — is reachable (the
+    route returns 503, not a flagged 200, when it is not).
+
+    Detection is not weakened by this, which is the thing to check before
+    believing the request-count win. A dead or wedged server still fails the
+    very next 300 s cycle and alerts through the same `_maybe_alert` path; a
+    broken tool contract or an open auth gate is caught within a day, or
+    immediately if the server version moved. WW-0001's finding was that all
+    three of August's faults were found by audit rather than by an alert —
+    so the rule here is that every failure mode the old check could see is
+    still seen by one of these two, just at a cadence matched to how fast it
+    can appear.
+    """
+    url = _parse_hosted_mcp_url()
+    key = os.getenv("MCP_ACCESS_KEY", "").strip()
+    if not url or not key:
+        return CheckResult("openbrain", True, "openbrain not configured", "skip", skipped=True)
+
+    timeout = _parse_float_env("HERMES_HEALTH_HTTP_TIMEOUT_SECONDS", DEFAULT_HTTP_TIMEOUT_SECONDS)
+    try:
+        status, payload = _http_json(
+            _openbrain_health_url(url),
+            headers={"x-brain-key": key, "x-brain-client": "hermes-health-monitor"},
+            timeout=timeout,
+        )
+    except Exception as exc:
+        return CheckResult("openbrain", False, str(exc), f"health:{type(exc).__name__}")
+    if status != 200:
+        detail = ""
+        if isinstance(payload, dict):
+            detail = f" ({payload.get('status')}/{payload.get('database')})"
+        return CheckResult("openbrain", False, f"/health returned {status}{detail}", f"health:http:{status}")
+    if not isinstance(payload, dict) or payload.get("status") != "ok":
+        return CheckResult("openbrain", False, "/health did not report ok", "health:body")
+    if payload.get("database") not in (None, "ok"):
+        # `None` keeps this compatible with a server predating the DB probe.
+        return CheckResult("openbrain", False, f"database {payload.get('database')}", "health:db")
+
+    version = str(payload.get("version") or "")
+    state = _read_json_file(OPENBRAIN_CONTRACT_STATE_PATH)
+    now = time.time()
+    due, reason = _openbrain_contract_due(state, version, now)
+    if not due:
+        return CheckResult("openbrain", True, f"ok (health, v{version or '?'})", "ok",
+                           {"probe": "health", "version": version})
+
+    contract = _check_openbrain_contract(url, key, timeout)
+    state["last_status"] = "ok" if contract.ok else "failed"
+    state["version"] = version
+    state["last_run_reason"] = reason
+    if contract.ok:
+        state["last_ok_at"] = now
+    _write_json_file(OPENBRAIN_CONTRACT_STATE_PATH, state)
+    if contract.ok:
+        metadata = dict(contract.metadata or {})
+        metadata.update({"probe": "contract", "reason": reason, "version": version})
+        return CheckResult("openbrain", True, f"{contract.detail} [{reason}]", "ok", metadata)
+    return contract
 
 
 def _check_config() -> CheckResult:
