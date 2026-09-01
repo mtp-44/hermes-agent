@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -386,3 +387,127 @@ def test_a_server_predating_the_db_probe_still_passes(monkeypatch, tmp_path):
     _openbrain_env(monkeypatch, tmp_path)
     _stub_http(monkeypatch, [], health=(200, {"status": "ok", "version": "1.0.0"}))
     assert hhm._check_openbrain().ok
+
+
+# --- email triage daemon check (ES-0005) -----------------------------------
+
+from datetime import datetime as _dt, timedelta as _td
+
+
+def _email_log(lines):
+    return "\n".join(lines) + "\n"
+
+
+def _stamp(now, **delta):
+    return (now - _td(**delta)).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def test_counts_only_events_inside_the_window():
+    now = _dt(2026, 9, 1, 12, 0, 0)
+    text = _email_log([
+        f"{_stamp(now, hours=1)} INFO Starting email daemon (poll every 300s)",
+        f"{_stamp(now, hours=2)} INFO Starting email daemon (poll every 300s)",
+        f"{_stamp(now, hours=99)} INFO Starting email daemon (poll every 300s)",   # outside
+        f"{_stamp(now, hours=3)} ERROR Signal send failed: ReadTimeout",
+        f"{_stamp(now, hours=1)} INFO Applied recycle label to 34 Archive email(s)",
+    ])
+    assert hhm.count_email_events(text, now, 6) == (2, 1)
+
+
+def test_unparseable_and_partial_lines_are_ignored():
+    now = _dt(2026, 9, 1, 12, 0, 0)
+    text = _email_log([
+        "il to 24 Archive email(s)",                          # partial first line from a tail seek
+        "not a log line at all",
+        "2026-13-45 99:99:99 INFO Starting email daemon",     # unparseable stamp
+        f"{_stamp(now, minutes=5)} INFO Starting email daemon (poll every 300s)",
+    ])
+    assert hhm.count_email_events(text, now, 6) == (1, 0)
+
+
+def _email_env(monkeypatch, tmp_path, text, age_seconds=60.0):
+    log = tmp_path / "triage.log"
+    log.write_text(text, encoding="utf-8")
+    import os as _os
+    stamp = time.time() - age_seconds
+    _os.utime(log, (stamp, stamp))
+    monkeypatch.setenv("HERMES_HEALTH_EMAIL_LOG", str(log))
+    for name in ("HERMES_HEALTH_EMAIL_STALE_SECONDS", "HERMES_HEALTH_EMAIL_MAX_RESTARTS",
+                 "HERMES_HEALTH_EMAIL_RESTART_WINDOW_HOURS"):
+        monkeypatch.delenv(name, raising=False)
+    return log
+
+
+def test_a_healthy_daemon_passes(monkeypatch, tmp_path):
+    now = _dt.now()
+    _email_env(monkeypatch, tmp_path, _email_log([
+        f"{_stamp(now, minutes=30)} INFO Applied recycle label to 34 Archive email(s)",
+    ]))
+    result = hhm._check_email()
+    assert result.ok
+    assert result.metadata["restarts_in_window"] == 0
+
+
+def test_a_silent_log_is_caught(monkeypatch, tmp_path):
+    now = _dt.now()
+    _email_env(monkeypatch, tmp_path, _email_log([
+        f"{_stamp(now, hours=48)} INFO Applied recycle label to 34 Archive email(s)",
+    ]), age_seconds=48 * 3600)
+    result = hhm._check_email()
+    assert not result.ok
+    assert result.fingerprint == "email:stale"
+
+
+def test_the_real_august_crash_cluster_would_have_fired(monkeypatch, tmp_path):
+    # 2026-08-22 saw 20 restarts in a day, absorbed silently by KeepAlive. This
+    # is the fault the check exists for, so assert against its actual shape.
+    now = _dt.now()
+    lines = [f"{_stamp(now, minutes=5 * i)} INFO Starting email daemon (poll every 300s)"
+             for i in range(1, 21)]
+    _email_env(monkeypatch, tmp_path, _email_log(lines))
+    result = hhm._check_email()
+    assert not result.ok
+    assert result.fingerprint == "email:restart-loop"
+    assert result.metadata["restarts_in_window"] == 20
+    assert "do not restart it" in result.detail
+
+
+def test_an_ordinary_restart_does_not_fire(monkeypatch, tmp_path):
+    # A single restart after a deploy or a bridge blip must stay quiet, or the
+    # check gets muted and stops being worth having.
+    now = _dt.now()
+    _email_env(monkeypatch, tmp_path, _email_log([
+        f"{_stamp(now, minutes=20)} INFO Starting email daemon (poll every 300s)",
+        f"{_stamp(now, minutes=19)} INFO IMAP connected",
+    ]))
+    assert hhm._check_email().ok
+
+
+def test_signal_failures_are_reported_but_never_alarm(monkeypatch, tmp_path):
+    now = _dt.now()
+    _email_env(monkeypatch, tmp_path, _email_log([
+        f"{_stamp(now, hours=1)} ERROR Signal send failed: ReadTimeout",
+        f"{_stamp(now, hours=2)} ERROR Signal send failed: ReadTimeout",
+        f"{_stamp(now, hours=3)} ERROR Signal send failed: ReadTimeout",
+    ]))
+    result = hhm._check_email()
+    assert result.ok
+    assert result.metadata["signal_failures_in_window"] == 3
+
+
+def test_a_missing_log_skips_rather_than_fails(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HEALTH_EMAIL_LOG", str(tmp_path / "nope.log"))
+    result = hhm._check_email()
+    assert result.ok and result.skipped
+
+
+def test_email_has_no_restarter(tmp_path):
+    # KeepAlive already restarts this daemon; restarting it again on a
+    # crash-loop alarm would add to the thing being alarmed about.
+    monitor = hhm._build_monitor(state_path=tmp_path / "s.json", log_path=tmp_path / "l.jsonl")
+    assert "email" in monitor.checkers
+    assert "email" not in monitor.restarters
+
+
+def test_email_is_in_the_default_service_list():
+    assert "email" in hhm.DEFAULT_SERVICES

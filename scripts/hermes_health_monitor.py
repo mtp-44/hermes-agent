@@ -6,6 +6,7 @@ import base64
 import hashlib
 import json
 import os
+import re
 import shutil
 import socket
 import ssl
@@ -43,7 +44,37 @@ DEFAULT_PWA_WS_URLS = (
     "ws://127.0.0.1:9219/api/ws-health",
     "wss://mini-mh.tailbd0650.ts.net/api/ws-health",
 )
-DEFAULT_SERVICES = ("ollama", "gateway", "pwa", "config", "telegram", "openbrain", "disk", "memory")
+DEFAULT_SERVICES = ("ollama", "gateway", "pwa", "config", "telegram", "openbrain", "email", "disk", "memory")
+
+# --- email triage daemon (ES-0005) -----------------------------------------
+# `net.mtp44.email-triage` ran a cluster of 59 crash-restarts between
+# 2026-08-10 and 08-27 — up to twenty in one day — absorbed silently by its
+# launchd `KeepAlive` with nothing announcing it, and separately lost four
+# digests to Signal timeouts. Neither was visible because this monitor had no
+# email check at all. That is what these two assertions exist to catch.
+#
+# Read `logs/triage.log`, NOT `logs/daemon.log`: since `ES-0002` the latter is
+# launchd's stderr sink and carries tracebacks only, so its mtime is the last
+# *crash* and a stale `daemon.log` is health. Reading the wrong one is exactly
+# the mistake `ES-0005` was written to correct.
+DEFAULT_EMAIL_LOG = "/Users/mh/ai/email_solutions/logs/triage.log"
+# Measured, not guessed: over 2026-08-10 → 09-01 (200 log lines) the largest
+# real gap between consecutive lines was 24.0 h and the p95 was 11.3 h. 36 h is
+# 1.5x the observed maximum — loose enough not to cry wolf on a quiet mailbox,
+# tight enough to still mean something. The daemon polls every 300 s but only
+# logs when it does something, so this is the "silently stopped working"
+# tripwire, not a heartbeat. Re-measure before tightening it.
+DEFAULT_EMAIL_STALE_SECONDS = 36 * 3600
+# Normal is zero restarts a day. The fault being caught was 16-20.
+DEFAULT_EMAIL_MAX_RESTARTS = 5
+DEFAULT_EMAIL_RESTART_WINDOW_HOURS = 6
+# Log lines are `2026-09-01 03:34:44 LEVEL message` in local time.
+_EMAIL_TS_RE = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) ")
+_EMAIL_START_MARKER = "Starting email daemon"
+_EMAIL_SIGNAL_FAILURE = "Signal send failed"
+# Bounded tail read: the window of interest is hours, the file is capped at
+# 5 MB by its own RotatingFileHandler, and this runs every 300 s.
+_EMAIL_TAIL_BYTES = 256 * 1024
 
 
 def _utc_now() -> datetime:
@@ -868,6 +899,97 @@ def _available_memory_bytes_macos() -> int | None:
     return page_size * free_pages
 
 
+def _read_log_tail(path: Path, max_bytes: int) -> str:
+    with path.open("rb") as fh:
+        try:
+            fh.seek(max(0, path.stat().st_size - max_bytes))
+        except OSError:
+            pass
+        # A mid-line seek can split a UTF-8 sequence; the first partial line is
+        # discarded by the timestamp match anyway.
+        return fh.read().decode("utf-8", errors="replace")
+
+
+def count_email_events(text: str, now: datetime, window_hours: float) -> tuple[int, int]:
+    """`(daemon starts, Signal send failures)` inside the trailing window.
+
+    Pure so the thresholds can be tested without a live log. `now` and the log's
+    timestamps are both **local naive** — the daemon writes local time with no
+    offset, and comparing that to a UTC clock would silently shift the window.
+    """
+    cutoff = now - timedelta(hours=window_hours)
+    starts = 0
+    signal_failures = 0
+    for line in text.splitlines():
+        match = _EMAIL_TS_RE.match(line)
+        if not match:
+            continue
+        try:
+            stamp = datetime.strptime(match.group(1), "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            continue
+        if stamp < cutoff:
+            continue
+        if _EMAIL_START_MARKER in line:
+            starts += 1
+        elif _EMAIL_SIGNAL_FAILURE in line:
+            signal_failures += 1
+    return starts, signal_failures
+
+
+def _check_email() -> CheckResult:
+    """Two assertions: the daemon is still doing work, and it is not crash-looping.
+
+    Deliberately has **no restarter** in `_build_monitor`. launchd's `KeepAlive`
+    already restarts this daemon; restarting it again on a crash-loop alarm would
+    add to the very thing being alarmed about. The correct response to this
+    firing is a human reading `logs/triage.log`.
+    """
+    log_path = Path(os.getenv("HERMES_HEALTH_EMAIL_LOG", DEFAULT_EMAIL_LOG))
+    if not log_path.exists():
+        return CheckResult("email", True, f"{log_path} not present (email triage not installed)", "skip", skipped=True)
+
+    stale_seconds = _parse_float_env("HERMES_HEALTH_EMAIL_STALE_SECONDS", DEFAULT_EMAIL_STALE_SECONDS)
+    max_restarts = _parse_int_env("HERMES_HEALTH_EMAIL_MAX_RESTARTS", DEFAULT_EMAIL_MAX_RESTARTS)
+    window_hours = _parse_float_env("HERMES_HEALTH_EMAIL_RESTART_WINDOW_HOURS", DEFAULT_EMAIL_RESTART_WINDOW_HOURS)
+
+    try:
+        age_seconds = time.time() - log_path.stat().st_mtime
+        text = _read_log_tail(log_path, _EMAIL_TAIL_BYTES)
+    except OSError as exc:
+        return CheckResult("email", False, f"cannot read {log_path}: {exc}", f"email:{type(exc).__name__}")
+
+    age_hours = round(age_seconds / 3600, 1)
+    if age_seconds > stale_seconds:
+        return CheckResult(
+            "email",
+            False,
+            f"triage.log has not been written for {age_hours} h "
+            f"(threshold {round(stale_seconds / 3600, 1)} h) — the daemon may be up but doing nothing",
+            "email:stale",
+            {"log_age_hours": age_hours},
+        )
+
+    starts, signal_failures = count_email_events(text, datetime.now(), window_hours)
+    metadata = {
+        "log_age_hours": age_hours,
+        "restarts_in_window": starts,
+        "signal_failures_in_window": signal_failures,
+    }
+    if starts >= max_restarts:
+        return CheckResult(
+            "email",
+            False,
+            f"{starts} daemon restarts in {window_hours} h (threshold {max_restarts}) — "
+            f"crash-looping under launchd KeepAlive; read logs/triage.log, do not restart it",
+            "email:restart-loop",
+            metadata,
+        )
+    # Signal timeouts are reported, never alarmed on: they are transient, the
+    # digest is not safety-critical, and a check nobody trusts gets muted.
+    return CheckResult("email", True, f"ok (last log {age_hours} h ago, {starts} restart(s) in {window_hours} h)", "ok", metadata)
+
+
 def _check_memory() -> CheckResult:
     minimum_bytes = _parse_int_env("HERMES_HEALTH_MIN_MEMORY_BYTES", DEFAULT_MIN_MEMORY_BYTES)
     available_bytes = _available_memory_bytes()
@@ -889,6 +1011,7 @@ def _build_monitor(*, state_path: Path, log_path: Path) -> HealthMonitor:
             "config": _check_config,
             "telegram": _check_telegram,
             "openbrain": _check_openbrain,
+            "email": _check_email,
             "disk": _check_disk,
             "memory": _check_memory,
         },
