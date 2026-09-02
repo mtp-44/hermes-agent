@@ -44,7 +44,7 @@ DEFAULT_PWA_WS_URLS = (
     "ws://127.0.0.1:9219/api/ws-health",
     "wss://mini-mh.tailbd0650.ts.net/api/ws-health",
 )
-DEFAULT_SERVICES = ("ollama", "gateway", "pwa", "config", "telegram", "openbrain", "email", "disk", "memory")
+DEFAULT_SERVICES = ("ollama", "gateway", "pwa", "config", "telegram", "openbrain", "email", "estate", "disk", "memory")
 
 # --- email triage daemon (ES-0005) -----------------------------------------
 # `net.mtp44.email-triage` ran a cluster of 59 crash-restarts between
@@ -75,6 +75,38 @@ _EMAIL_SIGNAL_FAILURE = "Signal send failed"
 # Bounded tail read: the window of interest is hours, the file is capped at
 # 5 MB by its own RotatingFileHandler, and this runs every 300 s.
 _EMAIL_TAIL_BYTES = 256 * 1024
+
+
+# --- estate silence (BS-0004 / WW-0004) ------------------------------------
+# The `email` check below watches ONE job. This one watches the whole estate,
+# and it exists because `launchctl list`'s status column is the last EXIT
+# STATUS: a scheduled job that exits 0 while doing nothing reads as perfectly
+# healthy. That is how `OB-0010`'s commitment extraction was dead from
+# 2026-07-05 and the `email_solutions` daemon quiet from 2026-08-27 — both found
+# only because somebody decided to audit, which `WW-0001` named as the estate's
+# real cost: "nothing announces when a piece stops working".
+#
+# `BS-0004` wrote down, per job, which file proves it ran and what "silent"
+# means for it, with the measurement behind every threshold. `bootstrap`'s
+# `make standup` and its weekly reviewer read that registry — but only when
+# invoked. This is the only thing that reads it every 300 s, which is why
+# `WW-0004` amended `WW-0003`'s one-output-surface constraint to let it exist.
+#
+# IT IMPORTS `bootstrap/scripts/spine.py` ON PURPOSE, rather than copying the
+# rule: two implementations of "is this job alive" is how an estate ends up with
+# two answers. The coupling is declared in `WW-0004` and in `estate.yaml`'s note
+# on this job — editing `spine.log_freshness` now changes what this live monitor
+# alarms on. If bootstrap or PyYAML is unavailable the check SKIPS rather than
+# failing, so a bare machine mid-rebuild does not page anyone.
+DEFAULT_ESTATE_SPINE_DIR = "/Users/mh/ai/bootstrap/scripts"
+DEFAULT_ESTATE_REVIEW_LATEST = "/Users/mh/state/bootstrap/review/latest.json"
+# The weekly reviewer's own bar is 8d (estate.yaml). 9d here so a single late
+# run does not race the job's own freshness check into a duplicate alarm.
+DEFAULT_ESTATE_REVIEW_MAX_AGE_DAYS = 9
+# Already covered, in more depth, by `_check_email` — restart-loop counting and
+# Signal-failure reporting on top of freshness. Alarming twice on one job trains
+# you to ignore the channel.
+ESTATE_LABELS_COVERED_ELSEWHERE = ("net.mtp44.email-triage",)
 
 
 def _utc_now() -> datetime:
@@ -990,6 +1022,160 @@ def _check_email() -> CheckResult:
     return CheckResult("email", True, f"ok (last log {age_hours} h ago, {starts} restart(s) in {window_hours} h)", "ok", metadata)
 
 
+def _load_estate_spine(spine_dir: str) -> tuple[Any, Any] | None:
+    """(Estate, log_freshness) from bootstrap, or None when unavailable.
+
+    Deliberately tolerant: a bare machine part-way through `make bootstrap` has
+    no `~/ai/bootstrap` yet, and the monitor must keep watching the nine things
+    it can see rather than dying on the tenth.
+    """
+    if spine_dir not in sys.path:
+        sys.path.append(spine_dir)
+    try:
+        from spine import Estate, log_freshness  # type: ignore[import-not-found]
+    except Exception:  # noqa: BLE001 — missing repo, missing PyYAML, anything
+        return None
+    return Estate, log_freshness
+
+
+def find_silent_jobs(estate: Any, log_freshness: Any, now: datetime) -> list[dict[str, Any]]:
+    """Registry jobs whose evidence log has gone past its measured `stale_after`.
+
+    Pure given an Estate, so the thresholds are testable without a live registry.
+    Only entries with a non-null `stale_after` can be judged — eleven of
+    seventeen are null on purpose, because for a daemon whose log is
+    request-driven a quiet log means no clients rather than a fault
+    (`gateway.log` sat 17.6 days quiet while perfectly healthy). Rendering those
+    as an alarm would page Mark for not using his own system.
+    """
+    out: list[dict[str, Any]] = []
+    for svc in estate.all_services():
+        label = str(svc.get("label"))
+        if label in ESTATE_LABELS_COVERED_ELSEWHERE:
+            continue
+        evidence = svc.get("evidence") or {}
+        if evidence.get("stale_after") is None:
+            continue
+        freshness = log_freshness(evidence, now)
+        if freshness.get("exists") is False:
+            out.append({"label": label, "why": "its evidence log has never been written",
+                        "bar": evidence["stale_after"], "age_hours": None})
+        elif freshness.get("stale"):
+            out.append({"label": label, "why": "silent", "bar": evidence["stale_after"],
+                        "age_hours": freshness.get("age_hours")})
+    return out
+
+
+def read_review_latest(path: Path, now: datetime, max_age_days: float) -> dict[str, Any]:
+    """The weekly reviewer's own pointer: did the last run deliver, and how old?
+
+    Two faults live here and neither is "a report is waiting". An OPEN pull
+    request is reported and never alarmed on: a reminder delivered down a health
+    channel is how a health channel stops being read, and it would leave this
+    service unhealthy — and therefore the monitor exiting 1 — until Mark got
+    round to it. `make standup` is where a nudge belongs.
+    """
+    if not path.is_file():
+        return {"present": False}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        return {"present": True, "unreadable": str(exc)}
+    out: dict[str, Any] = {"present": True, "date": data.get("date"),
+                           "findings": data.get("findings"), "pr_url": data.get("pr_url"),
+                           "pr_error": data.get("pr_error")}
+    stamp = str(data.get("generated") or "")
+    try:
+        generated = datetime.fromisoformat(stamp)
+    except ValueError:
+        out["age_days"] = None
+        return out
+    if generated.tzinfo is not None:
+        generated = generated.astimezone().replace(tzinfo=None)
+    out["age_days"] = round((now - generated).total_seconds() / 86400, 1)
+    out["overdue"] = out["age_days"] > max_age_days
+    return out
+
+
+def _check_estate() -> CheckResult:
+    """Has anything in the estate gone quiet, and is the weekly reviewer alive?
+
+    Deliberately has **no restarter** in `_build_monitor`, like `_check_email`.
+    There is no generic safe restart for "some job stopped doing work", and
+    kicking a job whose evidence is stale is as likely to hide the cause as fix
+    it. The correct response to this firing is a human running
+    `cd /Users/mh/ai/bootstrap && make review-gather`.
+    """
+    spine_dir = os.getenv("HERMES_HEALTH_ESTATE_SPINE_DIR", DEFAULT_ESTATE_SPINE_DIR)
+    loaded = _load_estate_spine(spine_dir)
+    if loaded is None:
+        return CheckResult("estate", True, f"{spine_dir} not importable (estate spine not installed)",
+                           "skip", skipped=True)
+    Estate, log_freshness = loaded
+    try:
+        estate = Estate.load()
+    except Exception as exc:  # noqa: BLE001 — an unreadable registry is the finding
+        return CheckResult("estate", False, f"cannot read the estate registry: {exc}",
+                           f"estate:registry:{type(exc).__name__}")
+
+    now = datetime.now()
+    silent = find_silent_jobs(estate, log_freshness, now)
+    review = read_review_latest(
+        Path(os.getenv("HERMES_HEALTH_ESTATE_REVIEW_LATEST", DEFAULT_ESTATE_REVIEW_LATEST)),
+        now,
+        _parse_float_env("HERMES_HEALTH_ESTATE_REVIEW_MAX_AGE_DAYS", DEFAULT_ESTATE_REVIEW_MAX_AGE_DAYS),
+    )
+    metadata: dict[str, Any] = {
+        "silent_jobs": [s["label"] for s in silent],
+        "review_date": review.get("date"),
+        "review_age_days": review.get("age_days"),
+        "review_findings": review.get("findings"),
+    }
+
+    if silent:
+        worst = ", ".join(
+            f"{s['label']} ({s['why']}"
+            + (f", {s['age_hours']}h against a {s['bar']} bar" if s["age_hours"] is not None else "")
+            + ")"
+            for s in silent
+        )
+        return CheckResult(
+            "estate", False,
+            f"{len(silent)} job(s) exiting 0 but leaving no evidence of work: {worst}. "
+            f"Exit status says nothing here — run `make review-gather` in ~/ai/bootstrap",
+            "estate:silent:" + ",".join(sorted(s["label"] for s in silent)),
+            metadata,
+        )
+
+    if review.get("unreadable"):
+        return CheckResult("estate", False,
+                           f"the estate review pointer is unreadable: {review['unreadable']}",
+                           "estate:review:unreadable", metadata)
+    if review.get("pr_error"):
+        return CheckResult(
+            "estate", False,
+            f"the estate review of {review.get('date')} gathered {review.get('findings')} "
+            f"finding(s) but could not deliver them: {review['pr_error']}",
+            f"estate:review:undelivered:{review.get('date')}", metadata,
+        )
+    if review.get("overdue"):
+        return CheckResult(
+            "estate", False,
+            f"the estate review has not run for {review.get('age_days')} days "
+            f"(last {review.get('date')}) — com.mh.estate-review is scheduled weekly",
+            f"estate:review:stale:{review.get('date')}", metadata,
+        )
+
+    if not review.get("present"):
+        detail = "every evidenced job fresh; the weekly review has not run yet"
+    else:
+        waiting = f", review of {review.get('date')} delivered, {review.get('findings')} finding(s)"             if review.get("pr_url") else ""
+        # "delivered", not "open": whether Mark has merged it is a `gh` call
+        # this check deliberately does not make every 300 s — standup owns that.
+        detail = f"every evidenced job fresh{waiting}"
+    return CheckResult("estate", True, f"ok ({detail})", "ok", metadata)
+
+
 def _check_memory() -> CheckResult:
     minimum_bytes = _parse_int_env("HERMES_HEALTH_MIN_MEMORY_BYTES", DEFAULT_MIN_MEMORY_BYTES)
     available_bytes = _available_memory_bytes()
@@ -1012,6 +1198,7 @@ def _build_monitor(*, state_path: Path, log_path: Path) -> HealthMonitor:
             "telegram": _check_telegram,
             "openbrain": _check_openbrain,
             "email": _check_email,
+            "estate": _check_estate,
             "disk": _check_disk,
             "memory": _check_memory,
         },

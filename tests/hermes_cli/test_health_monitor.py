@@ -511,3 +511,219 @@ def test_email_has_no_restarter(tmp_path):
 
 def test_email_is_in_the_default_service_list():
     assert "email" in hhm.DEFAULT_SERVICES
+
+
+# --- estate silence check (BS-0004 / WW-0004) ------------------------------
+# `email` above watches one job; this watches the whole registry, because
+# `launchctl list`'s status column is the last EXIT STATUS and a job that exits
+# 0 while doing nothing reads as healthy. Most of these assert the check stays
+# QUIET: eleven of seventeen registry entries carry `stale_after: null` on
+# purpose, and alarming on those would page Mark for not using his own system.
+
+
+class _FakeEstate:
+    """Stands in for bootstrap's Estate — only `all_services()` is used here."""
+
+    def __init__(self, services):
+        self._services = services
+
+    def all_services(self):
+        return self._services
+
+
+def _job(label, log, stale_after):
+    return {"label": label, "evidence": {"log": str(log) if log else None,
+                                         "stale_after": stale_after}}
+
+
+def _aged(tmp_path, name, hours, now):
+    import os as _os
+
+    p = tmp_path / name
+    p.write_text("x\n", encoding="utf-8")
+    when = now.timestamp() - hours * 3600
+    _os.utime(p, (when, when))
+    return p
+
+
+def _freshness(evidence, now):
+    """The real rule is bootstrap's spine.log_freshness; this is the same
+    contract, kept local so this suite does not depend on ~/ai/bootstrap being
+    present when it runs."""
+    from datetime import datetime as _dt
+
+    log = evidence.get("log")
+    bar = evidence.get("stale_after")
+    if log is None:
+        return {"log": None, "stale": None}
+    path = Path(log)
+    if not path.exists():
+        return {"log": log, "exists": False, "stale": None}
+    age = now.timestamp() - path.stat().st_mtime
+    out = {"log": log, "exists": True, "age_hours": round(age / 3600, 2)}
+    if bar is None:
+        out["stale"] = None
+        return out
+    units = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+    out["stale"] = age > int(bar[:-1]) * units[bar[-1]]
+    return out
+
+
+def test_a_missed_weekly_review_is_found_silent(tmp_path):
+    now = datetime(2026, 9, 2, 12, 0, 0)
+    estate = _FakeEstate([
+        _job("com.mh.estate-review", _aged(tmp_path, "er.log", 14 * 24, now), "8d"),
+        _job("com.mh.brainlocal-db-backup", _aged(tmp_path, "bk.log", 2, now), "36h"),
+    ])
+    silent = hhm.find_silent_jobs(estate, _freshness, now)
+    assert [s["label"] for s in silent] == ["com.mh.estate-review"]
+    assert silent[0]["age_hours"] == 336.0
+    assert silent[0]["bar"] == "8d"
+
+
+def test_a_null_stale_after_is_never_alarmed_on(tmp_path):
+    """gateway.log sat 17.6 days quiet while perfectly healthy and
+    dashboard.log is 34 days old while the process is up: for a daemon whose log
+    is request-driven, a quiet log means no clients."""
+    now = datetime(2026, 9, 2, 12, 0, 0)
+    estate = _FakeEstate([
+        _job("com.mh.hermes-dashboard", _aged(tmp_path, "db.log", 818, now), None),
+    ])
+    assert hhm.find_silent_jobs(estate, _freshness, now) == []
+
+
+def test_the_email_daemon_is_left_to_its_own_check(tmp_path):
+    """Two alarms for one job trains you to ignore the channel, and
+    `_check_email` says more (restart loops, Signal failures)."""
+    now = datetime(2026, 9, 2, 12, 0, 0)
+    estate = _FakeEstate([
+        _job("net.mtp44.email-triage", _aged(tmp_path, "tr.log", 900, now), "36h"),
+    ])
+    assert hhm.find_silent_jobs(estate, _freshness, now) == []
+
+
+def test_an_evidence_log_that_never_appeared_is_reported_differently(tmp_path):
+    now = datetime(2026, 9, 2, 12, 0, 0)
+    estate = _FakeEstate([_job("com.mh.thing", tmp_path / "never.log", "8d")])
+    silent = hhm.find_silent_jobs(estate, _freshness, now)
+    assert silent[0]["why"] == "its evidence log has never been written"
+    assert silent[0]["age_hours"] is None
+
+
+def test_a_fresh_estate_is_silent(tmp_path):
+    now = datetime(2026, 9, 2, 12, 0, 0)
+    estate = _FakeEstate([
+        _job("com.mh.a", _aged(tmp_path, "a.log", 1, now), "36h"),
+        _job("com.mh.b", _aged(tmp_path, "b.log", 2, now), "8d"),
+    ])
+    assert hhm.find_silent_jobs(estate, _freshness, now) == []
+
+
+def _latest(tmp_path, **fields):
+    p = tmp_path / "latest.json"
+    p.write_text(json.dumps({"date": "2026-09-08", "generated": "2026-09-08T07:00:00",
+                             "findings": 3, "pr_url": "https://example.invalid/pr/2",
+                             "pr_error": None, **fields}), encoding="utf-8")
+    return p
+
+
+def test_a_review_that_gathered_but_could_not_deliver_is_a_fault(tmp_path):
+    now = datetime(2026, 9, 8, 12, 0, 0)
+    got = hhm.read_review_latest(
+        _latest(tmp_path, pr_url=None, pr_error="gh pr create failed: no auth"), now, 9)
+    assert got["pr_error"] == "gh pr create failed: no auth"
+    assert got["overdue"] is False
+
+
+def test_a_reviewer_that_stopped_running_is_overdue(tmp_path):
+    now = datetime(2026, 9, 30, 12, 0, 0)
+    got = hhm.read_review_latest(_latest(tmp_path), now, 9)
+    assert got["overdue"] is True
+    assert got["age_days"] == 22.2
+
+
+def test_a_recent_review_is_not_overdue(tmp_path):
+    now = datetime(2026, 9, 8, 12, 0, 0)
+    got = hhm.read_review_latest(_latest(tmp_path), now, 9)
+    assert got["overdue"] is False
+    assert got["findings"] == 3
+
+
+def test_an_open_pull_request_is_reported_and_never_alarmed_on(tmp_path, monkeypatch):
+    """A reminder down a health channel is how a health channel stops being
+    read — and it would leave this service unhealthy, and so the monitor exiting
+    1, until Mark got round to it. `make standup` is where a nudge belongs."""
+    monkeypatch.setenv("HERMES_HEALTH_ESTATE_REVIEW_LATEST", str(_latest(tmp_path)))
+    monkeypatch.setattr(hhm, "_load_estate_spine",
+                        lambda _: (type("E", (), {"load": staticmethod(lambda: _FakeEstate([]))}),
+                                   _freshness))
+    result = hhm._check_estate()
+    assert result.ok is True
+    assert "delivered, 3 finding(s)" in result.detail
+
+
+def test_a_missing_latest_json_is_not_a_fault(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HEALTH_ESTATE_REVIEW_LATEST", str(tmp_path / "nope.json"))
+    monkeypatch.setattr(hhm, "_load_estate_spine",
+                        lambda _: (type("E", (), {"load": staticmethod(lambda: _FakeEstate([]))}),
+                                   _freshness))
+    result = hhm._check_estate()
+    assert result.ok is True
+    assert "has not run yet" in result.detail
+
+
+def test_an_unreadable_latest_json_is_a_fault(tmp_path, monkeypatch):
+    bad = tmp_path / "latest.json"
+    bad.write_text("{not json", encoding="utf-8")
+    monkeypatch.setenv("HERMES_HEALTH_ESTATE_REVIEW_LATEST", str(bad))
+    monkeypatch.setattr(hhm, "_load_estate_spine",
+                        lambda _: (type("E", (), {"load": staticmethod(lambda: _FakeEstate([]))}),
+                                   _freshness))
+    result = hhm._check_estate()
+    assert result.ok is False
+    assert result.fingerprint == "estate:review:unreadable"
+
+
+def test_a_silent_job_beats_a_review_fault_in_the_message(tmp_path, monkeypatch):
+    """Silence is the thing WW-0001 was written about; it is reported first."""
+    now = datetime(2026, 9, 2, 12, 0, 0)
+    estate = _FakeEstate([_job("com.mh.thing", _aged(tmp_path, "t.log", 400, now), "36h")])
+    monkeypatch.setenv("HERMES_HEALTH_ESTATE_REVIEW_LATEST",
+                       str(_latest(tmp_path, pr_error="also broken")))
+    monkeypatch.setattr(hhm, "_load_estate_spine",
+                        lambda _: (type("E", (), {"load": staticmethod(lambda: estate)}), _freshness))
+    result = hhm._check_estate()
+    assert result.ok is False
+    assert result.fingerprint == "estate:silent:com.mh.thing"
+    assert "make review-gather" in result.detail
+
+
+def test_no_bootstrap_on_the_machine_skips_rather_than_pages(monkeypatch):
+    """A bare machine part-way through `make bootstrap` has no ~/ai/bootstrap
+    yet, and the monitor must keep watching the nine things it can see."""
+    monkeypatch.setattr(hhm, "_load_estate_spine", lambda _: None)
+    result = hhm._check_estate()
+    assert result.skipped is True
+    assert result.ok is True
+
+
+def test_an_unreadable_registry_is_a_fault(monkeypatch):
+    def boom(_):
+        class E:
+            @staticmethod
+            def load():
+                raise ValueError("estate.yaml is not valid YAML")
+        return E, _freshness
+
+    monkeypatch.setattr(hhm, "_load_estate_spine", boom)
+    result = hhm._check_estate()
+    assert result.ok is False
+    assert result.fingerprint.startswith("estate:registry:")
+
+
+def test_the_estate_check_has_no_restarter():
+    """There is no generic safe restart for "some job stopped doing work", and
+    kicking a job whose evidence is stale is as likely to hide the cause."""
+    monitor = hhm._build_monitor(state_path=Path("/dev/null"), log_path=Path("/dev/null"))
+    assert "estate" in monitor.checkers
+    assert "estate" not in monitor.restarters
