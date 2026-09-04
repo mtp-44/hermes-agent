@@ -104,6 +104,19 @@ LOCAL_DELTA_PATTERNS: tuple[tuple[str, str | tuple[str, ...]], ...] = (
         ),
     ),
     ("gateway/open_brain.py", "record_query_feedback"),
+    # Deterministic delivery of Open Brain originals (HA-0005, 2026-09-04): the
+    # brain's get_record_document is a media *producer* tool, and its
+    # ``local_path`` is auto-appended as a MEDIA: tag the same way
+    # image_generate's path is. An upstream replay that rebuilds the media
+    # allowlist would silently turn "show me the invoice" back into prose.
+    (
+        "gateway/run.py",
+        (
+            '"mcp_open_brain_get_record_document",',
+            "_json_media_paths(",
+            '"local_path"',
+        ),
+    ),
     ("gateway/open_brain_feedback.py", "capture_query_brain_feedback_candidate"),
     # Proactive-surface ✅/🙈 feedback also rides the action seam, owned by the
     # openbrain-commands adapter plugin: assert both the registration and the

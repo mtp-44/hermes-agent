@@ -535,3 +535,87 @@ class TestStaleToolMediaLeak:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+class TestOpenBrainDocumentDelivery:
+    """HA-0005 (2026-09-04): Open Brain's ``get_record_document`` is a media
+    producer. Its ``local_path`` — the archived original on this machine — is
+    auto-appended as a MEDIA: tag so "show me the invoice" attaches the PDF
+    regardless of whether the model restates the path (it did not, three times,
+    on two models). The MCP adapter wraps the server's JSON text as
+    ``{"result": "<json>"}``, which is the shape asserted here."""
+
+    TOOL = "mcp_open_brain_get_record_document"
+    PDF = "/Users/mh/Backups/open_brain/documents/records/2fb7089e/2026-08-17_Faktura_2106031936.pdf"
+
+    def _messages(self, inner: dict, final: str = "Here is the invoice."):
+        import json
+
+        return [
+            {"role": "user", "content": "show me the original Miele invoice"},
+            {
+                "role": "assistant",
+                "tool_calls": [{"id": "call_doc", "function": {"name": self.TOOL}}],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call_doc",
+                "content": json.dumps({"result": json.dumps(inner, indent=2)}),
+            },
+            {"role": "assistant", "content": final},
+        ]
+
+    def test_local_path_in_mcp_wrapped_result_is_auto_appended(self):
+        from gateway.run import _collect_auto_append_media_tags
+
+        inner = {
+            "record_id": "2fb7089e",
+            "filename": "2026-08-17_Faktura_2106031936.pdf",
+            "mime_type": "application/pdf",
+            "size_bytes": 174675,
+            "download_url": "http://localhost:8765/documents/2fb7089e/x.pdf?exp=1&sig=abc",
+            "download_url_expires_in_seconds": 3600,
+            "local_path": self.PDF,
+        }
+        tags, voice = _collect_auto_append_media_tags(self._messages(inner), history_offset=0)
+        assert tags == [f"MEDIA:{self.PDF}"]
+        assert voice is False
+
+    def test_error_result_delivers_nothing(self):
+        from gateway.run import _collect_auto_append_media_tags
+
+        tags, _ = _collect_auto_append_media_tags(
+            self._messages({"error": "No record with id nope"}), history_offset=0
+        )
+        assert tags == []
+
+    def test_download_url_alone_is_not_a_deliverable(self):
+        """A pre-local_path server (or a hosted brain) returns only the URL:
+        nothing to attach, and the URL must never be turned into a MEDIA tag."""
+        from gateway.run import _collect_auto_append_media_tags
+
+        inner = {"filename": "x.pdf", "download_url": "http://localhost:8765/documents/a/x.pdf?sig=1"}
+        tags, _ = _collect_auto_append_media_tags(self._messages(inner), history_offset=0)
+        assert tags == []
+
+    def test_already_delivered_path_is_not_resent(self):
+        """History dedup covers the MCP JSON shape too, so a compression-boundary
+        rescan does not re-attach the same PDF every turn (cf. #46627)."""
+        from gateway.run import _collect_auto_append_media_tags, _collect_history_media_paths
+
+        inner = {"local_path": self.PDF, "download_url": "http://localhost:8765/d"}
+        history = self._messages(inner)
+        seen = _collect_history_media_paths(history)
+        assert seen == {self.PDF}
+        tags, _ = _collect_auto_append_media_tags(history, history_offset=0, history_media_paths=seen)
+        assert tags == []
+
+    def test_image_generate_behaviour_is_unchanged(self):
+        from gateway.run import _collect_auto_append_media_tags
+
+        messages = [
+            {"role": "assistant", "tool_calls": [{"id": "c", "function": {"name": "image_generate"}}]},
+            {"role": "tool", "tool_call_id": "c", "content": '{"success": false, "image": "/tmp/x.png"}'},
+            {"role": "assistant", "content": "failed"},
+        ]
+        assert _collect_auto_append_media_tags(messages, history_offset=0)[0] == []

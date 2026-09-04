@@ -959,6 +959,12 @@ _AUTO_APPEND_MEDIA_TOOL_NAMES = {
     "text_to_speech",
     "text_to_speech_tool",
     "image_generate",
+    # Open Brain's "get me the original document" (HA-0005 / OB-0021,
+    # 2026-09-04). The MCP server returns the archived original's absolute
+    # ``local_path``; the model reliably described the PDF instead of emitting
+    # a MEDIA: tag for it (three attempts, two models), so delivery is made
+    # deterministic here the same way image_generate's is.
+    "mcp_open_brain_get_record_document",
 }
 
 # ---- helpers: detect interrupted tool tails & auto-continue noise ----------
@@ -1012,7 +1018,11 @@ def _strip_auto_continue_noise(content: Any) -> Any:
 # returns ``{"success": true, "image": "/abs/path.png"}``). The auto-append path
 # extracts the path from these fields so delivery is deterministic and does not
 # depend on the model restating the path in its final reply.
-_JSON_MEDIA_TOOL_PATH_FIELDS = ("host_image", "image", "agent_visible_image")
+_JSON_MEDIA_TOOL_PATH_FIELDS = ("host_image", "image", "agent_visible_image", "local_path")
+
+# Producer tools whose deliverable is a local path inside a JSON result rather
+# than a MEDIA: tag. Subset of _AUTO_APPEND_MEDIA_TOOL_NAMES.
+_JSON_MEDIA_TOOL_NAMES = {"image_generate", "mcp_open_brain_get_record_document"}
 
 
 # Extension-anchored MEDIA: matcher for tool results. Mirrors the dispatch-site
@@ -1026,6 +1036,42 @@ _TOOL_MEDIA_RE = re.compile(
     r'txt|csv|apk|ipa))',
     re.IGNORECASE,
 )
+
+
+def _json_media_paths(tool_name: str, content: str) -> List[str]:
+    """Deliverable local paths carried in a JSON-payload producer-tool result.
+
+    Handles both result shapes the gateway sees:
+      * a native tool's payload — ``image_generate`` returns
+        ``{"success": true, "image": "/abs/path.png"}``;
+      * an MCP tool's payload, which the MCP adapter wraps as
+        ``{"result": "<the server's JSON text>"}`` — Open Brain's
+        ``get_record_document`` returns ``{"local_path": "/abs/file.pdf", ...}``
+        inside that string.
+    A path must still pass the extension-anchored MEDIA regex, so a result
+    that names a non-deliverable file is ignored, and an error payload
+    (``{"error": ...}``, or image_generate without ``success``) yields nothing.
+    """
+    if tool_name not in _JSON_MEDIA_TOOL_NAMES or "MEDIA:" in content:
+        return []
+    try:
+        payload = json.loads(content)
+    except Exception:
+        return []
+    if isinstance(payload, dict) and isinstance(payload.get("result"), str):
+        try:
+            payload = json.loads(payload["result"])
+        except Exception:
+            return []
+    if not isinstance(payload, dict) or payload.get("error"):
+        return []
+    if tool_name == "image_generate" and not payload.get("success"):
+        return []
+    for field in _JSON_MEDIA_TOOL_PATH_FIELDS:
+        path = payload.get(field)
+        if isinstance(path, str) and path and _TOOL_MEDIA_RE.fullmatch(f"MEDIA:{path}"):
+            return [path]
+    return []
 
 
 def _collect_auto_append_media_tags(
@@ -1080,22 +1126,14 @@ def _collect_auto_append_media_tags(
             continue
         content = str(msg.get("content") or "")
         tool_name = tool_name_by_call_id.get(call_id)
-        # JSON-payload tools (image_generate) return a local-file path in a
-        # known field rather than a MEDIA: tag. Extract it so delivery is
-        # deterministic even when the model omits the path from its reply.
-        if tool_name == "image_generate" and "MEDIA:" not in content:
-            try:
-                payload = json.loads(content)
-            except Exception:
-                payload = None
-            if isinstance(payload, dict) and payload.get("success"):
-                for field in _JSON_MEDIA_TOOL_PATH_FIELDS:
-                    path = payload.get(field)
-                    if (isinstance(path, str)
-                            and _TOOL_MEDIA_RE.fullmatch(f"MEDIA:{path}")
-                            and path not in history_media_paths):
-                        media_tags.append(f"MEDIA:{path}")
-                        break
+        # JSON-payload tools (image_generate, Open Brain's get_record_document)
+        # return a local-file path in a known field rather than a MEDIA: tag.
+        # Extract it so delivery is deterministic even when the model omits
+        # the path from its reply.
+        if tool_name in _JSON_MEDIA_TOOL_NAMES and "MEDIA:" not in content:
+            for path in _json_media_paths(tool_name or "", content):
+                if path not in history_media_paths:
+                    media_tags.append(f"MEDIA:{path}")
             continue
         if "MEDIA:" not in content:
             continue
@@ -1144,17 +1182,9 @@ def _collect_history_media_paths(agent_history: List[Dict[str, Any]]) -> set:
                     paths.add(p)
             continue
         cid = str(msg.get("tool_call_id") or msg.get("call_id") or "")
-        if tool_name_by_call_id.get(cid) == "image_generate":
-            try:
-                payload = json.loads(content)
-            except Exception:
-                payload = None
-            if isinstance(payload, dict) and payload.get("success"):
-                for field in _JSON_MEDIA_TOOL_PATH_FIELDS:
-                    jp = payload.get(field)
-                    if isinstance(jp, str) and jp:
-                        paths.add(jp)
-                        break
+        name = tool_name_by_call_id.get(cid, "")
+        if name in _JSON_MEDIA_TOOL_NAMES:
+            paths.update(_json_media_paths(name, content))
     return paths
 
 # ---------------------------------------------------------------------------
