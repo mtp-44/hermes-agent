@@ -691,6 +691,11 @@ _FILE_READ_COMMANDS = frozenset({
     "cat", "head", "tail", "type", "bat", "less", "more", "nl",
     "zcat", "tac", "view", "batcat",
 })
+_SECRET_BEARING_FILE_BASENAMES = frozenset({
+    ".bashrc", ".bash_profile", ".bash_login", ".profile",
+    ".zshrc", ".zprofile", ".zlogin", ".zshenv",
+})
+_TEXT_FILE_READ_COMMANDS = frozenset({"grep", "awk", "sed"})
 
 
 def _command_segments(command: str) -> list[str]:
@@ -713,6 +718,39 @@ def _command_reads_env_file(command: str | None) -> bool:
                 continue
             basename = arg.strip("\"'").rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
             if basename.lower() in _ENV_FILE_BASENAMES:
+                return True
+    return False
+
+
+def _is_secret_bearing_file_arg(arg: str) -> bool:
+    """Recognize explicit Hermes config and standard shell startup paths."""
+    path = arg.strip("\"'").replace("\\", "/")
+    if "$" in path:
+        return False
+    parts = [part.lower() for part in path.split("/") if part]
+    if not parts:
+        return False
+    if parts[-1] in _SECRET_BEARING_FILE_BASENAMES:
+        return True
+    return parts[-1] == "config.yaml" and ".hermes" in parts[:-1]
+
+
+def _command_reads_secret_bearing_file(command: str | None) -> bool:
+    """True for direct stdout reads of known secret-bearing config files."""
+    if not command or not isinstance(command, str):
+        return False
+    for seg in _command_segments(command):
+        tokens = seg.split()  # preserve Windows path separators; see _command_reads_env_file
+        if not tokens:
+            continue
+        reader = tokens[0].rsplit("/", 1)[-1].lower()
+        if reader in _FILE_READ_COMMANDS:
+            if any(_is_secret_bearing_file_arg(arg) for arg in tokens[1:] if not arg.startswith("-")):
+                return True
+            continue
+        if reader in _TEXT_FILE_READ_COMMANDS:
+            positional = [arg for arg in tokens[1:] if not arg.startswith("-")]
+            if any(_is_secret_bearing_file_arg(arg) for arg in positional[1:]):
                 return True
     return False
 
@@ -757,6 +795,9 @@ def redact_terminal_output(
       → ``code_file=False`` so the ENV-assignment pass masks opaque tokens.
     - file-read command targeting a ``.env`` file (``cat .env``,
       ``head .env.local``, etc.) → ``code_file=False`` for the same reason.
+    - direct read of a secret-bearing config file (``~/.hermes/config.yaml``,
+      profile ``config.yaml``, shell startup files like ``~/.bashrc``) via a
+      file-read command or ``grep``/``awk``/``sed`` → ``code_file=False``.
     - anything else (or unknown command) → ``code_file=True`` to avoid
       false positives on source/config dumps.
 
@@ -765,7 +806,11 @@ def redact_terminal_output(
     """
     if not output:
         return output
-    code_file = not (is_env_dump_command(command or "") or _command_reads_env_file(command))
+    code_file = not (
+        is_env_dump_command(command or "")
+        or _command_reads_env_file(command)
+        or _command_reads_secret_bearing_file(command)
+    )
     return redact_sensitive_text(output, force=force, code_file=code_file)
 
 
