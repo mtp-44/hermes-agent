@@ -727,3 +727,104 @@ def test_the_estate_check_has_no_restarter():
     monitor = hhm._build_monitor(state_path=Path("/dev/null"), log_path=Path("/dev/null"))
     assert "estate" in monitor.checkers
     assert "estate" not in monitor.restarters
+
+
+# --- strava sync check -----------------------------------------------------
+# The fault these were written from: on 2026-09-13 the sync failed both
+# scheduled runs on DNS, the `estate` check stayed green because a failing run
+# still writes to the evidence log it judges, and three rides went unfetched.
+# Half of these therefore assert the check stays QUIET — a single failed run out
+# of three a day is transient network, and alarming on it is how a channel stops
+# being read.
+
+
+def _strava_state(tmp_path, monkeypatch, **fields):
+    payload = {"last_run_status": "success",
+               "last_run_summary": {"status": "success", "error": None},
+               "last_successful_sync_at": "2026-09-13T10:00:00+00:00", **fields}
+    p = tmp_path / "strava_sync_state.json"
+    p.write_text(json.dumps(payload), encoding="utf-8")
+    monkeypatch.setenv("HERMES_HEALTH_STRAVA_STATE", str(p))
+    return p
+
+
+def _at(monkeypatch, stamp: str):
+    monkeypatch.setattr(hhm, "_utc_now", lambda: datetime.fromisoformat(stamp))
+
+
+def test_the_2026_09_13_fault_would_have_been_caught(tmp_path, monkeypatch):
+    """Both scheduled runs failed on DNS; the last success was 18:30 the day
+    before. The alarm lands 30 min after the second failure, not two days later
+    when Mark noticed his rides were missing."""
+    _strava_state(tmp_path, monkeypatch, last_run_status="failed",
+                  last_run_summary={"status": "failed",
+                                    "error": "[Errno 8] nodename nor servname provided, or not known"},
+                  last_successful_sync_at="2026-09-12T16:30:05+00:00")
+    _at(monkeypatch, "2026-09-13T10:35:00+00:00")
+    result = hhm._check_strava()
+    assert result.ok is False
+    assert result.fingerprint == "strava:stale"
+    assert "[Errno 8]" in result.detail
+    assert result.metadata["hours_since_success"] == 18.1
+
+
+def test_one_failed_run_that_the_next_run_will_repair_stays_quiet(tmp_path, monkeypatch):
+    """The job runs three times a day. A single transient network blip is not
+    worth a message — the 02:00 failure is silent while 12:00 can still fix it."""
+    _strava_state(tmp_path, monkeypatch, last_run_status="failed",
+                  last_run_summary={"status": "failed", "error": "<urlopen error timed out>"},
+                  last_successful_sync_at="2026-09-12T16:30:05+00:00")
+    _at(monkeypatch, "2026-09-13T00:05:00+00:00")
+    result = hhm._check_strava()
+    assert result.ok is True
+    assert result.metadata["last_run_status"] == "failed"  # reported, not alarmed
+
+
+def test_a_sleep_deferred_run_stays_quiet(tmp_path, monkeypatch):
+    """18:30 success, Mac asleep through 02:00, wakes at 09:00. 14.5 h — under
+    the bar on purpose, so a closed lid does not page anyone."""
+    _strava_state(tmp_path, monkeypatch, last_successful_sync_at="2026-09-12T16:30:00+00:00")
+    _at(monkeypatch, "2026-09-13T07:00:00+00:00")
+    assert hhm._check_strava().ok is True
+
+
+def test_a_healthy_sync_reports_its_age(tmp_path, monkeypatch):
+    _strava_state(tmp_path, monkeypatch)
+    _at(monkeypatch, "2026-09-13T12:00:00+00:00")
+    result = hhm._check_strava()
+    assert result.ok is True
+    assert result.metadata["hours_since_success"] == 2.0
+
+
+def test_a_sync_that_never_succeeded_is_a_fault(tmp_path, monkeypatch):
+    _strava_state(tmp_path, monkeypatch, last_successful_sync_at=None)
+    result = hhm._check_strava()
+    assert result.ok is False
+    assert result.fingerprint == "strava:never-succeeded"
+
+
+def test_an_unreadable_state_file_is_a_fault_not_a_crash(tmp_path, monkeypatch):
+    p = _strava_state(tmp_path, monkeypatch)
+    p.write_text("{ this is not json", encoding="utf-8")
+    result = hhm._check_strava()
+    assert result.ok is False
+    assert result.fingerprint == "strava:unreadable"
+
+
+def test_a_missing_state_file_skips_rather_than_fails(monkeypatch, tmp_path):
+    """A machine without open_brain installed must not page anyone."""
+    monkeypatch.setenv("HERMES_HEALTH_STRAVA_STATE", str(tmp_path / "nope.json"))
+    result = hhm._check_strava()
+    assert result.ok and result.skipped
+
+
+def test_the_strava_check_has_no_restarter():
+    """No network and an expired refresh token are the two real causes, and
+    neither is repaired by running the job again."""
+    monitor = hhm._build_monitor(state_path=Path("/dev/null"), log_path=Path("/dev/null"))
+    assert "strava" in monitor.checkers
+    assert "strava" not in monitor.restarters
+
+
+def test_strava_is_in_the_default_service_list():
+    assert "strava" in hhm.DEFAULT_SERVICES

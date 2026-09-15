@@ -44,7 +44,7 @@ DEFAULT_PWA_WS_URLS = (
     "ws://127.0.0.1:9219/api/ws-health",
     "wss://mini-mh.tailbd0650.ts.net/api/ws-health",
 )
-DEFAULT_SERVICES = ("ollama", "gateway", "pwa", "config", "telegram", "openbrain", "email", "estate", "disk", "memory")
+DEFAULT_SERVICES = ("ollama", "gateway", "pwa", "config", "telegram", "openbrain", "strava", "email", "estate", "disk", "memory")
 
 # --- email triage daemon (ES-0005) -----------------------------------------
 # `net.mtp44.email-triage` ran a cluster of 59 crash-restarts between
@@ -75,6 +75,34 @@ _EMAIL_SIGNAL_FAILURE = "Signal send failed"
 # Bounded tail read: the window of interest is hours, the file is capped at
 # 5 MB by its own RotatingFileHandler, and this runs every 300 s.
 _EMAIL_TAIL_BYTES = 256 * 1024
+
+
+# --- strava sync (upstream of Health Dude's ride import) --------------------
+# `com.mh.open-brain-strava-sync` failed both of its scheduled runs on
+# 2026-09-13 with a DNS error and nothing said so. The `estate` check below
+# judges that job by its evidence LOG, and a FAILING run still writes a summary
+# to that log — so freshness stayed green while three rides, one of them a
+# 154 km day, sat unfetched, and Health Dude's importer went two days stale
+# behind it because it only reads what the sync already wrote into Open Brain.
+#
+# So this reads the sync's own STATE file rather than its log, and judges the
+# one field a failing run cannot fake: `last_successful_sync_at`.
+#
+# It deliberately does NOT alarm on `last_run_status == "failed"`. The job runs
+# three times a day and the observed failures are transient network; alarming on
+# a single blip that the next run repairs is how a channel stops being read —
+# the same reasoning that leaves the Signal timeouts in `_check_email` reported
+# but not alarmed. The bar is instead "no success across two scheduled runs".
+DEFAULT_STRAVA_STATE = "/Users/mh/ai/open_brain/state/strava_sync_state.json"
+# Measured 2026-09-13 from `open_brain/logs/strava_sync.log`: since the 3x/day
+# schedule began 2026-09-04, 30 runs over 10 days with gaps of exactly
+# 10.0 / 6.5 / 7.5 h and no misses. 18 h is the span from one success to the
+# SECOND scheduled run after it (18:30 -> 02:00 -> 12:00), so one failed or
+# sleep-deferred run stays quiet and two do not. That is 1.8x the observed
+# 10.0 h maximum, and below the flat 24 h the pre-09-04 daily schedule produced
+# routinely, so a regression to that schedule cannot pass as healthy.
+# Re-measure before changing the schedule or this bar.
+DEFAULT_STRAVA_STALE_HOURS = 18.0
 
 
 # --- estate silence (BS-0004 / WW-0004) ------------------------------------
@@ -1022,6 +1050,57 @@ def _check_email() -> CheckResult:
     return CheckResult("email", True, f"ok (last log {age_hours} h ago, {starts} restart(s) in {window_hours} h)", "ok", metadata)
 
 
+def _check_strava() -> CheckResult:
+    """Has the Strava -> Open Brain sync actually SUCCEEDED lately?
+
+    Deliberately has **no restarter** in `_build_monitor`. The two things that
+    stop this job are a missing network and an expired Strava refresh token, and
+    neither is repaired by running it again — a kick would only spend the alarm.
+    The correct response to this firing is a human running
+    `cd /Users/mh/ai/open_brain && uv run python -m core.strava_sync`.
+    """
+    state_path = Path(os.getenv("HERMES_HEALTH_STRAVA_STATE", DEFAULT_STRAVA_STATE))
+    if not state_path.exists():
+        return CheckResult("strava", True, f"{state_path} not present (strava sync not installed)", "skip", skipped=True)
+
+    stale_hours = _parse_float_env("HERMES_HEALTH_STRAVA_STALE_HOURS", DEFAULT_STRAVA_STALE_HOURS)
+    try:
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        return CheckResult("strava", False, f"cannot read {state_path}: {exc}", "strava:unreadable")
+    if not isinstance(state, dict):
+        return CheckResult("strava", False, f"{state_path} does not hold a JSON object", "strava:unreadable")
+
+    last_run = str(state.get("last_run_status") or "unknown")
+    summary = state.get("last_run_summary")
+    error = summary.get("error") if isinstance(summary, dict) else None
+    metadata: dict[str, Any] = {"last_run_status": last_run, "last_run_error": error}
+
+    stamp = str(state.get("last_successful_sync_at") or "")
+    if not stamp:
+        return CheckResult("strava", False, "the sync has never recorded a successful run", "strava:never-succeeded", metadata)
+    try:
+        last_success = datetime.fromisoformat(stamp)
+    except ValueError:
+        return CheckResult("strava", False, f"unparseable last_successful_sync_at {stamp!r}", "strava:unparseable", metadata)
+    if last_success.tzinfo is None:
+        last_success = last_success.replace(tzinfo=timezone.utc)
+
+    age_hours = round((_utc_now() - last_success).total_seconds() / 3600, 1)
+    metadata["hours_since_success"] = age_hours
+    if age_hours > stale_hours:
+        because = f", last run {last_run}: {error}" if error else f", last run {last_run}"
+        return CheckResult(
+            "strava",
+            False,
+            f"no successful Strava sync for {age_hours} h (threshold {stale_hours} h{because}) — "
+            f"rides are not reaching Open Brain, so Health Dude cannot import them",
+            "strava:stale",
+            metadata,
+        )
+    return CheckResult("strava", True, f"ok (last success {age_hours} h ago, last run {last_run})", "ok", metadata)
+
+
 def _load_estate_spine(spine_dir: str) -> tuple[Any, Any] | None:
     """(Estate, log_freshness) from bootstrap, or None when unavailable.
 
@@ -1197,6 +1276,7 @@ def _build_monitor(*, state_path: Path, log_path: Path) -> HealthMonitor:
             "config": _check_config,
             "telegram": _check_telegram,
             "openbrain": _check_openbrain,
+            "strava": _check_strava,
             "email": _check_email,
             "estate": _check_estate,
             "disk": _check_disk,
