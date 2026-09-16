@@ -16,7 +16,12 @@ from tools import strava_tool
 
 # ── fixtures ───────────────────────────────────────────────────────────────
 
-def _activity(strava_id, name="Morning Ride", distance=120780.0, date="2026-07-26"):
+def _activity(strava_id, name="Morning Ride", distance=120780.0, date=None):
+    if date is None:
+        date = (
+            strava_tool.datetime.now(strava_tool.timezone.utc)
+            - strava_tool.timedelta(days=1)
+        ).date().isoformat()
     return {
         "id": strava_id,
         "name": name,
@@ -172,7 +177,7 @@ class TestMissingActivities:
 
     def test_activity_in_window_but_not_in_brain_is_inserted(self, reconcile_env):
         known = _activity(19474561707)
-        fresh = _activity(19480000000, name="Evening Ride", date="2026-07-27")
+        fresh = _activity(19480000000, name="Evening Ride")
         result = _run([known, fresh], [_row("row-1", known)])
 
         assert reconcile_env["inserted"] == [19480000000]
