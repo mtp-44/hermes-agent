@@ -683,9 +683,10 @@ class TestAgentCacheBoundedGrowth:
         runner = self._bounded_runner()
         runner._cleanup_agent_resources = MagicMock()
 
-        import time as _t
-        fresh = self._fake_agent(last_activity=_t.time())
-        stale = self._fake_agent(last_activity=_t.time() - 10.0)
+        now = 1_000.0
+        monkeypatch.setattr(gw_run.time, "time", lambda: now)
+        fresh = self._fake_agent(last_activity=now)
+        stale = self._fake_agent(last_activity=now - 10.0)
         runner._agent_cache["fresh"] = (fresh, "s1")
         runner._agent_cache["stale"] = (stale, "s2")
 
@@ -1901,4 +1902,3 @@ class TestCrossProcessInvalidationDefersCleanup:
 
         assert release_calls == [old_agent]
         runner._cleanup_agent_resources.assert_not_called()
-
