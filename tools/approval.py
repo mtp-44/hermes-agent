@@ -2164,6 +2164,47 @@ def _command_matches_permanent_allowlist(command: str) -> bool:
 # Config persistence for permanent allowlist
 # =========================================================================
 
+_MALFORMED_ALLOWLIST = object()
+
+
+def _parse_command_allowlist(raw):
+    """Return ``command_allowlist`` as a set of strings, or ``_MALFORMED_ALLOWLIST``.
+
+    ``set()`` over a scalar string yields one entry per character, and a lone
+    ``*`` entry is an fnmatch glob matching every command. ``hermes config set
+    command_allowlist "ls *"`` writes exactly such a string. Old config-set
+    versions serialised list values as scalar strings, so a string that parses
+    as a YAML list of strings is recovered (with a warning); any other shape
+    is ignored and grants nothing. Nothing is rewritten on read.
+    """
+    legacy = isinstance(raw, str)
+    if legacy:
+        import yaml
+        try:
+            raw = yaml.safe_load(raw)
+        except yaml.YAMLError:
+            raw = False
+    if raw is None and not legacy:
+        raw = []
+    if not isinstance(raw, list) or any(not isinstance(item, str) for item in raw):
+        logger.warning(
+            "Ignoring malformed command_allowlist; configure a list of strings."
+        )
+        return _MALFORMED_ALLOWLIST
+    if legacy:
+        logger.warning(
+            "Recovered legacy string command_allowlist; re-save it as a list of strings."
+        )
+    return set(raw)
+
+
+def _read_permanent_allowlist() -> set:
+    """``command_allowlist`` from config as a set (empty on malformed input)."""
+    from hermes_cli.config import load_config_readonly
+    parsed = _parse_command_allowlist(load_config_readonly().get("command_allowlist"))
+    return set() if parsed is _MALFORMED_ALLOWLIST else parsed
+
+
 def load_permanent_allowlist() -> set:
     """Load permanently allowed command patterns from config.
 
@@ -2171,9 +2212,7 @@ def load_permanent_allowlist() -> set:
     patterns added via 'always' in a previous session.
     """
     try:
-        from hermes_cli.config import load_config
-        config = load_config()
-        patterns = set(config.get("command_allowlist", []) or [])
+        patterns = _read_permanent_allowlist()
         if patterns:
             load_permanent(patterns)
         return patterns
