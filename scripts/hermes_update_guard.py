@@ -30,7 +30,12 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parent
 DEFAULT_HERMES_HOME = Path.home() / ".hermes"
 DEFAULT_PROD_BRANCH = "main"
-EXPECTED_OPENBRAIN_TOOL_FLOOR = 30
+# The Open Brain contract Hermes depends on, by name. Since the 2026-08-31
+# simplify-in-place plan narrowed the default surface to these three (and a
+# profile header adds a few, e.g. get_record_document for Hermes), a tool COUNT
+# says nothing: it replaced a floor of 30 that failed every run from
+# 2026-09-01 while Open Brain was healthy (HA-0006).
+REQUIRED_OPENBRAIN_TOOLS = ("query_brain", "analyze_brain_query", "capture_thought")
 HEALTH_FRESHNESS_SECONDS = 15 * 60
 _REEXEC_ENV = "HERMES_UPDATE_GUARD_NO_REEXEC"
 
@@ -380,6 +385,27 @@ def _jsonrpc_text_payload(raw: str) -> dict[str, Any]:
     if not isinstance(outer, dict):
         return {}
     return outer
+
+
+def openbrain_probe_headers(server: dict[str, Any], env: dict[str, str]) -> dict[str, str]:
+    """The headers the gateway itself sends to Open Brain, env-expanded.
+
+    Sending all of them (not just x-brain-key) makes the smoke see the tool
+    surface Hermes sees: x-brain-profile widens it beyond the default three.
+    A header whose value still holds an unexpanded ${VAR} is dropped.
+    """
+    raw = server.get("headers") if isinstance(server.get("headers"), dict) else {}
+    headers: dict[str, str] = {}
+    for name, value in raw.items():
+        expanded = _expand_env(str(value), env)
+        if expanded and "${" not in expanded:
+            headers[str(name)] = expanded
+    return headers
+
+
+def missing_openbrain_tools(tools: list[Any]) -> list[str]:
+    names = {t.get("name") for t in tools if isinstance(t, dict)}
+    return [name for name in REQUIRED_OPENBRAIN_TOOLS if name not in names]
 
 
 class HermesUpdateGuard:
@@ -846,8 +872,10 @@ class HermesUpdateGuard:
 
         openbrain = latest_by_service.get("openbrain") or {}
         tool_count = int(openbrain.get("tool_count") or 0)
-        if tool_count and tool_count < EXPECTED_OPENBRAIN_TOOL_FLOOR:
-            unhealthy.append(f"openbrain: expected at least {EXPECTED_OPENBRAIN_TOOL_FLOOR} tools, saw {tool_count}")
+        if tool_count and tool_count < len(REQUIRED_OPENBRAIN_TOOLS):
+            unhealthy.append(
+                f"openbrain: expected at least {len(REQUIRED_OPENBRAIN_TOOLS)} tools, saw {tool_count}"
+            )
 
         if unhealthy:
             self.add("health-monitor-services", "fail", "; ".join(unhealthy))
@@ -864,19 +892,18 @@ class HermesUpdateGuard:
             config = _load_config(config_path)
             server = ((config.get("mcp_servers") or {}).get("open_brain") or {})
             url = str(server.get("url") or "").strip()
-            headers = server.get("headers") if isinstance(server.get("headers"), dict) else {}
-            key = _expand_env(str(headers.get("x-brain-key") or ""), env)
+            headers = openbrain_probe_headers(server, env)
         except Exception as exc:
             self.add("openbrain-live-smoke", "fail", f"could not read Open Brain config: {exc}")
             return
-        if not url or not key or "${" in key:
+        if not url or not headers.get("x-brain-key"):
             self.add("openbrain-live-smoke", "fail", "Open Brain URL/key unavailable for live smoke")
             return
         body = json.dumps({"jsonrpc": "2.0", "id": "hermes-update-guard", "method": "tools/list"}).encode("utf-8")
         request = urllib.request.Request(
             url,
             data=body,
-            headers={"content-type": "application/json", "x-brain-key": key},
+            headers={"content-type": "application/json", **headers},
             method="POST",
         )
         try:
@@ -898,10 +925,19 @@ class HermesUpdateGuard:
         if not isinstance(tools, list):
             self.add("openbrain-live-smoke", "fail", "Open Brain tools/list response missing tools")
             return
-        if len(tools) < EXPECTED_OPENBRAIN_TOOL_FLOOR:
-            self.add("openbrain-live-smoke", "fail", f"Open Brain exposed only {len(tools)} tools")
+        missing = missing_openbrain_tools(tools)
+        if missing:
+            self.add(
+                "openbrain-live-smoke",
+                "fail",
+                f"Open Brain tools/list is missing {', '.join(missing)} ({len(tools)} tools exposed)",
+            )
             return
-        self.add("openbrain-live-smoke", "pass", f"Open Brain live tools/list ok ({len(tools)} tools)")
+        self.add(
+            "openbrain-live-smoke",
+            "pass",
+            f"Open Brain live tools/list ok ({len(tools)} tools, required {len(REQUIRED_OPENBRAIN_TOOLS)} present)",
+        )
 
 
 def _print_human(report: dict[str, Any]) -> None:
