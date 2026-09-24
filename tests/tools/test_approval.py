@@ -732,12 +732,14 @@ class TestHermesConfigWriteProtection:
         assert dangerous is True
 
     def test_perl_eval_no_inplace_safe(self):
-        # `perl -e` with no -i flag is code evaluation, not file mutation —
-        # the perl/ruby -i pattern must not fire on it.
+        # `perl -e` with no -i flag is code evaluation, not file mutation. It
+        # requires approval (combined `-wne` inline code), but must not be
+        # attributed to the in-place rule.
         dangerous, key, desc = detect_dangerous_command(
             "perl -wne 'print' ~/.hermes/config.yaml"
         )
-        assert dangerous is False
+        assert dangerous is True
+        assert key != "in-place edit of Hermes config/env (perl/ruby)"
 
     def test_read_is_safe(self):
         # Reading config is not a write — must not trip.
