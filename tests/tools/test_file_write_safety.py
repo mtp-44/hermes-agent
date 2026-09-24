@@ -385,6 +385,13 @@ class TestProtectedInstructionFiles:
         monkeypatch.setattr(
             ft, "_protected_instruction_config", lambda: (True, [])
         )
+        # Fork: our blanket "/private/var/" sensitive prefix refuses every
+        # macOS tmp_path (/var/folders realpaths there) before this gate is
+        # reached. Use upstream's narrowed prefixes here so the tests exercise
+        # the protected-file gate rather than the unrelated system-path block.
+        monkeypatch.setattr(ft, "_SENSITIVE_PATH_PREFIXES", tuple(
+            p for p in ft._SENSITIVE_PATH_PREFIXES if p != "/private/var/"
+        ) + ("/private/var/db/", "/private/var/root/"))
         yield
 
     @pytest.fixture
