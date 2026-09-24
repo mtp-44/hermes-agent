@@ -644,6 +644,22 @@ DANGEROUS_PATTERNS = [
     # Any shell invocation via -c or combined flags like -lc, -ic, etc.
     (rf'\b(?:{_SHELL_NAMES_RE})\s+-[^\s]*c(\s+|$)', "shell command via -c/-lc flag"),
     (r'\b(python[23]?|perl|ruby|node)\s+-[ec]\s+', "script execution via -e/-c flag"),
+    # Deno runs inline code through its bare `eval` subcommand. Its CLI is
+    # `deno [OPTIONS] [COMMAND]`, so global options may precede the subcommand
+    # (`deno -q eval`, `deno --quiet eval`, `deno -L debug eval`, `deno -Ldebug
+    # eval`, `deno --log-level=debug eval`); `-L/--log-level` is the one global
+    # that takes a separate value. The FIRST positional word decides: `deno run
+    # eval.ts` stays data, and a lone `--` stops the option scan (`deno --
+    # eval` runs nothing). Local addition: `deno repl --eval[-file]` also runs
+    # its argument before the prompt opens. Verified against deno 2.9.0.
+    (_CMDPOS + r'(?:[^\s;&|`]*/)?deno(?:\.exe)?\s+'
+     r'(?:(?:-l|--log-level)\s+[^\s-]\S*\s+|-[^\s-]\S*\s+|--[^\s=-]\S*\s+)*'
+     r'(?:eval\b|repl\b[^;&|\n]*\s--eval(?:-file)?\b)', "script execution via -e/-c flag"),
+    # Bun evaluates inline code with -e/--eval (and -p/--print, which also
+    # prints the result). Global options may precede it, each with at most
+    # one operand (`bun --cwd ./app -e ...`).
+    (_CMDPOS + r'(?:[^\s;&|`]*/)?bun(?:\.exe)?\s+(?:-[^\s]+(?:\s+[^-\s][^\s]*)?\s+)*'
+     r'(?:-e|--eval|-p|--print)(?:\s|=|$)', "script execution via -e/-c flag"),
     (rf'\b(curl|wget)\b.*\|\s*{_PIPE_SHELL_LAUNCHER_RE}(?:[/\w]*/)?(?:{_PIPE_SHELL_NAMES_RE})(?:\s|$|-c)', "pipe remote content to shell"),
     (rf'\b(?:{_SHELL_NAMES_RE})\s+<\s*<?\s*\(\s*(curl|wget)\b', "execute remote script via process substitution"),
     # Remote content executed via command substitution: eval/source/. $(curl ...)
@@ -794,7 +810,7 @@ DANGEROUS_PATTERNS = [
     (rf'\b(?:perl|ruby)\b.*(?:^|\s)-[^\s]*i\b.*(?:{_HERMES_CONFIG_PATH}|{_HERMES_ENV_PATH})', "in-place edit of Hermes config/env (perl/ruby)"),
     # Script execution via heredoc — bypasses the -e/-c flag patterns above.
     # `python3 << 'EOF'` feeds arbitrary code via stdin without -c/-e flags.
-    (r'\b(python[23]?|perl|ruby|node)\s+<<', "script execution via heredoc"),
+    (r'\b(python[23]?|perl|ruby|node|bun|deno)\s+<<', "script execution via heredoc"),
     # Shell execution via heredoc — `bash <<'EOF' ... EOF` runs arbitrary
     # shell commands without triggering the `bash -c` pattern above. The
     # inner commands may not individually match any dangerous pattern (e.g.
