@@ -60,3 +60,62 @@ a3fdc189a4 out of scope: httplib2 is absent from the gateway venv (google-worksp
 515e88a80f deferred to the next dashboard/TUI release rebuild: JS lockfile pinning only matters when web/ or ui-tui is rebuilt
 390a1771b2 deferred to the next dashboard/TUI release rebuild: npm-audit bumps (also edits the undeployed desktop app)
 8789cf9f0c deferred to the next dashboard/TUI release rebuild: npm advisories in the root lockfile (photon/whatsapp/website parts out of scope)
+
+# 2026-09-24 (later) triage of the 85 the widened digest surfaced (HA-0008).
+# 51 recorded here as not taken. The 34 to PORT are deliberately absent so the
+# digest keeps listing them; batches and evidence are in
+# docs/cleanup/2026-09-24-security-triage.md.
+# -- command detection
+7f61872d18 false-positive fix only: stops flagging the safe `git branch -d`
+24692ee790 out of scope: IMDS credential fetches; home macOS box, no cloud metadata service
+98bf8b2073 not applicable: closes a bypass that d127fb2197's newline masking introduces; HEAD blocks all six witnesses
+1c37b9c457 out of scope: approvals.deny inside containers; terminal.backend is local
+d41f621071 not applicable: fixes b90dbac1d6's grep scanner / malformed-payload floor, absent here
+d127fb2197 false-positive fix only (quoted-newline hardline); would open the bypass 98bf8b2073 closes: port both or neither
+da26ff986b out of scope: `rm dir -rf` operand reordering is GNU-only; /bin/rm (BSD) is the only rm on the gateway PATH, verified
+0c8bcd3399 false-positive fix only: exempts verifier temp-file cleanup
+ebfc49c4d9 false-positive fix only: root-collapse hardline token precision
+# -- redaction
+93a269c026 not applicable: fixes the rc path/var exemption from 979576d938, absent here
+93a0ec705a not applicable: same exemption; HEAD has no exemption and already masks these (probed)
+f680431f2e not applicable: redact_for_egress / _BEARER_RESIDUE_RE absent here
+848075c501 already present: HEAD's am_ pattern is broader and masks all three test keys (probed)
+a8ddb231aa false-positive fix that masks less (shape-gates short values); not wanted
+e9d1551e65 ux only: control chars in mask_secret display; leaks nothing
+75af6dc57c not applicable: redact_url_credentials strict mode from 34bab1c6ac, absent here
+62a00a7391 not applicable: same parent as 75af6dc57c
+a573066543 false-positive fix only (os.getenv in JSON/YAML values); depends on 9e872db7d7
+9e872db7d7 false-positive fix only (programmatic env lookups); nice-to-have
+2b58febe46 out of scope: Fireworks token prefixes; provider not used
+# -- approval flow
+262825db74 out of scope: smart-approval guardian logging; approvals.mode is manual
+151c06e5ec not applicable: _run_approval_gate / plugin approval escalation absent here
+9e232a7ff5 not applicable: plugin terminal-backend classification (terminal_env_registry absent); backend is local
+3fc1a184f8 not applicable: same as 9e232a7ff5
+42e933b411 not applicable: agent/terminal_approval_batch.py absent (follow-up to dd68d17567)
+dd68d17567 deferred: new GUI approval batching feature, not a fix
+2dfb795cb7 ux only: relabels undelivered CLI prompts deny->cancelled; HEAD stays fail-closed. Attribution chain aac74be2f1..2dfb795cb7: port whole or not at all
+1e2cb57973 ux only: /new teardown recorded as deny; fail-closed; attribution chain
+6332216384 ux only: withdrawn gateway prompts recorded as deny; fail-closed; attribution chain
+05e7e89175 out of scope: loosens unattended contexts to honour allowlists; webhook route is deliver_only, cron disabled
+b6b7802447 not applicable: _presence() absent; webhook resolves via unattended_mode first; cron disabled
+2a630671d7 out of scope: cron presence-env leak; all Hermes cron jobs disabled (revisit with b6b7802447 if re-enabled)
+98a3324821 not applicable: mode=off bypass of _run_approval_gate (absent); computer_use unused
+73f8fb74e0 already present: _is_gateway_approval_context excludes webhook sessions (06fa9114b6 port)
+349e6611a1 out of scope: smart-approval guardian timeout; approvals.mode is manual
+c8c3f4c448 ux only: outcome fields on notify_failed tails; human_wait_window absent
+446423d96e not applicable: follow-up to 4341cf1df7
+4341cf1df7 not applicable: huge approvals.timeout overflow (ours is 60); human_wait_ceiling / agent/deadline.py absent
+f0ffcbc753 not applicable: parity follow-up to 16af3bed8c's denial-breaker addendum
+16af3bed8c moot: CLI execute_code lockout from leaked HERMES_EXEC_ASK; the root cause is fixed by porting e37a0321eb
+08d9828503 deferred: coalescing identical concurrent prompts is a feature (prerequisite of the attribution chain only)
+1596148ff2 out of scope: approvals.single_query_mode for `hermes -q`; nothing here runs -q
+aac74be2f1 ux only, HAZARD if ported piecemeal: HEAD's CLI tail blocks only on choice=="deny", so the new "timeout" return would approve. Attribution chain: whole or nothing
+f9cd577915 deferred: new /approvals cross-surface mode command, not a fix
+a0112ef26e out of scope: smart-approval denial circuit breaker
+db90e36202 deferred: `hermes approvals suggest` CLI feature
+bd1db5460a out of scope: approvals.smart_policy
+d48bf743f2 out of scope: smart-deny owner override (52 files)
+b03c94dbed out of scope: observer hooks for smart verdicts
+c5e841ab0e behaviour choice, not taken: would cut Telegram/Signal/PWA approval waits from 300s to approvals.timeout (60); upstream later reversed that (a31a31826c)
+117f49b7d4 not applicable: plugin escalation gate gateway round-trip; _run_approval_gate absent
