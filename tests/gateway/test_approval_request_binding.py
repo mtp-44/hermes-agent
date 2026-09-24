@@ -385,3 +385,66 @@ class TestTextPromptQueueNote:
         mod.resolve_gateway_approval(SESSION, "deny", resolve_all=True)
         for w in ws:
             w.join()
+
+
+# ---------------------------------------------------------------------------
+# PWA / tui_gateway approval.respond
+# ---------------------------------------------------------------------------
+
+class TestTuiApprovalRespond:
+    def _respond(self, monkeypatch, params):
+        from tui_gateway import server
+
+        monkeypatch.setattr(server, "_sess", lambda p, rid: ({"session_key": SESSION}, None))
+        return server._methods["approval.respond"]("r1", params)
+
+    def test_emitted_request_carries_request_id(self, monkeypatch):
+        from tui_gateway import server
+
+        emitted = {}
+        monkeypatch.setattr(
+            server, "_emit",
+            lambda event, sid, payload=None: emitted.update({"payload": payload}),
+        )
+        _set_timeout(monkeypatch, 30)
+        w = _Waiter("rm -rf /a")
+        w._notify = lambda data: (server._emit_approval_request("sid", data), setattr(w, "data", data), w.notified.set())
+        w.start()
+        assert emitted["payload"]["request_id"] == w.request_id
+        mod.resolve_gateway_approval(SESSION, "deny", resolve_all=True)
+        w.join()
+
+    def test_respond_with_request_id_targets_that_prompt(self, monkeypatch):
+        _set_timeout(monkeypatch, 30)
+        first = _Waiter("rm -rf /first").start()
+        second = _Waiter("rm -rf /second").start()
+
+        out = self._respond(monkeypatch, {"choice": "once", "session_id": "s",
+                                          "request_id": second.request_id})
+        assert out["result"]["resolved"] == 1
+        assert second.join()["choice"] == "once"
+        assert _pending_commands() == ["rm -rf /first"]
+
+        # A stale id (already answered) resolves nothing.
+        out = self._respond(monkeypatch, {"choice": "once", "session_id": "s",
+                                          "request_id": second.request_id})
+        assert out["result"]["resolved"] == 0
+        assert _pending_commands() == ["rm -rf /first"]
+
+        mod.resolve_gateway_approval(SESSION, "deny", resolve_all=True)
+        first.join()
+
+    def test_respond_without_request_id_keeps_fifo(self, monkeypatch):
+        _set_timeout(monkeypatch, 30)
+        first = _Waiter("rm -rf /first").start()
+        second = _Waiter("rm -rf /second").start()
+        out = self._respond(monkeypatch, {"choice": "once", "session_id": "s"})
+        assert out["result"]["resolved"] == 1
+        assert first.join()["choice"] == "once"
+        out = self._respond(monkeypatch, {"choice": "deny", "session_id": "s", "all": True})
+        assert out["result"]["resolved"] == 1
+        assert second.join()["choice"] == "deny"
+
+    def test_respond_rejects_non_string_request_id(self, monkeypatch):
+        out = self._respond(monkeypatch, {"choice": "once", "session_id": "s", "request_id": 5})
+        assert out["error"]["code"] == 4006

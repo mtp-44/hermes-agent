@@ -1009,6 +1009,9 @@ def _emit_approval_request(sid: str, data: dict | None) -> None:
     platforms and the SSE/API stream fixed in #50767). Reuse the shared gateway
     seam so all approval transports redact consistently."""
     payload = dict(data or {})
+    # ``request_id`` (stamped by tools.approval on every queued request)
+    # rides along in the payload; a client that echoes it back in
+    # ``approval.respond`` answers exactly this prompt.
     if "command" in payload:
         from gateway.run import _redact_approval_command
 
@@ -9867,9 +9870,21 @@ def _(rid, params: dict) -> dict:
 
 @method("approval.respond")
 def _(rid, params: dict) -> dict:
+    """Resolve a pending approval.
+
+    ``request_id`` (optional) is the id carried by the ``approval.request``
+    event this answer is for; when present only that request is resolved,
+    and ``resolved: 0`` means it is no longer pending (timed out / already
+    answered) — a newer prompt is never answered in its place.  Without it
+    the session's oldest pending request is resolved (legacy FIFO), or all
+    of them with ``all: true``.
+    """
     session, err = _sess(params, rid)
     if err:
         return err
+    request_id = params.get("request_id")
+    if request_id is not None and not isinstance(request_id, str):
+        return _err(rid, 4006, "request_id must be a string")
     try:
         from tools.approval import resolve_gateway_approval
 
@@ -9880,6 +9895,7 @@ def _(rid, params: dict) -> dict:
                     session["session_key"],
                     params.get("choice", "deny"),
                     resolve_all=params.get("all", False),
+                    request_id=request_id or None,
                 )
             },
         )
