@@ -1,5 +1,6 @@
 """Tests for agent.redact -- secret masking in logs and output."""
 
+import ast
 import logging
 
 import pytest
@@ -310,6 +311,117 @@ class TestJsonFields:
         text = '{"name": "John", "model": "gpt-4"}'
         result = redact_sensitive_text(text)
         assert result == text
+
+
+class TestPythonReprFields:
+    @pytest.mark.parametrize(
+        "key",
+        [
+            "BRAVE_API_KEY",
+            "SERVICE_TOKEN",
+            "DB_PASSWORD",
+            "MISTRAL_API_KEY",
+            "api_key",
+            "access_token",
+            "client_secret",
+            "id_token",
+            "private_key",
+        ],
+    )
+    def test_secret_field_in_nested_python_repr_is_redacted(self, key):
+        secret = f"opaque-{key.lower()}-value-1234567890"
+        text = f"kwargs={{'env': {{'{key}': '{secret}'}}}}"
+
+        result = redact_sensitive_text(text, force=True)
+
+        assert secret not in result
+        assert f"'{key}': '***'" in result
+
+    @pytest.mark.parametrize("key", ["Authorization", "Proxy-Authorization"])
+    def test_bearer_header_in_python_repr_is_redacted(self, key):
+        # The ``Authorization:`` header rule never matches the quote-split repr form.
+        token = "Zk3pQ9vL2mX8rT5wY1cB7nD4hF6jG0sA"  # 32 alnum, no vendor prefix
+        text = f"request(headers={{'{key}': 'Bearer {token}', 'Accept': 'application/json'}})"
+
+        result = redact_sensitive_text(text, force=True)
+
+        assert token not in result
+        assert f"'{key}': '***'" in result
+        assert "'Accept': 'application/json'" in result
+
+    @pytest.mark.parametrize(
+        "key",
+        ["TOKEN_COUNT", "AUTH_METHOD", "PASSWORD_POLICY", "SECRET_NAME", "CREDENTIAL_TYPE"],
+    )
+    def test_uppercase_metadata_field_is_unchanged(self, key):
+        text = f"{{'{key}': 'public-metadata-value'}}"
+        assert redact_sensitive_text(text, force=True) == text
+
+    @pytest.mark.parametrize(
+        "key",
+        ["UserPassword", "sessionToken", "clientApiKey", "gh_token", "webhookSecret"],
+    )
+    def test_mixed_case_credential_suffix_key_is_redacted(self, key):
+        """Case-insensitive dict-entry class (upstream, per OpenHands/software-agent-sdk#4508)."""
+        secret = f"opaque-{key.lower()}-value-1234567890"
+        text = f"{{'{key}': '{secret}'}}"
+
+        result = redact_sensitive_text(text, force=True)
+
+        assert secret not in result
+        assert f"'{key}': '***'" in result
+
+    @pytest.mark.parametrize(
+        "key",
+        ["tokenizer", "secretary", "password_policy", "token_count", "keyring"],
+    )
+    def test_embedded_or_metadata_keyword_key_is_unchanged(self, key):
+        text = f"{{'{key}': 'ordinary-value-1234567890'}}"
+        assert redact_sensitive_text(text, force=True) == text
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "apostrophe-near-head-'1234567890",
+            "apostrophe-near-tail-1234567890'",
+            b"bytes-apostrophe-near-head-'1234567890",
+            b"bytes-apostrophe-near-tail-1234567890'",
+        ],
+    )
+    def test_escaped_repr_value_remains_parseable(self, value):
+        text = repr({"API_KEY": value})
+
+        result = redact_sensitive_text(text, force=True)
+        parsed = ast.literal_eval(result)
+
+        assert parsed["API_KEY"] == (b"***" if isinstance(value, bytes) else "***")
+
+    def test_double_quoted_repr_value_is_redacted(self):
+        secret = "opaque-double-quoted-value-1234567890"
+        text = f"payload={{'SERVICE_TOKEN': \"{secret}\"}}"
+
+        result = redact_sensitive_text(text, force=True)
+
+        assert secret not in result
+        assert "'SERVICE_TOKEN': \"***\"" in result
+
+    def test_programmatic_env_lookup_is_preserved(self):
+        text = "{'API_KEY': \"os.getenv('OPENAI_API_KEY')\"}"
+        assert redact_sensitive_text(text, force=True) == text
+
+    def test_non_secret_python_repr_field_is_unchanged(self):
+        text = "{'model': 'gpt-5', 'token_count': '123'}"
+        assert redact_sensitive_text(text, force=True) == text
+
+    def test_already_masked_repr_value_keeps_its_scheme_word(self):
+        # An upstream scrub (MCP probe headers) leaves ``Digest ***``; the repr
+        # pass must not collapse that to a bare ``***`` and lose the scheme.
+        text = "headers={'Authorization': 'Digest ***'}"
+        assert redact_sensitive_text(text, force=True) == text
+
+    def test_code_file_preserves_secret_shaped_fixture(self):
+        text = "CONFIG = {'BRAVE_API_KEY': 'fixture-value-1234567890'}"
+        assert redact_sensitive_text(text, force=True, code_file=True) == text
 
 
 class TestAuthHeaders:
@@ -1294,6 +1406,63 @@ class TestTerminalOutputRedaction:
         assert "realEnvSecret123" not in redact_terminal_output(
             "SERVICE_TOKEN=realEnvSecret123", "cat .env"
         )
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "python -m pytest",
+            "uv run pytest",
+            "PYTHONPATH=. pytest",
+            "bash -lc 'pytest tests/agent/test_redact.py'",
+        ],
+    )
+    def test_pytest_diagnostic_masks_python_repr_secret_field(self, command):
+        from agent.redact import redact_terminal_output
+
+        secret = "opaque-brave-value-1234567890"
+        out = f"E       kwargs={{'env': {{'BRAVE_API_KEY': '{secret}'}}}}"
+
+        red = redact_terminal_output(out, command, force=True)
+
+        assert secret not in red
+        assert "'BRAVE_API_KEY': '***'" in red
+
+    def test_exception_line_masks_python_repr_secret_field(self):
+        from agent.redact import redact_terminal_output
+
+        secret = "opaque-exception-value-1234567890"
+        out = f"RuntimeError: payload={{'API_KEY': '{secret}'}}"
+
+        red = redact_terminal_output(out, "python app.py", force=True)
+
+        assert secret not in red
+        assert "'API_KEY': '***'" in red
+
+    def test_source_dump_preserves_python_repr_fixture(self):
+        from agent.redact import redact_terminal_output
+
+        out = "CONFIG = {'BRAVE_API_KEY': 'fixture-value-1234567890'}"
+        assert redact_terminal_output(out, "cat config.py", force=True) == out
+        assert redact_terminal_output(out, "python dump_source.py", force=True) == out
+
+    def test_pytest_source_line_preserves_python_repr_fixture(self):
+        from agent.redact import redact_terminal_output
+
+        source = "    CONFIG = {'BRAVE_API_KEY': 'fixture-value-1234567890'}"
+        out = source + "\nE       assert False"
+
+        red = redact_terminal_output(out, "uv run pytest", force=True)
+
+        assert source in red
+
+    def test_disabled_pytest_diagnostic_passes_through(self, monkeypatch):
+        from agent.redact import redact_terminal_output
+
+        monkeypatch.setattr("agent.redact._REDACT_ENABLED", False)
+        secret = "opaque-disabled-value-1234567890"
+        out = f"E       payload={{'API_KEY': '{secret}'}}"
+
+        assert redact_terminal_output(out, "uv run pytest") == out
 
     def test_command_segments_split_only_on_unquoted_separators(self):
         from agent.redact import _command_segments
