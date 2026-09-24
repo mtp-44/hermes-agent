@@ -226,6 +226,16 @@ def _build_provider_env_blocklist() -> frozenset:
 
 _HERMES_PROVIDER_ENV_BLOCKLIST = _build_provider_env_blocklist()
 
+
+def _is_provider_env_blocklisted(name: str) -> bool:
+    """``name`` is a blocklisted provider/tool credential, matched the way the
+    platform's environment resolves names: exact plus case-folded. On Windows
+    the environment block is case-insensitive, so ``openai_api_key`` IS
+    ``OPENAI_API_KEY``; consistent with ``_is_hermes_internal_secret``, which
+    already folds (``key.upper()``)."""
+    return (name in _HERMES_PROVIDER_ENV_BLOCKLIST
+            or name.upper() in _HERMES_PROVIDER_ENV_BLOCKLIST)
+
 # Active-virtualenv markers that must NOT leak into terminal subprocesses.
 # The gateway runs inside its own venv, so its process environment carries
 # VIRTUAL_ENV (and possibly CONDA_PREFIX). If those leak into commands the
@@ -362,7 +372,7 @@ def _sanitize_subprocess_env(base_env: dict | None, extra_env: dict | None = Non
         if _is_hermes_internal_secret(key):
             continue
         passthrough = _is_passthrough(key)
-        if key in _HERMES_PROVIDER_ENV_BLOCKLIST and not passthrough:
+        if _is_provider_env_blocklisted(key) and not passthrough:
             continue
         resolved = _resolve_passthrough_value(key, value) if passthrough else value
         if resolved is not None:
@@ -378,7 +388,7 @@ def _sanitize_subprocess_env(base_env: dict | None, extra_env: dict | None = Non
             continue
         else:
             passthrough = _is_passthrough(key)
-            if key in _HERMES_PROVIDER_ENV_BLOCKLIST and not passthrough:
+            if _is_provider_env_blocklisted(key) and not passthrough:
                 continue
             resolved = _resolve_passthrough_value(key, value) if passthrough else value
             if resolved is not None:
@@ -476,9 +486,12 @@ def hermes_subprocess_env(*, inherit_credentials: bool = False) -> dict[str, str
     """
     env = os.environ.copy()
 
-    # Tier 1 — always strip.
-    for key in _ALWAYS_STRIP_KEYS:
-        env.pop(key, None)
+    # Tier 1 — always strip. Credential names fold to uppercase for
+    # membership: on Windows the env block itself is case-insensitive, so a
+    # lowercase-stored ``gh_token`` IS GH_TOKEN.
+    for key in list(env):
+        if key.upper() in _ALWAYS_STRIP_KEYS:
+            env.pop(key, None)
     # Internal routing hints and Hermes-internal dynamic secrets
     # (``AUXILIARY_<TASK>_API_KEY`` / ``_BASE_URL`` side-LLM credentials,
     # ``GATEWAY_RELAY_*`` relay-auth material) must never reach a child,
@@ -492,8 +505,9 @@ def hermes_subprocess_env(*, inherit_credentials: bool = False) -> dict[str, str
 
     if not inherit_credentials:
         # Tier 2 — strip provider/tool credentials unless explicitly inherited.
-        for key in _HERMES_PROVIDER_ENV_BLOCKLIST:
-            env.pop(key, None)
+        for key in list(env):
+            if _is_provider_env_blocklisted(key):
+                env.pop(key, None)
 
     # Windows UTF-8 safety for spawned processes (#31420).
     env.setdefault("PYTHONUTF8", "1")
@@ -800,7 +814,7 @@ def _make_run_env(env: dict) -> dict:
             continue
         else:
             passthrough = _is_passthrough(k)
-            if k in _HERMES_PROVIDER_ENV_BLOCKLIST and not passthrough:
+            if _is_provider_env_blocklisted(k) and not passthrough:
                 continue
             value = _resolve_passthrough_value(k, v) if passthrough else v
             if value is not None:
