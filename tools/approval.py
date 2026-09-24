@@ -394,6 +394,10 @@ _HARDLINE_SYSTEM_DIRS = (
 # catching `rm -rf "/"`.
 _RM_FLAG_PREFIX = _CMDPOS + r'rm\s+(-[^\s]*\s+)*'
 
+# Package-manager global options, each optionally taking ONE non-dash operand
+# (`npm --prefix DIR`, `pip --proxy URL`, `yarn --cwd DIR`).
+_PKG_OPTS = r'(?:-[^\s]+(?:\s+[^-\s][^\s]*)?\s+)*'
+
 HARDLINE_PATTERNS = [
     # rm recursive targeting the root filesystem or protected roots.
     # `${HOME}` brace form and quoted paths (`rm -rf "/"`, `rm -rf "$HOME"`)
@@ -818,6 +822,16 @@ DANGEROUS_PATTERNS = [
     # into a single -X token. Catches the same threat class.
     (r'\bsudo\b[^;|&\n]*?\s+-[a-z]*[sa][a-z]*\b',
      "sudo with combined-flag privilege escalation"),
+    # Package-manager uninstall commands remove installed software outside the
+    # current project (notably `npm uninstall -g`, `brew uninstall`). Installs
+    # and updates stay unprompted. _CMDPOS-anchored so quoted prose such as
+    # `git commit -m "document npm uninstall usage"` is data; the option group
+    # also swallows one operand (`npm --prefix DIR uninstall x`).
+    (_CMDPOS + r'npm\s+' + _PKG_OPTS + r'(?:uninstall|unlink|remove|rm|r|un)\b', "package manager uninstall"),
+    (_CMDPOS + r'pnpm\s+' + _PKG_OPTS + r'(?:uninstall|remove|rm|un)\b', "package manager uninstall"),
+    (_CMDPOS + r'yarn\s+' + _PKG_OPTS + r'(?:global\s+)?(?:uninstall|remove)\b', "package manager uninstall"),
+    (_CMDPOS + r'pip(?:3(?:\.\d+)?)?\s+' + _PKG_OPTS + r'uninstall\b', "package manager uninstall"),
+    (_CMDPOS + r'brew\s+' + _PKG_OPTS + r'(?:uninstall|remove|rm)\b', "package manager uninstall"),
 ]
 
 
