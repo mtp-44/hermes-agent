@@ -1369,6 +1369,38 @@ class TestSafeCopyDb:
         conn.close()
         assert rows == [("wal-test",)]
 
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits")
+    def test_new_copy_is_owner_only_under_permissive_umask(self, tmp_path):
+        from hermes_cli.backup import _safe_copy_db
+        import stat
+        src = tmp_path / "test.db"
+        dst = tmp_path / "copy.db"
+        with sqlite3.connect(str(src)) as conn:
+            conn.execute("CREATE TABLE t (x INTEGER)")
+
+        old_umask = os.umask(0o022)
+        try:
+            assert _safe_copy_db(src, dst) is True
+        finally:
+            os.umask(old_umask)
+        assert stat.S_IMODE(dst.stat().st_mode) == 0o600
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX symlinks / O_NOFOLLOW")
+    def test_refuses_planted_symlink_destination(self, tmp_path):
+        """A symlinked target must not be written through (not even by the
+        raw-copy fallback)."""
+        from hermes_cli.backup import _safe_copy_db
+        src = tmp_path / "test.db"
+        with sqlite3.connect(str(src)) as conn:
+            conn.execute("CREATE TABLE t (x INTEGER)")
+        victim = tmp_path / "victim.txt"
+        victim.write_text("untouched")
+        dst = tmp_path / "copy.db"
+        dst.symlink_to(victim)
+
+        assert _safe_copy_db(src, dst) is False
+        assert victim.read_text() == "untouched"
+
 
 # ---------------------------------------------------------------------------
 # Quick state snapshot tests
@@ -1397,6 +1429,35 @@ class TestQuickSnapshot:
         conn.commit()
         conn.close()
         return home
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits")
+    def test_snapshot_tree_is_owner_only_under_permissive_umask(self, hermes_home):
+        """Recovery snapshots must never inherit world-readable default modes.
+
+        Quick snapshots contain session state, credentials, pairing records
+        and cron data, so every file must be 0600 and every directory 0700
+        regardless of the caller's umask or source modes.
+        """
+        import stat
+        from hermes_cli.backup import create_quick_snapshot
+        for f in hermes_home.rglob("*"):
+            if f.is_file():
+                os.chmod(f, 0o644)
+
+        old_umask = os.umask(0o022)
+        try:
+            snap_id = create_quick_snapshot(hermes_home=hermes_home)
+        finally:
+            os.umask(old_umask)
+
+        assert snap_id is not None
+        root = hermes_home / "state-snapshots"
+        snapshot = root / snap_id
+        directories = [root, snapshot, *(p for p in snapshot.rglob("*") if p.is_dir())]
+        files = [p for p in snapshot.rglob("*") if p.is_file()]
+        assert files
+        assert all(stat.S_IMODE(p.stat().st_mode) == 0o700 for p in directories)
+        assert all(stat.S_IMODE(p.stat().st_mode) == 0o600 for p in files)
 
     def test_creates_snapshot(self, hermes_home):
         from hermes_cli.backup import create_quick_snapshot

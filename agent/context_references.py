@@ -12,7 +12,12 @@ from pathlib import Path
 from typing import Awaitable, Callable
 
 from agent.model_metadata import estimate_tokens_rough
-from hermes_cli._subprocess_compat import IS_WINDOWS, windows_hide_flags
+from hermes_cli._subprocess_compat import (
+    IS_WINDOWS,
+    harden_git_argv,
+    noninteractive_git_env,
+    windows_hide_flags,
+)
 
 _QUOTED_REFERENCE_VALUE = r'(?:`[^`\n]+`|"[^"\n]+"|\'[^\'\n]+\')'
 REFERENCE_PATTERN = re.compile(
@@ -305,12 +310,13 @@ def _expand_git_reference(
     _popen_kwargs = {"creationflags": windows_hide_flags()} if IS_WINDOWS else {}
     try:
         result = subprocess.run(
-            ["git", *args],
+            ["git", *harden_git_argv(args)],
             cwd=cwd,
             capture_output=True,
             text=True,
             timeout=30,
             stdin=subprocess.DEVNULL,
+            env=noninteractive_git_env(),
             **_popen_kwargs,
         )
     except subprocess.TimeoutExpired:

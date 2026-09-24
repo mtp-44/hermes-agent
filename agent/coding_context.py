@@ -60,7 +60,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
-from hermes_cli._subprocess_compat import IS_WINDOWS, windows_hide_flags
+from hermes_cli._subprocess_compat import (
+    IS_WINDOWS,
+    harden_git_argv,
+    noninteractive_git_env,
+    windows_hide_flags,
+)
 
 logger = logging.getLogger("hermes.coding_context")
 
@@ -680,13 +685,18 @@ def _enabled_mcp_servers(config: Optional[dict[str, Any]]) -> list[str]:
 
 
 def _git(cwd: Path, *args: str) -> str:
+    # Runs automatically against the session cwd before any trust prompt, so a
+    # malicious repo's .git/config must not be able to execute anything
+    # (GHSA-7x36-8jrh-v4pw): isolated config env + diff-driver flags.
     _popen_kwargs = {"creationflags": windows_hide_flags()} if IS_WINDOWS else {}
     try:
         out = subprocess.run(
-            ["git", "-C", str(cwd), *args],
+            ["git", "-C", str(cwd), *harden_git_argv(args)],
             capture_output=True,
             text=True,
             timeout=_GIT_TIMEOUT,
+            stdin=subprocess.DEVNULL,
+            env=noninteractive_git_env(),
             **_popen_kwargs,
         )
     except (OSError, subprocess.SubprocessError):

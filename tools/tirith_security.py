@@ -851,6 +851,15 @@ def check_command_security(command: str) -> dict:
             findings = []
             summary = ""
 
+    # VS16 follows ordinary emoji-capable code points in standard emoji-presentation sequences
+    # (e.g. a folder named "🗞️ Journal"). Preserve warnings for every other selector, including
+    # VS16 after text, because those can carry the steganographic payload that Tirith is
+    # intended to detect.
+    if action == "warn" and findings \
+            and all(_is_emoji_variation_selector_finding(f) for f in findings) \
+            and _has_only_emoji_presentation_selectors(command):
+        return {"action": "allow", "findings": [], "summary": ""}
+
     return {"action": action, "findings": findings, "summary": summary}
 
 
@@ -869,3 +878,27 @@ def _is_app_tld_finding(finding: dict) -> bool:
         if val is not None and ".app" in str(val).lower():
             return True
     return False
+
+
+_VARIATION_SELECTOR_16 = "\ufe0f"
+_EMOJI_PRESENTATION_BASE_RANGES = ((0x2600, 0x27BF), (0x1F000, 0x1FAFF))
+
+
+def _is_emoji_variation_selector_finding(finding: dict) -> bool:
+    """True only for the Tirith rule that reports variation selectors."""
+    return isinstance(finding, dict) and finding.get("rule_id") == "variation_selector"
+
+
+def _has_only_emoji_presentation_selectors(command: str) -> bool:
+    """Whether every variation selector is VS16 immediately after an emoji-capable base."""
+    saw_selector = False
+    for idx, char in enumerate(command):
+        if not ("\ufe00" <= char <= "\ufe0f" or "\U000e0100" <= char <= "\U000e01ef"):
+            continue
+        saw_selector = True
+        if char != _VARIATION_SELECTOR_16 or idx == 0:
+            return False
+        base = ord(command[idx - 1])
+        if not any(start <= base <= end for start, end in _EMOJI_PRESENTATION_BASE_RANGES):
+            return False
+    return saw_selector

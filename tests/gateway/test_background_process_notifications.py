@@ -556,3 +556,87 @@ def test_parse_session_key_too_short():
 def test_parse_session_key_wrong_prefix():
     assert _parse_session_key("cron:main:telegram:dm:123") is None
     assert _parse_session_key("agent:cron:telegram:dm:123") is None
+
+
+# ---------------------------------------------------------------------------
+# Secret redaction on watcher sends (security ports)
+# ---------------------------------------------------------------------------
+
+_FAKE_BEARER = "Authorization: Bearer " + "abcDEF123456" * 3
+_FAKE_KEY = "sk-proj-" + "Z" * 40
+
+
+@pytest.mark.asyncio
+async def test_agent_notification_redacts_output_and_command_when_redaction_disabled(
+    monkeypatch, tmp_path
+):
+    """The notify_on_complete injection must scrub secrets even when
+    security.redact_secrets is off (force=True user-facing floor)."""
+    import agent.redact as redact_mod
+    import tools.process_registry as pr_module
+
+    monkeypatch.setattr(redact_mod, "_REDACT_ENABLED", False)
+    sessions = [SimpleNamespace(
+        output_buffer=f"curl -H '{_FAKE_BEARER}'\nkey={_FAKE_KEY}\n",
+        exited=True,
+        exit_code=0,
+        command=f"OPENAI_API_KEY={_FAKE_KEY} ./run.sh",
+    )]
+    monkeypatch.setattr(pr_module, "process_registry", _FakeRegistry(sessions))
+
+    async def _instant_sleep(*_a, **_kw):
+        pass
+    monkeypatch.setattr(asyncio, "sleep", _instant_sleep)
+
+    runner = _build_runner(monkeypatch, tmp_path, "all")
+    adapter = runner.adapters[Platform.TELEGRAM]
+
+    await runner._run_process_watcher({
+        "session_id": "proc_secret",
+        "check_interval": 0,
+        "session_key": "agent:main:telegram:dm:123",
+        "platform": "telegram",
+        "chat_id": "123",
+        "notify_on_complete": True,
+    })
+
+    adapter.handle_message.assert_awaited_once()
+    text = adapter.handle_message.await_args.args[0].text
+    assert _FAKE_KEY not in text
+    assert "abcDEF123456abcDEF123456" not in text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "sessions",
+    [
+        # direct final-output send (text-only completion)
+        [SimpleNamespace(output_buffer=f"key={_FAKE_KEY}\n", exited=True, exit_code=0)],
+        # direct running-output send ("all" mode update)
+        [
+            SimpleNamespace(output_buffer=f"key={_FAKE_KEY}\n", exited=False, exit_code=None),
+            None,
+        ],
+    ],
+    ids=["completion", "running"],
+)
+async def test_direct_watcher_sends_redact_when_redaction_disabled(
+    monkeypatch, tmp_path, sessions
+):
+    import agent.redact as redact_mod
+    import tools.process_registry as pr_module
+
+    monkeypatch.setattr(redact_mod, "_REDACT_ENABLED", False)
+    monkeypatch.setattr(pr_module, "process_registry", _FakeRegistry(sessions))
+
+    async def _instant_sleep(*_a, **_kw):
+        pass
+    monkeypatch.setattr(asyncio, "sleep", _instant_sleep)
+
+    runner = _build_runner(monkeypatch, tmp_path, "all")
+    adapter = runner.adapters[Platform.TELEGRAM]
+
+    await runner._run_process_watcher(_watcher_dict())
+
+    assert adapter.send.await_count == 1
+    assert _FAKE_KEY not in adapter.send.await_args.args[1]

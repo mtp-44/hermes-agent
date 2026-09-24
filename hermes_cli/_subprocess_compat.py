@@ -27,9 +27,10 @@ guarantee.
 
 from __future__ import annotations
 
+import os
 import shutil
 import sys
-from typing import Sequence
+from typing import Mapping, Sequence
 
 __all__ = [
     "IS_WINDOWS",
@@ -38,7 +39,64 @@ __all__ = [
     "windows_detach_flags_without_breakaway",
     "windows_hide_flags",
     "windows_detach_popen_kwargs",
+    "noninteractive_git_env",
+    "harden_git_argv",
+    "NO_DRIVER_DIFF_FLAGS",
 ]
+
+# Flags that neutralize *attribute-scoped* diff drivers on any diff-rendering
+# git command (``diff``, ``log -p``, ``show``, ``blame``). A malicious repo can
+# name a driver in ``.gitattributes`` (``* diff=evil``) and point it at an
+# arbitrary program via ``[diff "evil"] command=/textconv=`` in ``.git/config``.
+# Because the attacker chooses the driver name, ``GIT_CONFIG_KEY`` overrides in
+# ``noninteractive_git_env`` cannot enumerate and disable it — only these
+# command-line flags do. ``--no-ext-diff`` kills ``command=``; ``--no-textconv``
+# kills ``textconv=``. Both are required (each alone leaves the other live).
+# Smudge/clean filters are neutralized by the env layer's ``core.hooksPath`` +
+# running against the index without checkout. (GHSA-7x36-8jrh-v4pw)
+NO_DRIVER_DIFF_FLAGS = ("--no-ext-diff", "--no-textconv")
+
+# Subcommands that render diffs and therefore invoke ``.gitattributes``-scoped
+# diff/textconv drivers. Only these accept ``NO_DRIVER_DIFF_FLAGS`` — ``status``
+# and friends reject the flags (``unknown option``), so the helper must gate on
+# this set rather than blanket-prepending.
+_DIFF_RENDERING_SUBCOMMANDS = frozenset({"diff", "show", "log", "blame"})
+
+
+def harden_git_argv(args: Sequence[str]) -> list[str]:
+    """Return a copy of subcommand-first git *args* with diff-driver flags
+    inserted for diff-rendering subcommands.
+
+    *args* is the argument list WITHOUT the leading ``"git"`` (e.g.
+    ``["diff", "HEAD"]`` or ``["-C", repo, "diff", ...]``). The first
+    non-option token is treated as the subcommand; if it is one of
+    :data:`_DIFF_RENDERING_SUBCOMMANDS`, :data:`NO_DRIVER_DIFF_FLAGS` is
+    inserted immediately after it. Non-diff subcommands are returned unchanged.
+
+    Pair with :func:`noninteractive_git_env`: the env layer disables
+    fsmonitor/hooks/pager/editor/credential sinks, this closes the one class
+    (attacker-named attribute drivers) env overrides cannot reach.
+    """
+    out = list(args)
+    # Options that consume the FOLLOWING token as their value, so that value is
+    # never mistaken for the subcommand (``-C diff`` is a path; ``-c diff=x`` is
+    # a config pair — neither is the diff subcommand).
+    _value_opts = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path"}
+    i = 0
+    while i < len(out):
+        tok = out[i]
+        if tok in _value_opts:
+            i += 2
+            continue
+        if tok.startswith("-"):
+            i += 1
+            continue
+        if tok in _DIFF_RENDERING_SUBCOMMANDS:
+            return out[: i + 1] + list(NO_DRIVER_DIFF_FLAGS) + out[i + 1 :]
+        # First non-option token is the subcommand; if it isn't a diff renderer
+        # there is nothing to harden.
+        return out
+    return out
 
 
 IS_WINDOWS = sys.platform == "win32"
@@ -232,3 +290,88 @@ def windows_detach_popen_kwargs() -> dict:
     if IS_WINDOWS:
         return {"creationflags": windows_detach_flags()}
     return {"start_new_session": True}
+
+
+# -----------------------------------------------------------------------------
+# Non-interactive, config-isolated git environment
+# -----------------------------------------------------------------------------
+
+
+def noninteractive_git_env(
+    base: "Mapping[str, str] | None" = None,
+) -> dict[str, str]:
+    """Environment for *internal* git invocations that must never prompt and
+    must never execute a repository's own configured programs.
+
+    Returns a copy of ``base`` (default ``os.environ``) with:
+
+    * ``GIT_TERMINAL_PROMPT=0`` — git fails with "terminal prompts disabled"
+      instead of prompting for credentials.
+    * ``GCM_INTERACTIVE=Never`` — Git Credential Manager never pops a dialog.
+    * isolated git config — inherited ``GIT_CONFIG_*`` overrides, global/system
+      config, pagers, editors, fsmonitor, external diff, credential helpers
+      and hooks are disabled for the child process.
+
+    **Security (GHSA-7x36-8jrh-v4pw, "GitSpawn"):** Hermes runs git
+    automatically against whatever directory the session sits in (coding
+    workspace snapshot, project-tree build, ``@diff``/``@staged`` refs,
+    ``-w`` worktree setup, desktop review pane) before any tool call,
+    approval, or trust prompt. A repo delivered as files with its ``.git``
+    directory intact (a shared zip, sync folder, USB stick — ``git clone``
+    never transfers ``.git/config``) can set ``core.fsmonitor``,
+    ``core.hooksPath``, ``core.pager``, ``diff.external``, a credential helper
+    etc. to an arbitrary program. The ``GIT_CONFIG_KEY_n`` overrides below
+    have higher precedence than repository config, so those keys are pinned
+    to inert values. Diff-rendering callers must additionally use
+    :func:`harden_git_argv` (attribute-scoped drivers can't be disabled
+    through env overrides).
+
+    ``GIT_ASKPASS`` / ``SSH_ASKPASS`` are deliberately left alone so working
+    non-interactive auth still succeeds. Pair with ``stdin=subprocess.DEVNULL``.
+
+    Internal plumbing only — the agent-facing terminal tool has its own
+    policy layer and user-visible PTY.
+
+    Ported from upstream 58708c7066 / 413b6ba3dd / f6234d00c5.
+    """
+    env = dict(base if base is not None else os.environ)
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    env["GCM_INTERACTIVE"] = "Never"
+
+    # Do not inherit caller-supplied config injection. We rebuild the
+    # GIT_CONFIG_COUNT block below so ambient -c values cannot re-enable
+    # pagers, hooks, fsmonitor, editors, or credential prompts.
+    for key in list(env):
+        if (
+            key == "GIT_CONFIG_PARAMETERS"
+            or key.startswith("GIT_CONFIG_KEY_")
+            or key.startswith("GIT_CONFIG_VALUE_")
+        ):
+            env.pop(key, None)
+    env.pop("GIT_CONFIG_COUNT", None)
+
+    devnull = os.devnull
+    env["GIT_CONFIG_GLOBAL"] = devnull
+    env["GIT_CONFIG_SYSTEM"] = devnull
+    env["GIT_CONFIG_NOSYSTEM"] = "1"
+    env["GIT_PAGER"] = "cat"
+    env["PAGER"] = "cat"
+    env["GIT_EDITOR"] = "true"
+
+    config_overrides = {
+        "credential.helper": "",
+        "core.askPass": "",
+        "core.fsmonitor": "false",
+        "core.untrackedCache": "false",
+        "core.hooksPath": devnull,
+        "core.pager": "cat",
+        "core.editor": "true",
+        "sequence.editor": "true",
+        "diff.external": "",
+    }
+    env["GIT_CONFIG_COUNT"] = str(len(config_overrides))
+    for idx, (key, value) in enumerate(config_overrides.items()):
+        env[f"GIT_CONFIG_KEY_{idx}"] = key
+        env[f"GIT_CONFIG_VALUE_{idx}"] = value
+
+    return env

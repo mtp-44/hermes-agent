@@ -653,6 +653,12 @@ def test_an_open_pull_request_is_reported_and_never_alarmed_on(tmp_path, monkeyp
     """A reminder down a health channel is how a health channel stops being
     read — and it would leave this service unhealthy, and so the monitor exiting
     1, until Mark got round to it. `make standup` is where a nudge belongs."""
+    class _FrozenDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 9, 8, 12, 0, 0, tzinfo=tz)
+
+    monkeypatch.setattr(hhm, "datetime", _FrozenDatetime)
     monkeypatch.setenv("HERMES_HEALTH_ESTATE_REVIEW_LATEST", str(_latest(tmp_path)))
     monkeypatch.setattr(hhm, "_load_estate_spine",
                         lambda _: (type("E", (), {"load": staticmethod(lambda: _FakeEstate([]))}),

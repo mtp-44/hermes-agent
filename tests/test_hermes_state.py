@@ -1,6 +1,8 @@
 """Tests for hermes_state.py — SessionDB SQLite CRUD, FTS5 search, export."""
 
+import os
 import sqlite3
+import stat
 import time
 import pytest
 
@@ -4881,3 +4883,61 @@ def test_refresh_compression_lock_requires_holder_and_preserves_reclaimability(d
 
     monkeypatch.setattr(hermes_state.time, "time", lambda: 1016.0)
     assert db.try_acquire_compression_lock("s1", "holder-b", ttl_seconds=10.0) is True
+
+
+class TestStateDbOwnerOnlyPermissions:
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits")
+    def test_writable_state_db_is_owner_only_under_permissive_umask(self, tmp_path):
+        """state.db and any live SQLite sidecars must not inherit 0644 modes."""
+        db_path = tmp_path / "state.db"
+
+        old_umask = os.umask(0o022)
+        try:
+            session_db = SessionDB(db_path=db_path)
+        finally:
+            os.umask(old_umask)
+
+        try:
+            state_files = [
+                path
+                for path in (
+                    db_path,
+                    db_path.with_name(db_path.name + "-wal"),
+                    db_path.with_name(db_path.name + "-shm"),
+                )
+                if path.exists()
+            ]
+            assert state_files
+            assert all(
+                stat.S_IMODE(path.stat().st_mode) == 0o600
+                for path in state_files
+            )
+        finally:
+            session_db.close()
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits")
+    def test_writable_state_db_tightens_existing_loose_mode(self, tmp_path):
+        """Opening a legacy 0644 profile store repairs it in place."""
+        db_path = tmp_path / "state.db"
+        initial = SessionDB(db_path=db_path)
+        initial.close()
+        os.chmod(db_path, 0o644)
+
+        session_db = SessionDB(db_path=db_path)
+        try:
+            assert stat.S_IMODE(db_path.stat().st_mode) == 0o600
+        finally:
+            session_db.close()
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits")
+    def test_read_only_attach_does_not_change_mode(self, tmp_path):
+        """Read-only cross-profile attachments stay observational."""
+        db_path = tmp_path / "state.db"
+        SessionDB(db_path=db_path).close()
+        os.chmod(db_path, 0o644)
+
+        ro = SessionDB(db_path=db_path, read_only=True)
+        try:
+            assert stat.S_IMODE(db_path.stat().st_mode) == 0o644
+        finally:
+            ro.close()

@@ -36,7 +36,11 @@ import urllib.error
 import urllib.parse
 import zipfile
 
-from hermes_cli._subprocess_compat import windows_detach_flags, windows_hide_flags
+from hermes_cli._subprocess_compat import (
+    noninteractive_git_env,
+    windows_detach_flags,
+    windows_hide_flags,
+)
 import urllib.request
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -1464,6 +1468,9 @@ def _fs_git_branch(cwd: str) -> str:
             "text": True,
             "timeout": 2,
             "check": False,
+            # GHSA-7x36-8jrh-v4pw: cwd is an arbitrary session directory.
+            "stdin": subprocess.DEVNULL,
+            "env": noninteractive_git_env(),
         }
         if sys.platform == "win32":
             run_kwargs["creationflags"] = windows_hide_flags()

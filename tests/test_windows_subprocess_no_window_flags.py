@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -51,6 +52,12 @@ def test_tui_gateway_git_probe_hides_git_windows(monkeypatch):
     assert git_probe.run_git("C:/repo", "branch", "--show-current") == "main"
 
     git_calls = _spawns(captured, "branch", "--show-current")
+    # GHSA-7x36-8jrh-v4pw: the probe must run under the config-isolated env.
+    env = git_calls[0][1].pop("env")
+    assert env["GIT_CONFIG_GLOBAL"] == os.devnull
+    assert "core.fsmonitor" in {
+        env[f"GIT_CONFIG_KEY_{i}"] for i in range(int(env["GIT_CONFIG_COUNT"]))
+    }
     assert git_calls == [
         (
             ["git", "-C", "C:/repo", "branch", "--show-current"],

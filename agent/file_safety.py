@@ -46,6 +46,22 @@ def build_write_denied_paths(home: str) -> set[str]:
             # Top-level Anthropic PKCE credential store remains sensitive even
             # when a profile is active; default/non-profile sessions still read it.
             str(hermes_root / ".anthropic_oauth.json"),
+            # Secret stores the read guard (get_read_block_error) already
+            # refuses, on both the active profile and the global root:
+            # google_oauth.json is an OAuth token store and bws_cache.json is
+            # the plaintext Bitwarden Secrets Manager disk cache.
+            #
+            # auth.json, auth.lock, config.yaml and webhook_subscriptions.json
+            # are deliberately NOT here: they are control files the agent
+            # legitimately edits (upstream #45947 — containment belongs in
+            # Docker/remote backends and OS permissions, not an expanding
+            # hardcoded denylist). auth.json, auth.lock and
+            # webhook_subscriptions.json stay read-denied, not write-denied.
+            # Keep write denies a subset of read denies.
+            str(hermes_home / "auth" / "google_oauth.json"),
+            str(hermes_root / "auth" / "google_oauth.json"),
+            str(hermes_home / "cache" / "bws_cache.json"),
+            str(hermes_root / "cache" / "bws_cache.json"),
             os.path.join(home, ".netrc"),
             os.path.join(home, ".pgpass"),
             os.path.join(home, ".npmrc"),

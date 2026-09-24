@@ -6,6 +6,7 @@ import stat
 import sys
 from io import BytesIO
 from unittest.mock import patch, MagicMock
+from urllib.parse import quote
 
 import pytest
 
@@ -145,6 +146,31 @@ class TestHermesTokenStorage:
 
         import asyncio
         assert asyncio.run(storage.get_tokens()) is None
+
+    def test_corrupt_tokens_warning_does_not_log_token_material(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        """A pydantic ValidationError echoes the failing input; the corrupt-token
+        warning must log field names only, never the token itself (#102308)."""
+        import logging
+
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        storage = HermesTokenStorage("leaky-server")
+        secret = "tok-" + "S3cr3tAccessTok"  # short: pydantic truncates long reprs
+        d = tmp_path / "mcp-tokens"
+        d.mkdir(parents=True)
+        (d / "leaky-server.json").write_text(json.dumps({
+            "access_token": [secret],  # wrong type -> ValidationError
+            "token_type": "Bearer",
+            "refresh_token": {"nested": secret},
+        }))
+
+        with caplog.at_level(logging.WARNING, logger="tools.mcp_oauth"):
+            assert asyncio.run(storage.get_tokens()) is None
+
+        assert "Corrupt tokens" in caplog.text
+        assert "access_token" in caplog.text
+        assert secret not in caplog.text
 
     def test_corrupt_client_info_returns_none(self, tmp_path, monkeypatch):
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
@@ -393,6 +419,28 @@ class TestCallbackHandlerIsolation:
 
         assert result["auth_code"] is None
         assert result["error"] == "access_denied"
+
+
+class TestCallbackHandlerErrorEscaping:
+    """Regression: a hostile ``error`` parameter must be HTML-escaped before
+    being reflected into the callback response body (reflected XSS)."""
+
+    def test_hostile_error_is_escaped_in_response_body(self):
+        HandlerClass, result = _make_callback_handler()
+
+        handler = HandlerClass.__new__(HandlerClass)
+        handler.path = "/callback?error=" + quote("<script>alert(1)</script>")
+        handler.wfile = BytesIO()
+        handler.send_response = MagicMock()
+        handler.send_header = MagicMock()
+        handler.end_headers = MagicMock()
+        handler.do_GET()
+
+        body = handler.wfile.getvalue().decode("utf-8")
+        assert "<script>" not in body
+        assert "&lt;script&gt;alert(1)&lt;/script&gt;" in body
+        # The raw (unescaped) value is still captured for programmatic use.
+        assert result["error"] == "<script>alert(1)</script>"
 
 
 # ---------------------------------------------------------------------------

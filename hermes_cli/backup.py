@@ -259,6 +259,27 @@ def _safe_copy_db(src: Path, dst: Path) -> bool:
     Handles WAL mode — produces a consistent snapshot even while
     the DB is being written to.  Falls back to raw copy on failure.
     """
+    # sqlite3.connect() creates a missing destination with the process
+    # umask, which is commonly 0022 (0644).  Snapshot databases contain
+    # session and tool state, so create the inode owner-only before SQLite
+    # writes its first byte.  O_NOFOLLOW also refuses a planted symlink on
+    # platforms that support it.  Tighten an existing internal staging
+    # file as well (NamedTemporaryFile callers already create it 0600).
+    # Kept outside the raw-copy fallback below: if the destination cannot be
+    # secured (e.g. it is a planted symlink) we must not shutil.copy2 through it.
+    if os.name != "nt":
+        try:
+            open_flags = os.O_WRONLY | os.O_CREAT
+            if hasattr(os, "O_NOFOLLOW"):
+                open_flags |= os.O_NOFOLLOW
+            secure_fd = os.open(dst, open_flags, 0o600)
+            try:
+                os.fchmod(secure_fd, 0o600)
+            finally:
+                os.close(secure_fd)
+        except OSError as exc:
+            logger.error("Could not create owner-only snapshot target %s: %s", dst, exc)
+            return False
     try:
         conn = sqlite3.connect(f"file:{src}?mode=ro", uri=True)
         backup_conn = sqlite3.connect(str(dst))
@@ -790,6 +811,25 @@ def _quick_snapshot_root(hermes_home: Optional[Path] = None) -> Path:
     return home / _QUICK_SNAPSHOTS_DIR
 
 
+def _secure_quick_snapshot_tree(root: Path, snapshot_dir: Path) -> None:
+    """Make a quick snapshot owner-only.
+
+    The snapshot directory is private from creation, so copied source modes
+    (``shutil.copy2`` preserves e.g. 0644) can be normalized safely here.
+    Permission failures are intentionally fatal: leaving a readable recovery
+    bundle is worse than reporting a failed snapshot.
+    """
+    if os.name == "nt":
+        return
+    os.chmod(root, 0o700)
+    os.chmod(snapshot_dir, 0o700)
+    for path in snapshot_dir.rglob("*"):
+        if path.is_dir():
+            os.chmod(path, 0o700)
+        elif path.is_file():
+            os.chmod(path, 0o600)
+
+
 def create_quick_snapshot(
     label: Optional[str] = None,
     hermes_home: Optional[Path] = None,
@@ -809,7 +849,12 @@ def create_quick_snapshot(
     ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     snap_id = f"{ts}-{label}" if label else ts
     snap_dir = root / snap_id
-    snap_dir.mkdir(parents=True, exist_ok=True)
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if os.name != "nt":
+        os.chmod(root, 0o700)
+    snap_dir.mkdir(mode=0o700, exist_ok=True)
+    if os.name != "nt":
+        os.chmod(snap_dir, 0o700)
 
     manifest: Dict[str, int] = {}  # rel_path -> file size
 
@@ -878,6 +923,7 @@ def create_quick_snapshot(
     }
     with open(snap_dir / "manifest.json", "w", encoding="utf-8") as f:
         json.dump(meta, f, indent=2)
+    _secure_quick_snapshot_tree(root, snap_dir)
 
     # Auto-prune. Defaults preserve historical manual /snapshot behavior; callers
     # with known high-churn safety snapshots (for example pre-update) can pass a

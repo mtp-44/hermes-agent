@@ -17,9 +17,10 @@ from pathlib import Path
 from typing import Optional
 
 from tools.environments.base import BaseEnvironment, _popen_bash
-from tools.environments.local import (
+from tools.environments.local import (  # noqa: F401 — _HERMES_PROVIDER_ENV_BLOCKLIST stays importable from here
     _HERMES_PROVIDER_ENV_BLOCKLIST,
     _is_hermes_internal_secret,
+    _is_provider_env_blocklisted,
 )
 
 logger = logging.getLogger(__name__)
@@ -71,7 +72,7 @@ def _normalize_env_dict(env: dict | None) -> dict[str, str]:
     if not env:
         return {}
     if not isinstance(env, dict):
-        logger.warning("docker_env is not a dict: %r", env)
+        logger.warning("docker_env is not a dict: %s", type(env).__name__)
         return {}
 
     normalized: dict[str, str] = {}
@@ -86,7 +87,7 @@ def _normalize_env_dict(env: dict | None) -> dict[str, str]:
             if isinstance(value, (int, float, bool)):
                 value = str(value)
             else:
-                logger.warning("Ignoring non-string docker_env value for %r: %r", key, value)
+                logger.warning("Ignoring non-string docker_env value for %r: %s", key, type(value).__name__)
                 continue
         normalized[key] = value
 
@@ -1001,7 +1002,9 @@ class DockerEnvironment(BaseEnvironment):
         _implicit_forward = {
             k for k in passthrough_keys if not _is_hermes_internal_secret(k)
         }
-        forward_keys = explicit_forward_keys | (_implicit_forward - _HERMES_PROVIDER_ENV_BLOCKLIST)
+        forward_keys = explicit_forward_keys | {
+            k for k in _implicit_forward if not _is_provider_env_blocklisted(k)
+        }
         hermes_env = _load_hermes_env_vars() if forward_keys else {}
         for key in sorted(forward_keys):
             value = os.getenv(key)

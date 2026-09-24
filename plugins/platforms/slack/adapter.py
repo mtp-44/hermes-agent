@@ -1729,9 +1729,12 @@ class SlackAdapter(BasePlatformAdapter):
             return
 
         try:
-            import httpx as _httpx
             from urllib.parse import unquote as _unquote
-            from tools.url_safety import is_safe_url as _is_safe_url
+            from gateway.platforms.base import _ssrf_redirect_guard
+            from tools.url_safety import (
+                create_ssrf_safe_async_client,
+                is_safe_url as _is_safe_url,
+            )
         except Exception:
             await super().send_multiple_images(chat_id, images, metadata, human_delay)
             return
@@ -1748,8 +1751,10 @@ class SlackAdapter(BasePlatformAdapter):
             file_uploads: List[Dict[str, Any]] = []
             initial_comment_parts: List[str] = []
             try:
-                async with _httpx.AsyncClient(
-                    timeout=30.0, follow_redirects=True
+                async with create_ssrf_safe_async_client(
+                    timeout=30.0,
+                    follow_redirects=True,
+                    event_hooks={"response": [_ssrf_redirect_guard]},
                 ) as http_client:
                     for image_url, alt_text in chunk:
                         if alt_text:
@@ -2149,7 +2154,7 @@ class SlackAdapter(BasePlatformAdapter):
         if not self._app:
             return SendResult(success=False, error="Not connected")
 
-        from tools.url_safety import is_safe_url
+        from tools.url_safety import create_ssrf_safe_async_client, is_safe_url
 
         if not is_safe_url(image_url):
             logger.warning("[Slack] Blocked unsafe image URL (SSRF protection)")
@@ -2158,8 +2163,6 @@ class SlackAdapter(BasePlatformAdapter):
             )
 
         try:
-            import httpx
-
             async def _ssrf_redirect_guard(response):
                 """Re-check redirect targets so public URLs cannot bounce into private IPs."""
                 from tools.url_safety import redirect_target_from_response
@@ -2168,7 +2171,7 @@ class SlackAdapter(BasePlatformAdapter):
                     raise ValueError("Blocked redirect to private/internal address")
 
             # Download the image first
-            async with httpx.AsyncClient(
+            async with create_ssrf_safe_async_client(
                 timeout=30.0,
                 follow_redirects=True,
                 event_hooks={"response": [_ssrf_redirect_guard]},
