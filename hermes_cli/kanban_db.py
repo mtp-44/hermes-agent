@@ -89,6 +89,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
+from hermes_cli._subprocess_compat import noninteractive_git_env
 from hermes_cli.sqlite_util import add_column_if_missing as _add_column_if_missing
 from toolsets import get_toolset_names
 
@@ -5292,6 +5293,8 @@ def _git_toplevel(path: Path) -> Optional[Path]:
             text=True,
             timeout=30,
             check=False,
+            stdin=subprocess.DEVNULL,
+            env=noninteractive_git_env(),
         )
     except Exception:
         return None
@@ -5314,6 +5317,8 @@ def _git_branch_exists(repo_root: Path, branch_name: str) -> bool:
             text=True,
             timeout=30,
             check=False,
+            stdin=subprocess.DEVNULL,
+            env=noninteractive_git_env(),
         )
     except Exception:
         return False
@@ -5328,6 +5333,8 @@ def _git_common_dir(path: Path) -> Optional[Path]:
             text=True,
             timeout=30,
             check=False,
+            stdin=subprocess.DEVNULL,
+            env=noninteractive_git_env(),
         )
     except Exception:
         return None
@@ -5347,6 +5354,8 @@ def _git_dir(path: Path) -> Optional[Path]:
             text=True,
             timeout=30,
             check=False,
+            stdin=subprocess.DEVNULL,
+            env=noninteractive_git_env(),
         )
     except Exception:
         return None
@@ -5366,6 +5375,8 @@ def _git_current_branch(path: Path) -> Optional[str]:
             text=True,
             timeout=30,
             check=False,
+            stdin=subprocess.DEVNULL,
+            env=noninteractive_git_env(),
         )
     except Exception:
         return None
@@ -5423,6 +5434,8 @@ def _ensure_git_worktree(repo_root: Path, target: Path, branch_name: str) -> Non
         text=True,
         timeout=60,
         check=False,
+        stdin=subprocess.DEVNULL,
+        env=noninteractive_git_env(),
     )
     if result.returncode != 0:
         stderr = (result.stderr or result.stdout or "").strip()
