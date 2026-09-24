@@ -604,3 +604,39 @@ async def test_agent_notification_redacts_output_and_command_when_redaction_disa
     text = adapter.handle_message.await_args.args[0].text
     assert _FAKE_KEY not in text
     assert "abcDEF123456abcDEF123456" not in text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "sessions",
+    [
+        # direct final-output send (text-only completion)
+        [SimpleNamespace(output_buffer=f"key={_FAKE_KEY}\n", exited=True, exit_code=0)],
+        # direct running-output send ("all" mode update)
+        [
+            SimpleNamespace(output_buffer=f"key={_FAKE_KEY}\n", exited=False, exit_code=None),
+            None,
+        ],
+    ],
+    ids=["completion", "running"],
+)
+async def test_direct_watcher_sends_redact_when_redaction_disabled(
+    monkeypatch, tmp_path, sessions
+):
+    import agent.redact as redact_mod
+    import tools.process_registry as pr_module
+
+    monkeypatch.setattr(redact_mod, "_REDACT_ENABLED", False)
+    monkeypatch.setattr(pr_module, "process_registry", _FakeRegistry(sessions))
+
+    async def _instant_sleep(*_a, **_kw):
+        pass
+    monkeypatch.setattr(asyncio, "sleep", _instant_sleep)
+
+    runner = _build_runner(monkeypatch, tmp_path, "all")
+    adapter = runner.adapters[Platform.TELEGRAM]
+
+    await runner._run_process_watcher(_watcher_dict())
+
+    assert adapter.send.await_count == 1
+    assert _FAKE_KEY not in adapter.send.await_args.args[1]
