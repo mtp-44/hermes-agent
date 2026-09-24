@@ -27,9 +27,12 @@ If you hit a blocker, stop and report the failing check, suspected cause, and sa
 - Runtime home: `/Users/mh/.hermes`
 - Gateway launch label: `ai.hermes.gateway`
 - Hermes is the front door; Open Brain is the durable memory/retrieval backend.
-- The hosted Open Brain MCP must expose `query_brain`, `analyze_brain_query`,
-  `capture_thought`, feedback, commitments, drift, graph/timeline, and related
-  tools.
+- The Open Brain MCP configured as `mcp_servers.open_brain` (local since the
+  2026-07-11 cutover, `http://localhost:8765`) must expose `query_brain`,
+  `analyze_brain_query` and `capture_thought` — `REQUIRED_OPENBRAIN_TOOLS` in
+  the guard. Since the 2026-08-31 simplify-in-place plan those three are the
+  default surface; the `x-brain-profile` header Hermes sends adds a few more
+  (e.g. `get_record_document`).
 
 ## Agent Rule
 
@@ -132,8 +135,8 @@ git push origin <tag-name>
   `.venv/bin/python scripts/openbrain_conformance_smoke.py`. Use `--live-smoke`
   when network access is available, and `--allow-dirty` only when auditing an
   intentional local worktree change.
-- Keep the Open Brain hosted MCP as canonical. Do not point Hermes at the local
-  experimental Open Brain MCP prototype.
+- Keep `mcp_servers.open_brain` pointed at the local Open Brain MCP it uses
+  since the 2026-07-11 cutover; an update must not repoint it.
 
 ## Update Steps
 
@@ -206,10 +209,10 @@ After dependencies, merge/replay, and restart:
    - `openbrain`
    - `disk`
    - `memory`
-3. Confirm Open Brain exposes at least the tool floor
-   (`EXPECTED_OPENBRAIN_TOOL_FLOOR` in the guard, currently 30). The live count
-   is expected to be at or above the floor and to grow over time, so a higher
-   number is fine — only a count below the floor is a regression.
+3. Confirm `openbrain-live-smoke` passes: Open Brain's `tools/list`, probed with
+   the same headers the gateway sends, includes every name in
+   `REQUIRED_OPENBRAIN_TOOLS`. The check is by name, not count — a count floor
+   of 30 failed every run from 2026-09-01 while Open Brain was healthy.
 4. Send a real Telegram smoke message and confirm the gateway logs an inbound
    message plus a response.
 5. Ask a recall question that should call `mcp_open_brain_query_brain`.
