@@ -573,6 +573,13 @@ def _sudo_stdin_block_result(description: str) -> dict:
 # Dangerous command patterns
 # =========================================================================
 
+# POSIX shell names as one shared alternation, used by every pipe/decode/
+# process-substitution/heredoc pattern and the `-c` rule below, so the list
+# cannot drift between sites again (the drift let `curl url | zsh`,
+# `dash -c ...` and `dash <<EOF` through while bash/sh were flagged).
+_SHELL_NAMES = ("bash", "sh", "zsh", "ksh", "dash")
+_SHELL_NAMES_RE = "|".join(_SHELL_NAMES)
+
 DANGEROUS_PATTERNS = [
     (r'\brm\s+(-[^\s]*\s+)*/', "delete in root path"),
     (r'\brm\s+-[^\s]*r', "recursive delete"),
@@ -614,28 +621,28 @@ DANGEROUS_PATTERNS = [
     (r'\bkillall\s+(-[^\s]*\s+)*-r\b', "kill processes by regex (killall -r)"),
     (r':\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:', "fork bomb"),
     # Any shell invocation via -c or combined flags like -lc, -ic, etc.
-    (r'\b(bash|sh|zsh|ksh)\s+-[^\s]*c(\s+|$)', "shell command via -c/-lc flag"),
+    (rf'\b(?:{_SHELL_NAMES_RE})\s+-[^\s]*c(\s+|$)', "shell command via -c/-lc flag"),
     (r'\b(python[23]?|perl|ruby|node)\s+-[ec]\s+', "script execution via -e/-c flag"),
-    (r'\b(curl|wget)\b.*\|\s*(?:[/\w]*/)?(?:ba)?sh(?:\s|$|-c)', "pipe remote content to shell"),
-    (r'\b(bash|sh|zsh|ksh)\s+<\s*<?\s*\(\s*(curl|wget)\b', "execute remote script via process substitution"),
+    (rf'\b(curl|wget)\b.*\|\s*(?:[/\w]*/)?(?:{_SHELL_NAMES_RE})(?:\s|$|-c)', "pipe remote content to shell"),
+    (rf'\b(?:{_SHELL_NAMES_RE})\s+<\s*<?\s*\(\s*(curl|wget)\b', "execute remote script via process substitution"),
     # Remote content executed via command substitution: eval/source/. $(curl ...)
     # or `wget ...`. Equivalent to piping remote content to a shell.
     (r'(?:\beval\b|\bsource\b|\.)\s*(?:\$\(\s*|`\s*)(?:curl|wget)\b', "execute remote content via command substitution"),
     # Decode-and-execute: encoded/transformed content piped to a shell. Without
     # these, `echo <base64> | base64 -d | bash` silently runs `rm -rf /` or any
     # other command because the raw text carries no dangerous keywords.
-    (r'\b(base64|base32|base16)\s+(?:-[dD]|--decode)\b.*\|\s*\b(bash|sh|zsh|ksh|dash)\b',
+    (rf'\b(base64|base32|base16)\s+(?:-[dD]|--decode)\b.*\|\s*\b(?:{_SHELL_NAMES_RE})\b',
      "pipe decoded content to shell (possible command obfuscation)"),
     # xxd reverse hex dump to shell (xxd uses -r for decode, not -d).
-    (r'\bxxd\s+-r\b.*\|\s*\b(bash|sh|zsh|ksh|dash)\b',
+    (rf'\bxxd\s+-r\b.*\|\s*\b(?:{_SHELL_NAMES_RE})\b',
      "pipe xxd-decoded content to shell (possible command obfuscation)"),
     # Character transformation via tr piped to shell:
     # `echo 'eq -pe v/' | tr 'eqv' 'rmf' | bash` decodes to `rm -rf /`.
-    (r'\becho\b[^|]*\|\s*\btr\b[^|]*\|\s*\b(bash|sh|zsh|ksh|dash)\b',
+    (rf'\becho\b[^|]*\|\s*\btr\b[^|]*\|\s*\b(?:{_SHELL_NAMES_RE})\b',
      "pipe tr-transformed output to shell (possible command obfuscation)"),
     # openssl decode piped to shell:
     # `echo <base64> | openssl base64 -d | bash` decodes arbitrary commands.
-    (r'\bopenssl\b.*\b(?:base64|enc)\b[^|]*\s+-[dD]\b[^|]*\|\s*\b(bash|sh|zsh|ksh|dash)\b',
+    (rf'\bopenssl\b.*\b(?:base64|enc)\b[^|]*\s+-[dD]\b[^|]*\|\s*\b(?:{_SHELL_NAMES_RE})\b',
      "pipe openssl-decoded content to shell (possible command obfuscation)"),
     (rf'\btee\b.*["\']?{_SENSITIVE_WRITE_TARGET}', "overwrite system file via tee"),
     (rf'>>?\s*["\']?{_SENSITIVE_WRITE_TARGET}', "overwrite system file via redirection"),
@@ -730,7 +737,7 @@ DANGEROUS_PATTERNS = [
     # inner commands may not individually match any dangerous pattern (e.g.
     # data-exfiltration pipelines using curl/cat) yet are still executed in
     # a full shell context.
-    (r'\b(bash|sh|zsh|ksh)\s+<<', "shell execution via heredoc"),
+    (rf'\b(?:{_SHELL_NAMES_RE})\s+<<', "shell execution via heredoc"),
     # Git destructive operations that can lose uncommitted work or rewrite
     # shared history. Not captured by rm/chmod/etc patterns.
     # `git reset --hard` accepts any unambiguous long-flag prefix (--h,
