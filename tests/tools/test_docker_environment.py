@@ -1840,3 +1840,16 @@ def test_execute_does_not_recover_on_ordinary_failure(monkeypatch):
     result = env.execute("badcmd")
     assert result.get("returncode") == 127
     assert "command not found" in result.get("output", "")
+
+
+def test_normalize_env_dict_warnings_do_not_log_values(caplog):
+    """Rejected docker_env values are logged by type, never by value (#102308)."""
+    import logging
+
+    secret = "sk-" + "RejectedDockerEnvSecret" * 2
+    with caplog.at_level(logging.WARNING, logger=docker_env.logger.name):
+        assert docker_env._normalize_env_dict([f"API_KEY={secret}"]) == {}
+        assert docker_env._normalize_env_dict({"API_KEY": {"v": secret}}) == {}
+    assert "docker_env is not a dict: list" in caplog.text
+    assert "API_KEY" in caplog.text
+    assert secret not in caplog.text

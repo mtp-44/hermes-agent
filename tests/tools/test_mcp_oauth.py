@@ -146,6 +146,31 @@ class TestHermesTokenStorage:
         import asyncio
         assert asyncio.run(storage.get_tokens()) is None
 
+    def test_corrupt_tokens_warning_does_not_log_token_material(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        """A pydantic ValidationError echoes the failing input; the corrupt-token
+        warning must log field names only, never the token itself (#102308)."""
+        import logging
+
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        storage = HermesTokenStorage("leaky-server")
+        secret = "tok-" + "S3cr3tAccessTok"  # short: pydantic truncates long reprs
+        d = tmp_path / "mcp-tokens"
+        d.mkdir(parents=True)
+        (d / "leaky-server.json").write_text(json.dumps({
+            "access_token": [secret],  # wrong type -> ValidationError
+            "token_type": "Bearer",
+            "refresh_token": {"nested": secret},
+        }))
+
+        with caplog.at_level(logging.WARNING, logger="tools.mcp_oauth"):
+            assert asyncio.run(storage.get_tokens()) is None
+
+        assert "Corrupt tokens" in caplog.text
+        assert "access_token" in caplog.text
+        assert secret not in caplog.text
+
     def test_corrupt_client_info_returns_none(self, tmp_path, monkeypatch):
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
         storage = HermesTokenStorage("bad-server")
