@@ -1075,6 +1075,177 @@ class TestForkBombDetection:
         assert dangerous is False
 
 
+class TestUnattendedPlatformApproval:
+    """Unattended programmatic platforms (webhook, msgraph_webhook) must never
+    park on a pending approval nobody can answer, nor silently run a flagged
+    command: they resolve instantly from ``approvals.unattended_mode``
+    (default deny). Interactive chat platforms (Telegram, Signal) and the
+    api_server ``/v1/runs`` approval bridge are unaffected.
+
+    Ported from upstream ef71f2cad8 (#37284).
+    """
+
+    def _isolate(self, monkeypatch, platform, *, exec_ask=True):
+        monkeypatch.setattr(approval_module, "_YOLO_MODE_FROZEN", False)
+        monkeypatch.setattr(approval_module, "_get_approval_mode", lambda: "manual")
+        monkeypatch.setattr(
+            approval_module, "_command_matches_permanent_allowlist", lambda c: False
+        )
+        monkeypatch.delenv("HERMES_CRON_SESSION", raising=False)
+        monkeypatch.delenv("HERMES_GATEWAY_SESSION", raising=False)
+        monkeypatch.delenv("HERMES_INTERACTIVE", raising=False)
+        monkeypatch.delenv("HERMES_YOLO_MODE", raising=False)
+        # The production gateway exports HERMES_EXEC_ASK=1 to every session.
+        if exec_ask:
+            monkeypatch.setenv("HERMES_EXEC_ASK", "1")
+        else:
+            monkeypatch.delenv("HERMES_EXEC_ASK", raising=False)
+        monkeypatch.setenv("HERMES_SESSION_PLATFORM", platform)
+        monkeypatch.setenv("HERMES_SESSION_KEY", f"test-{platform}-session")
+
+    def test_unattended_platforms_are_not_gateway_contexts(self, monkeypatch):
+        from tools.approval import (
+            _UNATTENDED_APPROVAL_PLATFORMS,
+            _is_gateway_approval_context,
+        )
+
+        assert _UNATTENDED_APPROVAL_PLATFORMS == {"webhook", "msgraph_webhook"}
+        for platform in _UNATTENDED_APPROVAL_PLATFORMS:
+            self._isolate(monkeypatch, platform)
+            assert _is_gateway_approval_context() is False, platform
+
+    def test_interactive_platforms_stay_gateway_contexts(self, monkeypatch):
+        from tools.approval import (
+            _is_gateway_approval_context,
+            _is_unattended_platform_approval_context,
+        )
+
+        for platform in ("telegram", "signal", "api_server"):
+            self._isolate(monkeypatch, platform)
+            assert _is_unattended_platform_approval_context() is False, platform
+            assert _is_gateway_approval_context() is True, platform
+
+    def test_webhook_dangerous_command_denied_instantly(self, monkeypatch):
+        from tools.approval import check_all_command_guards
+
+        self._isolate(monkeypatch, "webhook")
+        submitted = []
+        monkeypatch.setattr(approval_module, "submit_pending", lambda *a, **k: submitted.append(a))
+        monkeypatch.setattr(
+            approval_module, "_await_gateway_decision",
+            lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not wait")),
+        )
+        result = check_all_command_guards("sudo systemctl restart nginx", "local")
+        assert result["approved"] is False
+        assert "unattended platform (webhook)" in result["message"]
+        assert "approvals.unattended_mode" in result["message"]
+        assert submitted == []
+
+    def test_webhook_tirith_finding_denied(self, monkeypatch):
+        from tools.approval import check_all_command_guards
+
+        self._isolate(monkeypatch, "webhook")
+        with mock_patch(
+            "tools.tirith_security.check_command_security",
+            return_value={"action": "warn", "findings": [], "summary": "homograph url"},
+        ):
+            result = check_all_command_guards("curl http://example.com", "local")
+        assert result["approved"] is False
+        assert "unattended platform" in result["message"]
+
+    def test_webhook_safe_command_still_approves(self, monkeypatch):
+        from tools.approval import check_all_command_guards
+
+        self._isolate(monkeypatch, "webhook")
+        with mock_patch(
+            "tools.tirith_security.check_command_security",
+            return_value={"action": "allow", "findings": [], "summary": ""},
+        ):
+            result = check_all_command_guards("ls -la /tmp", "local")
+        assert result["approved"] is True
+
+    def test_webhook_opt_in_approves(self, monkeypatch):
+        from tools.approval import check_all_command_guards, check_dangerous_command
+
+        self._isolate(monkeypatch, "webhook")
+        monkeypatch.setattr(approval_module, "_get_unattended_approval_mode", lambda: "approve")
+        assert check_all_command_guards("sudo systemctl restart nginx", "local")["approved"] is True
+        assert check_dangerous_command("sudo systemctl restart nginx", "local")["approved"] is True
+
+    def test_unattended_mode_config_parsing(self):
+        from tools.approval import _get_unattended_approval_mode
+
+        with mock_patch("hermes_cli.config.load_config", return_value={}):
+            assert _get_unattended_approval_mode() == "deny"
+        with mock_patch(
+            "hermes_cli.config.load_config",
+            return_value={"approvals": {"unattended_mode": "approve"}},
+        ):
+            assert _get_unattended_approval_mode() == "approve"
+        with mock_patch(
+            "hermes_cli.config.load_config",
+            return_value={"approvals": {"unattended_mode": "bogus"}},
+        ):
+            assert _get_unattended_approval_mode() == "deny"
+
+    def test_legacy_check_dangerous_command_denies(self, monkeypatch):
+        from tools.approval import check_dangerous_command
+
+        self._isolate(monkeypatch, "msgraph_webhook")
+        monkeypatch.setattr(approval_module, "submit_pending", lambda *a, **k: pytest_fail())
+        result = check_dangerous_command("sudo systemctl restart nginx", "local")
+        assert result["approved"] is False
+        assert "msgraph_webhook" in result["message"]
+
+    def test_execute_code_denied_on_unattended_platform(self, monkeypatch):
+        from tools.approval import check_execute_code_guard
+
+        self._isolate(monkeypatch, "webhook")
+        result = check_execute_code_guard("import os", "local")
+        assert result["approved"] is False
+        assert "approvals.unattended_mode" in result["message"]
+
+    def test_elicitation_declined_on_unattended_platform(self, monkeypatch):
+        from tools.approval import request_elicitation_consent
+
+        self._isolate(monkeypatch, "webhook")
+        monkeypatch.setattr(
+            approval_module, "prompt_dangerous_approval",
+            lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not prompt")),
+        )
+        assert request_elicitation_consent("allow?", "mcp") == "decline"
+
+    def test_telegram_dangerous_command_still_asks_user(self, monkeypatch):
+        """Interactive Telegram approvals are NOT turned into instant denials."""
+        from tools.approval import check_all_command_guards
+
+        self._isolate(monkeypatch, "telegram")
+        with mock_patch(
+            "tools.tirith_security.check_command_security",
+            return_value={"action": "allow", "findings": [], "summary": ""},
+        ):
+            result = check_all_command_guards("sudo systemctl restart nginx", "local")
+        # No notify callback registered in this unit test, so the gateway path
+        # returns a pending approval for the user rather than an instant deny.
+        assert "unattended" not in (result.get("message") or "")
+        assert result.get("status") == "pending_approval"
+        assert result.get("approval_pending") is True
+
+    def test_cron_on_webhook_platform_uses_cron_mode(self, monkeypatch):
+        """Cron binds the platform for delivery only; cron_mode governs it."""
+        from tools.approval import check_all_command_guards
+
+        self._isolate(monkeypatch, "webhook", exec_ask=False)
+        monkeypatch.setenv("HERMES_CRON_SESSION", "1")
+        result = check_all_command_guards("sudo systemctl restart nginx", "local")
+        assert result["approved"] is False
+        assert "cron" in result["message"]
+
+
+def pytest_fail():
+    raise AssertionError("must not submit a pending approval")
+
+
 class TestGatewayProtection:
     """Prevent agents from starting the gateway outside systemd management."""
 
