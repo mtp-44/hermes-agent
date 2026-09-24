@@ -643,6 +643,15 @@ DANGEROUS_PATTERNS = [
     (r':\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:', "fork bomb"),
     # Any shell invocation via -c or combined flags like -lc, -ic, etc.
     (rf'\b(?:{_SHELL_NAMES_RE})\s+-[^\s]*c(\s+|$)', "shell command via -c/-lc flag"),
+    # Local widening (behaviour subset of upstream b90dbac1d6): options before
+    # -c, where `-o/+o/-O/+O <name>` and `--rcfile/--init-file <file>` take one
+    # operand, so `bash -o pipefail -c ...` and `bash --norc -c ...` are caught.
+    # Operands never start with - or +, which keeps the option loop
+    # unambiguous. Not after a `.`, so `./deploy.sh -v -c conf` is a script
+    # run, not `sh -c`.
+    (rf'(?<![.\w-])(?:{_SHELL_NAMES_RE})\s+'
+     r'(?:[-+]o\s+[^\s+-]\S*\s+|--(?:rcfile|init-file)\s+[^\s+-]\S*\s+|[-+]\S+\s+)+'
+     r'-[^\s]*c(\s+|$)', "shell command via -c/-lc flag"),
     (r'\b(python[23]?|perl|ruby|node)\s+-[ec]\s+', "script execution via -e/-c flag"),
     # Deno runs inline code through its bare `eval` subcommand. Its CLI is
     # `deno [OPTIONS] [COMMAND]`, so global options may precede the subcommand
@@ -808,9 +817,39 @@ DANGEROUS_PATTERNS = [
     # anywhere in the args, not just the first token — `perl -e '...'` (code
     # eval, no -i) does not trip because it has no `-...i` flag token.
     (rf'\b(?:perl|ruby)\b.*(?:^|\s)-[^\s]*i\b.*(?:{_HERMES_CONFIG_PATH}|{_HERMES_ENV_PATH})', "in-place edit of Hermes config/env (perl/ruby)"),
+    # Local widening of the "script execution via -e/-c flag" rule (behaviour
+    # subset of upstream b90dbac1d6, which unifies execution-bearing options
+    # with a parser this fork does not have). Listed after the in-place edit
+    # rules so `perl -i -pe ... ~/.bashrc` keeps its more specific reason.
+    # The command is lowercased before matching.
+    # Python: versioned names (python3.12), options before -c (`python -I -c`,
+    # `python -W ignore -c`) and -c combined with other flags (`python3 -Bc`).
+    # Only letters that never take an operand may precede the c, so
+    # `python -m pytest` and `python3 script.py` stay unprompted.
+    (r'(?<![.\w-])python(?:[23](?:\.\d+)?)?(?:\.exe)?\s+'
+     r'(?:-[wx]\s+[^\s-]\S*\s+|-[a-z]+\s+|--[a-z][\w-]*(?:=\S*)?\s+)*'
+     r'-[bdehiopqrsuvx]*c', "script execution via -e/-c flag"),
+    # Node: -e/-p/-pe/--eval/--print, after options (`node --no-warnings -e`,
+    # `node -r ts-node/register -e`). `node app.js` stops the option scan.
+    (r'(?<![.\w-])node(?:js)?(?:\.exe)?\s+'
+     r'(?:(?:-r|--require|--import|--loader|--experimental-loader|--conditions|--env-file|--title)\s+[^\s-]\S*\s+'
+     r'|-[a-z]+\s+|--[a-z][\w-]*(?:=\S*)?\s+)*'
+     r'(?:-[a-z]*[ep](?=[\s\'"=]|$)|--eval\b|--print\b)', "script execution via -e/-c flag"),
+    # Perl / Ruby: -e/-E combined with switches that take no operand (`perl
+    # -we`, `perl -lane`, `ruby -ne`), after other switches (`ruby -w -e`,
+    # `perl -Mstrict -e`, `ruby -I lib -e`), or with the code glued on
+    # (`perl -e'print 1'`).
+    (r'(?<![.\w-])(?:perl|ruby)(?:[\d.]+)?(?:\.exe)?\s+'
+     r'(?:-[icr]\s+[^\s-]\S*\s+|-\S+\s+)*'
+     r'-[acdlnpstuvwxy]*e(?=[\s\'"]|$)', "script execution via -e/-c flag"),
     # Script execution via heredoc — bypasses the -e/-c flag patterns above.
     # `python3 << 'EOF'` feeds arbitrary code via stdin without -c/-e flags.
     (r'\b(python[23]?|perl|ruby|node|bun|deno)\s+<<', "script execution via heredoc"),
+    # Local widening: options and an explicit `-` (read the program from
+    # stdin) before the heredoc: `python3 - <<EOF`, `python3 -u - <<EOF`,
+    # `python3.12 <<EOF`. `python3 script.py <<EOF` feeds data, not code.
+    (r'(?<![.\w-])(?:python(?:[23](?:\.\d+)?)?|perl|ruby|node)(?:\.exe)?\s+(?:-\S+\s+)*(?:-\s*)?<<',
+     "script execution via heredoc"),
     # Shell execution via heredoc — `bash <<'EOF' ... EOF` runs arbitrary
     # shell commands without triggering the `bash -c` pattern above. The
     # inner commands may not individually match any dangerous pattern (e.g.
