@@ -2415,6 +2415,16 @@ DEFAULT_CONFIG = {
         "timeout": 60,
         "cron_mode": "deny",
         "unattended_mode": "deny",
+        # User-defined deny rules: fnmatch globs matched against terminal
+        # commands. A match blocks the command unconditionally — BEFORE the
+        # --yolo / /yolo / mode=off bypass — making this the user-editable
+        # counterpart to the code-shipped hardline blocklist. Patterns are
+        # case-insensitive and must be quoted in YAML when they start with
+        # * or contain {}/!/: sequences. Example:
+        #   deny:
+        #     - "git push --force*"
+        #     - "*curl*|*sh*"
+        "deny": [],
         # When true, /reload-mcp asks the user to confirm before rebuilding
         # the MCP tool set for the active session.  Reloading invalidates
         # the provider prompt cache (tool schemas are baked into the system
@@ -2478,6 +2488,12 @@ DEFAULT_CONFIG = {
     "security": {
         "allow_private_urls": False,  # Allow requests to private/internal IPs (for OpenWrt, proxies, VPNs)
         "redact_secrets": True,
+        # Writes to agent-instruction files (AGENTS.md/CLAUDE.md/SOUL.md/
+        # .cursorrules, project-local .hermes config) always require human
+        # approval — even under auto-approve/yolo. Extra patterns are
+        # fnmatch globs matched against the basename (e.g. "*.mdc").
+        "protected_instruction_files": True,
+        "protected_instruction_extra_patterns": [],
         "tirith_enabled": True,
         "tirith_path": "tirith",
         "tirith_timeout": 5,

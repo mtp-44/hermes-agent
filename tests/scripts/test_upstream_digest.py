@@ -34,6 +34,12 @@ from scripts.upstream_digest import (
         "fix(deps): pin foo past CVE-2026-12345",
         "fix(gateway,security): scope tokens",
         "fix(security)!: breaking hardening",
+        "feat(approvals): user-defined deny rules that block commands even under yolo (#59164)",
+        "feat(approval): flag cloud metadata-endpoint (IMDS) credential fetches for approval",
+        "fix(approval): catch rm -rf behind env prefixes",
+        "fix(redact): mask Fireworks token prefixes",
+        "fix(redaction): scrub bot tokens from transport errors",
+        "fix(ssrf): pin DNS for web fetches",
     ],
 )
 def test_security_subjects_are_caught(subject):
@@ -53,6 +59,12 @@ def test_security_subjects_are_caught(subject):
         "chore: map RHODIZSECURITY contributor email",
         "fix(gateway): redact secrets in background process completion output",
         "Merge pull request #83404 from NousResearch/fix/blender-mcp-compromise",
+        # Gate scopes on no-behaviour types stay out, like `security` does.
+        "refactor(approval): compact the guard ladder",
+        "test(redact): cover env-name variants",
+        # Provider OAuth and the vault feature are deliberately not gate scopes.
+        "fix(auth): refresh the Codex token before expiry",
+        "feat(secrets): add a 1Password source",
     ],
 )
 def test_non_security_subjects_are_not(subject):

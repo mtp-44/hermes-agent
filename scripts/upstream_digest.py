@@ -10,9 +10,13 @@ i.e. files a merge could silently regress), and bulk-summarizes everything
 else by conventional-commit type.
 
 A commit counts as security when its type is `security`/`sec`, when its scope
-names `security` (`fix(security): …`, `ci(security): …`), or when its subject
-cites a GHSA or CVE id. Until 2026-09-24 only the `security` type counted, which
-reported 11 of ~50 (see docs/decisions/0006-security-sync-2026-09-24.md).
+names `security` (`fix(security): …`, `ci(security): …`) or one of the
+security-gate scopes in SECURITY_SCOPES (`fix(approval): …`, `fix(redact): …`),
+or when its subject cites a GHSA or CVE id. Until 2026-09-24 only the `security`
+type counted, which reported 11 of ~50 (see
+docs/decisions/0006-security-sync-2026-09-24.md); the gate scopes were added the
+same day after `feat(approvals)` deny rules and the IMDS approval flag turned up
+outside the report.
 
 Security commits are dropped from the report once handled:
 - landed: one of our own commits carries a `(cherry picked from commit <sha>)`
@@ -48,6 +52,10 @@ LANDED_RE = re.compile(
     r"(?:cherry picked from commit|Ported from upstream)\s+([0-9a-f]{7,40})", re.IGNORECASE
 )
 SECURITY_WORDS = {"security", "sec"}
+# Scopes naming a security gate: the command-approval gate and secret redaction.
+# `auth` and `secrets` stay out — upstream uses them mostly for provider OAuth
+# plumbing and the vault feature, which would bury the signal.
+SECURITY_SCOPES = SECURITY_WORDS | {"approval", "approvals", "redact", "redaction", "ssrf"}
 # Types whose commits change no behaviour, so a `security` scope on them is a
 # test or doc about security rather than a fix (e.g. `test(security): …`).
 NON_FIX_TYPES = {"refactor", "test", "tests", "docs", "doc", "style", "perf"}
@@ -77,7 +85,7 @@ def is_security(subject: str) -> bool:
         return False
     scope = match.group("scope") or ""
     tokens = {tok.lower() for tok in re.split(r"[,/\s]+", scope) if tok}
-    return bool(tokens & SECURITY_WORDS)
+    return bool(tokens & SECURITY_SCOPES)
 
 
 def landed_shas(bodies: str) -> set[str]:

@@ -33,6 +33,18 @@
 
 Upstream pulls under policy 1 (security fixes only). Newest first.
 
+### 2026-09-24 (later) — `sync/security-2026-09-24b`: approval-gate hardening
+
+Three upstream `feat`-typed gates taken as security under policy 1:
+protected agent-instruction files always need write approval (`fe66596df3`,
+plus the desktop/PWA approval-row follow-up `04154a37d3`), user-defined
+`approvals.deny` rules that block even under yolo (`e2fe529efb`), and
+`/deny <reason>` (`cb6c47af08`). This reverses HA-0006's "deferred feature"
+triage of `fe66596df3`. `scripts/upstream_digest.py` now counts the
+approval/redact/ssrf gate scopes as security, surfacing 85 undecided upstream
+commits for the next pass. Full account: ADR
+[`HA-0007`](decisions/0007-approval-gate-sync-2026-09-24.md).
+
 ### 2026-09-24 — PR #8 `sync/security-2026-09-24` merged into `main`
 
 30 upstream security fixes authored after the 2026-07-22 sync point: GitSpawn

@@ -47,6 +47,7 @@ ACP_REGISTRY_MANIFEST = REPO_ROOT / "acp_registry" / "agent.json"
 AUTHOR_MAP = {
     "f1aggo_macair@f1aggo-macairdeMacBook-Air.local": "flag0x369",  # 2026-09-24 security sync (upstream contributors/emails)
     "jrfbch@gmail.com": "jrfbch",  # 2026-09-24 security sync (upstream contributors/emails)
+    "260355617@qq.com": "loulanyue",  # 2026-09-24 approval-gate sync (/deny <reason>, cb6c47af08)
     "mark@mtp44.net": "mtp-44",
     "arthur.zhang@ingenico.com": "arthurzhang",  # 2026-07-02 security sync (Slack xapp- token redaction; c4f278c02 chain)
     "claudlos@agentmail.to": "claudlos",  # 2026-07-02 security sync (/resume IDOR + cloud-metadata floor + cron base_url exfil guard)
