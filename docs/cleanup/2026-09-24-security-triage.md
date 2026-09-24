@@ -36,6 +36,11 @@ Re-run by hand after triage, with the live `~/.hermes/config.yaml`:
 
 ### P1 — high
 
+> **Landed 2026-09-24 as `sec/p1-2026-09-24`:
+> [`HA-0009`](../decisions/0009-security-p1-port-2026-09-24.md).** Items 1–4
+> below are done except the partials listed there. The config mitigations
+> further down went live the same day.
+
 1. **Redactor ReDoS.** `fe0cfdf99c`, with its parents outside the list
    `13ad903a3c` (possessive rewrite) and `28524adb0e` (keyword pre-gate):
    replace `_CFG_DOTTED_RE` and make `_YAML_ASSIGN_RE` possessive (Python
