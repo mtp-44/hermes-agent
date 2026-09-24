@@ -110,6 +110,10 @@ const ApprovalBar: FC<{ request: ApprovalRequest; surface: 'floating' | 'inline'
   const busy = submitting !== null
   // false when the backend won't honor a permanent allow (tirith warning) → hide "Always allow".
   const allowPermanent = request.allowPermanent !== false
+  // false for once-only prompts (protected instruction files): the backend would
+  // grant a single operation anyway, so don't offer a session scope it discards.
+  const allowSession = request.allowSession !== false
+  const hasMoreOptions = allowSession || allowPermanent
   const hasCommand = request.command.trim().length > 0
 
   const respond = useCallback(
@@ -203,38 +207,44 @@ const ApprovalBar: FC<{ request: ApprovalRequest; surface: 'floating' | 'inline'
             {submitting === 'once' ? <Loader2 className="size-3 animate-spin" /> : copy.run}
             {submitting !== 'once' && <span className="text-[0.625rem] text-primary/60">{isMac ? '⌘⏎' : 'Ctrl⏎'}</span>}
           </Button>
-          <span aria-hidden className="w-px self-stretch bg-primary/20" />
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <Button
-                aria-label={copy.moreOptions}
-                className="h-full w-5 rounded-none px-0 text-primary hover:bg-primary/15 hover:text-primary"
-                disabled={busy}
-                size="xs"
-                variant="ghost"
-              >
-                <ChevronDown className="size-3" />
-              </Button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="start" className="min-w-44">
-              <DropdownMenuItem onSelect={() => void respond('session')}>{copy.allowSession}</DropdownMenuItem>
-              {allowPermanent && (
-                <DropdownMenuItem
-                  onSelect={() => {
-                    // Defer one tick so the menu fully unmounts before the dialog
-                    // mounts — otherwise Radix's focus-return races the dialog and
-                    // dismisses it via onInteractOutside.
-                    setTimeout(() => setConfirmAlways(true), 0)
-                  }}
-                >
-                  {copy.alwaysAllowMenu}
-                </DropdownMenuItem>
-              )}
-              <DropdownMenuItem onSelect={() => void respond('deny')} variant="destructive">
-                {copy.reject}
-              </DropdownMenuItem>
-            </DropdownMenuContent>
-          </DropdownMenu>
+          {hasMoreOptions && (
+            <>
+              <span aria-hidden className="w-px self-stretch bg-primary/20" />
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button
+                    aria-label={copy.moreOptions}
+                    className="h-full w-5 rounded-none px-0 text-primary hover:bg-primary/15 hover:text-primary"
+                    disabled={busy}
+                    size="xs"
+                    variant="ghost"
+                  >
+                    <ChevronDown className="size-3" />
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="start" className="min-w-44">
+                  {allowSession && (
+                    <DropdownMenuItem onSelect={() => void respond('session')}>{copy.allowSession}</DropdownMenuItem>
+                  )}
+                  {allowPermanent && (
+                    <DropdownMenuItem
+                      onSelect={() => {
+                        // Defer one tick so the menu fully unmounts before the dialog
+                        // mounts — otherwise Radix's focus-return races the dialog and
+                        // dismisses it via onInteractOutside.
+                        setTimeout(() => setConfirmAlways(true), 0)
+                      }}
+                    >
+                      {copy.alwaysAllowMenu}
+                    </DropdownMenuItem>
+                  )}
+                  <DropdownMenuItem onSelect={() => void respond('deny')} variant="destructive">
+                    {copy.reject}
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            </>
+          )}
         </div>
 
         <Button

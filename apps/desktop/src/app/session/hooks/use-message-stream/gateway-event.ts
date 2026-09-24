@@ -481,6 +481,8 @@ export function useGatewayEventHandler(deps: GatewayEventDeps) {
         setApprovalRequest({
           // false only when a tirith warning forbids it; backend omits the field otherwise.
           allowPermanent: payload?.allow_permanent !== false,
+          // false only for once-only prompts (protected instruction files); omitted otherwise.
+          allowSession: payload?.allow_session !== false,
           command,
           description,
           requestId,

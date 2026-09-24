@@ -7,6 +7,8 @@ approval:
   choose_short:    "      [o]한 번  |  [s]세션  |  [d]거부"
   prompt_long:     "      선택 [o/s/a/D]: "
   prompt_short:    "      선택 [o/s/D]: "
+  choose_once_only: "      [o]한 번  |  [d]거부"
+  prompt_once_only: "      선택 [o/D]: "
   timeout:         "      ⏱ 시간 초과 - 명령을 거부합니다"
   allowed_once:    "      ✓ 한 번 허용됨"
   allowed_session: "      ✓ 이 세션에서 허용됨"

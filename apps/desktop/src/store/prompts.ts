@@ -73,6 +73,9 @@ function keyedPromptStore<T extends KeyedPrompt>(): PromptStore<T> {
 export interface ApprovalRequest extends KeyedPrompt {
   // false when the backend won't honor a permanent allow (tirith warning) → hide "Always allow".
   allowPermanent?: boolean
+  // false when the backend grants this prompt once only (protected agent-instruction
+  // file writes) → hide "Allow this session".
+  allowSession?: boolean
   command: string
   description: string
   requestId?: string

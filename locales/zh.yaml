@@ -7,6 +7,8 @@ approval:
   choose_short:    "      [o]仅此一次  |  [s]本次会话  |  [d]拒绝"
   prompt_long:     "      选择 [o/s/a/D]: "
   prompt_short:    "      选择 [o/s/D]: "
+  choose_once_only: "      [o]仅此一次  |  [d]拒绝"
+  prompt_once_only: "      选择 [o/D]: "
   timeout:         "      ⏱ 超时 — 已拒绝命令"
   allowed_once:    "      ✓ 本次允许"
   allowed_session: "      ✓ 本次会话内允许"

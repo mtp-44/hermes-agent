@@ -122,3 +122,5 @@ c5e841ab0e behaviour choice, not taken: would cut Telegram/Signal/PWA approval w
 # 2026-09-24 P1 port (HA-0009): partial or superseded by local work
 2afb405337 lock-commit half landed locally in 1d2b123816 (outcomes committed under _lock); the withdraw half targets upstream-only server->client approval requests
 ba0f5839d4 not applicable: fixes the lowercase env-assignment regex from 8563fe3435, which P1 deliberately did not take (no value-shape gating here; it would mask `api_key = config.get(...)`)
+# 2026-09-24 P2 port (HA-0010)
+b90dbac1d6 behaviour subset taken locally in 73e493f9b3 (interpreter -c/eval widening); the full ~570-line execution-bearing-option rework, which pulls in d41f621071/98bf8b2073/d127fb2197, is not taken

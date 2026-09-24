@@ -183,6 +183,10 @@ The following patterns trigger approval prompts (defined in `tools/approval.py`)
 | `sed -i` / `sed --in-place` on `/etc/` | In-place edit of system config |
 | `pkill`/`killall` hermes/gateway | Self-termination prevention |
 | `gateway run` with `&`/`disown`/`nohup`/`setsid` | Prevents starting gateway outside service manager |
+| `docker stop/kill/restart`, `docker compose down/stop/kill/restart` | Container lifecycle (also catches global flags and `docker-compose`) |
+| `docker -H`/`--host`/`--context`, `DOCKER_HOST=`/`DOCKER_CONTEXT=` | Docker daemon redirect — the command targets a different (often remote) daemon |
+| `docker context use` | Switches the default daemon for all future docker commands |
+| `podman --remote`/`-r`/`--url`/`--connection`/`--identity`, `CONTAINER_HOST=` | Podman remote daemon redirect |
 
 :::info
 **Container bypass**: When running in `docker`, `singularity`, `modal`, or `daytona` backends, dangerous command checks are **skipped** because the container itself is the security boundary. Destructive commands inside a container can't harm the host.
@@ -229,6 +233,19 @@ command_allowlist:
 ```
 
 These patterns are loaded at startup and silently approved in all future sessions.
+
+The setting must be a list of strings. Legacy installs that stored a list as a
+quoted YAML/JSON string recover that list at load time and log a warning to
+re-save it with `hermes config edit`. Other malformed values (including a plain
+string such as `hermes config set command_allowlist "ls *"` writes) are ignored
+with a warning; they never become per-character approvals. Loading does not
+rewrite your configuration file.
+
+You can edit `command_allowlist` by hand while Hermes is running. Saving an
+"always" choice merges with the file instead of overwriting it: entries you
+added are kept, entries you removed are not written back and stop being honoured
+by that process from its next save or session load. Two live processes (the
+messaging gateway and the dashboard) merge the same way.
 
 :::tip
 Use `hermes config edit` to review or remove patterns from your permanent allowlist.

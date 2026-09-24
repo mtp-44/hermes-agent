@@ -588,3 +588,75 @@ class TestTelegramApprovalCallback:
         query.answer.assert_called_once()
         query.edit_message_text.assert_called_once()
         assert (tmp_path / ".update_response").read_text() == "n"
+
+
+# ===========================================================================
+# send_exec_approval — render only the scopes the prompt can grant
+# (upstream 02d8cbadec Telegram part + a31a31826c "Always" gating)
+# ===========================================================================
+
+class _RecButton:
+    def __init__(self, text, callback_data=None, **_kw):
+        self.text = text
+        self.callback_data = callback_data
+
+
+class _RecMarkup:
+    def __init__(self, rows):
+        self.inline_keyboard = [list(r) for r in rows]
+
+
+class TestTelegramExecApprovalScope:
+    @pytest.fixture
+    def adapter(self, monkeypatch):
+        import plugins.platforms.telegram.adapter as tg_mod
+        monkeypatch.setattr(tg_mod, "InlineKeyboardButton", _RecButton)
+        monkeypatch.setattr(tg_mod, "InlineKeyboardMarkup", _RecMarkup)
+        adapter = _make_adapter()
+        msg = MagicMock()
+        msg.message_id = 7
+        adapter._bot.send_message = AsyncMock(return_value=msg)
+        return adapter
+
+    @staticmethod
+    def _choices(adapter):
+        markup = adapter._bot.send_message.call_args[1]["reply_markup"]
+        return [b.callback_data.split(":")[1] for row in markup.inline_keyboard for b in row]
+
+    @pytest.mark.asyncio
+    async def test_default_offers_every_scope(self, adapter):
+        await adapter.send_exec_approval(
+            chat_id="12345", command="rm -rf /x", session_key="s",
+        )
+        assert self._choices(adapter) == ["once", "session", "always", "deny"]
+
+    @pytest.mark.asyncio
+    async def test_protected_file_prompt_offers_only_once_and_deny(self, adapter):
+        await adapter.send_exec_approval(
+            chat_id="12345", command="<write to AGENTS.md>", session_key="s",
+            allow_permanent=False, allow_session=False,
+        )
+        assert self._choices(adapter) == ["once", "deny"]
+
+    @pytest.mark.asyncio
+    async def test_tirith_only_prompt_has_no_always(self, adapter):
+        await adapter.send_exec_approval(
+            chat_id="12345", command="curl https://bit.ly/x", session_key="s",
+            allow_permanent=False,
+        )
+        assert self._choices(adapter) == ["once", "session", "deny"]
+
+    @pytest.mark.asyncio
+    async def test_scope_flags_coexist_with_request_binding(self, adapter):
+        await adapter.send_exec_approval(
+            chat_id="12345", command="<write to CLAUDE.md>", session_key="s",
+            allow_permanent=False, allow_session=False, request_id="req-1",
+        )
+        assert self._choices(adapter) == ["once", "deny"]
+        assert "req-1" in adapter._approval_request_ids.values()
+
+    def test_gateway_forwards_both_flags_to_telegram(self):
+        from gateway.run import _exec_approval_scope_kwargs
+        assert _exec_approval_scope_kwargs(
+            _make_adapter(), {"allow_permanent": False, "allow_session": False}
+        ) == {"allow_permanent": False, "allow_session": False}

@@ -17,6 +17,82 @@ def _ensure_redaction_enabled(monkeypatch):
 
 
 class TestKnownPrefixes:
+    def test_dotted_sk_and_prefixless_zhipu_keys_fully_masked_on_every_surface(self):
+        """A key whose body carries dots must never leave a cleartext tail, and the
+        prefix-less Zhipu ``id.secret`` shape must mask at all: on the terminal
+        ``cat`` path (code_file=True) and on the file-read path, where the mask
+        must be the non-reusable sentinel (upstream 7b57cda6d9 / c2aa2ff25f)."""
+        from agent.redact import redact_terminal_output
+
+        dotted_sk = "sk-sp-" + "ABCDEFGH1234567890" + "." + "abcdefgh1234567890_XYZ-0987654321"
+        multi_dot_sk = "sk-ws-" + "H.EEPXREE.pFau.MEUCIQC6UnD-jj2a" + "ABCDEFGHIJKLMNOP"
+        zhipu = "50aaed1234567890abcdef1234567890" + "." + "ZpSh99AbCdEfGh12"
+        yaml = f"a:\n  api_key: {dotted_sk}\nb:\n  api_key: {zhipu}\nc:\n  api_key: {multi_dot_sk}\n"
+        tails = ("abcdefgh1234567890_XYZ", "ZpSh99", "MEUCIQC6UnD", "EEPXREE")
+
+        term = redact_terminal_output(yaml, "cat /tmp/keys.yaml")
+        for secret_tail in tails:
+            assert secret_tail not in term, term
+
+        read = redact_sensitive_text(yaml, file_read=True)
+        assert "«redacted:sk-…»" in read and "«redacted-secret»" in read, read
+        for secret_tail in tails:
+            assert secret_tail not in read, read
+
+        # Bare, no key context, and followed by sentence punctuation.
+        prose = redact_sensitive_text(f"use {dotted_sk}. or {zhipu}.", force=True)
+        for secret_tail in ("abcdefgh1234567890_XYZ", "ZpSh99AbCdEfGh12"):
+            assert secret_tail not in prose, prose
+        assert prose.endswith(".")
+
+    def test_display_mask_survives_second_pass(self):
+        """Display masks (``sk-pro...EFGH``) contain ``..``, which no real key
+        does: a second pass over an already-masked token must be a no-op, not
+        ``***`` (tool_executor redacts browser_type args, then
+        build_tool_preview redacts them again; upstream aebc71d78c)."""
+        assert redact_sensitive_text("sk-pro...EFGH", force=True) == "sk-pro...EFGH"
+        dotted_sk = "sk-sp-ABCDEFGH1234567890.abcdefgh1234567890_XYZ-0987654321"
+        once = redact_sensitive_text(f"key {dotted_sk} end", force=True)
+        assert "abcdefgh1234567890_XYZ" not in once
+        assert redact_sensitive_text(once, force=True) == once
+
+    def test_dotted_and_prefixless_matchers_leave_benign_tokens_alone(self):
+        """The Zhipu matcher is provider-shaped, not a generic dotted-token sweep:
+        content-hash filenames (incl. ``<sha>.bundle`` / ``<md5>.sqlite3``), bare
+        git shas, short ``sk-`` fragments and a 31-char id stay byte-identical."""
+        from agent.redact import redact_terminal_output
+
+        benign = (
+            "blob 0123456789abcdef0123456789abcdef.png\n"
+            "git bundle create 0123456789abcdef0123456789abcdef01234567.bundle\n"
+            "/cache/0123456789abcdef0123456789abcdef.sqlite3\n"
+            "cp " + "a1" * 18 + ".example\n"
+            "commit 0123456789abcdef0123456789abcdef01234567\n"
+            "sk-short sk-abc.def\n"
+            "release=" + "a" * 31 + ".ZpSh99AbCdEfGh12\n"
+        )
+        assert redact_terminal_output(benign, "git log --stat") == benign
+        assert redact_sensitive_text(benign, file_read=True) == benign
+
+    def test_dotted_and_zhipu_scans_stay_linear(self):
+        """No nested unbounded repeats: long dot runs and hex/dot soups that
+        almost match must not stall the redactor (upstream c2aa2ff25f)."""
+        import time
+
+        payloads = [
+            "sk-" + "a." * 10_000,
+            "sk-a" + ".." * 10_000 + "b",
+            "sk-abcdefghi." * 1_600,
+            ".sk-a" * 4_000,
+            ("0123456789abcdef" * 2 + ".") * 600,
+            ("0123456789abcdef" * 2 + "." + "A" * 15 + "_") * 400,
+            "0123456789abcdef" * 1_300 + ".abcdefghijklmnopq",
+        ]
+        for text in payloads:
+            t0 = time.perf_counter()
+            redact_sensitive_text(text, force=True)
+            assert time.perf_counter() - t0 < 1.0, repr(text[:40])
+
     def test_openai_sk_key(self):
         text = "Using key sk-proj-abc123def456ghi789jkl012"
         result = redact_sensitive_text(text)
@@ -197,6 +273,95 @@ class TestBareSecretEnvSuffixes:
         assert "mysecret" not in result
         assert "opaqueValue" not in result
         assert "username=bob" in result
+
+
+class TestControlCharSplitTokens:
+    """Tokens split by control/zero-width chars must still mask (upstream #77484)."""
+
+    def _assert_split_masked(self, text, tok):
+        # Bare token (no KEY= context). Assert the LONGEST FRAGMENT is gone: the
+        # token is split in the input, so the whole contiguous ``tok`` is absent
+        # from ANY output, even one that leaks every fragment verbatim.
+        result = redact_sensitive_text(text, force=True)
+        longest = max(tok[10:], tok[:10], key=len)
+        assert longest not in result, result
+
+    def test_newline_split_token_masks(self):
+        tok = "ghp_abcdef1234567890ABCDEF1234567890abcdef"
+        self._assert_split_masked(f"{tok[:10]}\n{tok[10:]}", tok)
+
+    def test_crlf_wrapped_token_masks(self):
+        # A key whose tail wraps onto the next line of terminal output.
+        tok = "sk-proj-abcd1234EFGH5678ijkl9012MNOP3456qrst"
+        self._assert_split_masked(f"OPENAI: {tok[:10]}\r\n{tok[10:]}\n", tok)
+
+    def test_esc_split_token_masks(self):
+        tok = "ghp_abcdef1234567890ABCDEF1234567890abcdef"
+        self._assert_split_masked(f"{tok[:10]}\x1b{tok[10:]}", tok)
+
+    def test_zero_width_split_token_masks(self):
+        tok = "ghp_abcdef1234567890ABCDEF1234567890abcdef"
+        self._assert_split_masked(f"{tok[:10]}​{tok[10:]}", tok)
+
+    def test_complete_token_does_not_swallow_next_line(self):
+        # A COMPLETE token at end-of-line followed by ordinary text must not be
+        # joined across the newline: the ordinary prefix pass masks the token;
+        # joining would swallow the adjacent line (browser accessibility
+        # annotations regressed this way upstream, aecb9ca894).
+        tok = "ghp_" + "F" * 29
+        text = f"text: Token: {tok}\nbutton [ref=e3]: Copy\n"
+        result = redact_sensitive_text(text, force=True)
+        assert "F" * 20 not in result
+        assert "button" in result
+        assert "ref=e3" in result
+
+    def test_selfmatching_head_esc_split_tail_masked(self):
+        # The HEAD fragment alone already matches the prefix rule but the tail
+        # doesn't: for non-newline controls the join must still run, or the
+        # tail leaks. Only LINE-crossing spans skip the join (9377c5a539).
+        head = "sk-" + "a" * 15
+        tail = "b" * 25
+        result = redact_sensitive_text(head + "\x1b" + tail, force=True)
+        assert tail not in result
+        assert "a" * 12 not in result
+
+    def test_env_dump_lines_not_joined(self):
+        # Control-stripping must not join unrelated env lines into one match.
+        env_dump = (
+            "HOME=/home/user\n"
+            "ELEVENLABS_API_KEY=sk_abc123def456ghi789jkl\n"
+            "EXA_API_KEY=exa_XY789abcdef01234\n"
+            "SHELL=/bin/bash\n"
+        )
+        result = redact_sensitive_text(env_dump, force=True)
+        assert "SHELL=/bin/bash" in result
+        assert "HOME=/home/user" in result
+        assert "EXA_API_KEY=" in result
+        assert "sk_abc123def456ghi789jkl" not in result
+        assert "exa_XY789abcdef01234" not in result
+
+    def test_file_read_split_token_gets_sentinel(self):
+        tok = "ghp_abcdef1234567890ABCDEF1234567890abcdef"
+        result = redact_sensitive_text(f"{tok[:10]}\x1b{tok[10:]}", file_read=True)
+        assert tok[10:] not in result
+        assert "«redacted:ghp_…»" in result
+
+    def test_control_char_split_scan_stays_linear(self):
+        """20 KB of control chars / newlines interleaved with token-looking
+        fragments must not stall the redactor (it runs on every log line)."""
+        import time
+
+        payloads = [
+            "sk-ab\x1b" * 3400,
+            "ghp_abcdefghi\n" * 1450,
+            "sk-abcdefghij\x1bKLMN\n​ghp_x\r" * 700,
+            "\x1b\n\x00​" * 5000,
+            ("ghp_" + "a" * 9 + "\x1b") * 1500,
+        ]
+        for text in payloads:
+            t0 = time.perf_counter()
+            redact_sensitive_text(text, force=True)
+            assert time.perf_counter() - t0 < 1.0, repr(text[:40])
 
 
 class TestKeywordWordBoundary:

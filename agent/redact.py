@@ -7,6 +7,7 @@ Short tokens (< 18 chars) are fully masked. Longer tokens preserve
 the first 6 and last 4 characters for debuggability.
 """
 
+import bisect
 import logging
 import os
 import re
@@ -71,7 +72,15 @@ _REDACT_ENABLED = os.getenv("HERMES_REDACT_SECRETS", "true").lower() in {"1", "t
 
 # Known API key prefixes -- match the prefix + contiguous token chars
 _PREFIX_PATTERNS = [
-    r"sk-[A-Za-z0-9_-]{10,}",           # OpenAI / OpenRouter / Anthropic (sk-ant-*)
+    # OpenAI / OpenRouter / Anthropic (sk-ant-*). Some provider-issued ``sk-``
+    # keys carry dot-delimited body segments (Alibaba ``sk-sp-…``/``sk-ws-…``).
+    # Each unit is one body char optionally preceded by a single dot, so the
+    # body ends on its last non-dot char (sentence punctuation is never
+    # consumed) and can never span ``..``: the ``sk-pro...EFGH`` display mask is
+    # left alone by a second redaction pass instead of collapsing to ``***``.
+    # No nested unbounded repeat: the dot is optional and followed by exactly
+    # one body char, so every position has one parse (linear).
+    r"sk-[A-Za-z0-9_-](?:\.?[A-Za-z0-9_-]){9,}",
     r"ghp_[A-Za-z0-9]{10,}",            # GitHub PAT (classic)
     r"github_pat_[A-Za-z0-9_]{10,}",    # GitHub PAT (fine-grained)
     r"gho_[A-Za-z0-9]{10,}",            # GitHub OAuth access token
@@ -176,21 +185,36 @@ _CFG_SECRET_WORD_RE = re.compile(_SECRET_CFG_NAMES, re.IGNORECASE)
 # Namespaced (dotted) key: the secret word may sit anywhere in a dotted path.
 # NOTE(perf): possessive quantifiers (py3.11+) replace the nested quantifier
 # ``(?:[A-Za-z0-9_\-]+\.)+`` (exponential backtracking on long dotted runs).
-# The ``*`` runs bordering {_SECRET_CFG_NAMES} must stay backtrackable
-# (secret words are matchable by the class, e.g. ``app.api.key=…``).
 # The lookbehind anchors each attempt to the start of a key run: without it,
-# ``re.sub`` retries the backtrackable ``*`` prefix at every byte of a long
-# non-matching dotted run, making the sub quadratic whenever the text contains
-# a secret keyword anywhere (the ``_CFG_SECRET_WORD_RE`` pre-gate only skips
-# secret-free text). Match set is unchanged — any match starting mid-run
-# implies a leftmost match starting at the run start. The leading ``\.*+``
-# keeps that true for runs that open with a dot (``.app.password=…``): the
-# pre-lookbehind pattern matched those from the first segment, and without it
-# the anchored form would skip them.
+# ``re.sub`` retries the prefix at every byte of a long non-matching dotted
+# run. Match set is unchanged — any match starting mid-run implies a leftmost
+# match starting at the run start. The leading ``\.*+`` keeps that true for
+# runs that open with a dot (``.app.password=…``).
+#
+# Keyword runs (``token`` * N, ``api.key`` * N): the key is ``<class>*`` KEYWORD
+# ``<class>*``, and a backtrackable ``*`` on each side of the keyword retried
+# every keyword occurrence in the run, each with a fresh scan to the end of the
+# run — quadratic, and cubic for ``api.key`` runs (keyword x dot x tail scan),
+# ~2 s at 5 KB. Both key shapes are now committed per attempt, which is exact
+# because the key always ends where the ``[A-Za-z0-9_.\-]`` run ends: the only
+# character a key can hold outside that class is the space in ``api key``, so
+# once the rightmost keyword occurrence is found, every other occurrence ends
+# the key at the same place and can only fail the same way.
+#   1. ``<segment>.<…keyword…>``: atomic ``(?>…)`` over the part after the first
+#      dot, so the greedy prefix settles on the rightmost keyword once.
+#   2. ``<…keyword…>.<segment>``: needs SOME keyword followed later by a dot with
+#      a char after it; the leftmost keyword leaves the longest tail, so commit
+#      to it (atomic lazy prefix) and check the tail with one lookahead. The
+#      ``api key`` spelling crosses the space, so it gets its own branch (2b);
+#      branch 2a uses the keyword set without the space separator.
+_SECRET_CFG_NAMES_NOSPACE = r"(?:api[_.\-]?key|token|secret|passwd|password|credential|auth)"
 _CFG_DOTTED_RE = re.compile(
     rf"(?<![A-Za-z0-9_.\-])"
-    rf"(\.*+[A-Za-z0-9_\-]++\.[A-Za-z0-9_.\-]*{_SECRET_CFG_NAMES}[A-Za-z0-9_.\-]*+"
-    rf"|[A-Za-z0-9_.\-]*{_SECRET_CFG_NAMES}[A-Za-z0-9_.\-]*\.[A-Za-z0-9_.\-]++)"
+    rf"(\.*+[A-Za-z0-9_\-]++\.(?>[A-Za-z0-9_.\-]*{_SECRET_CFG_NAMES}[A-Za-z0-9_.\-]*+)"
+    rf"|(?>[A-Za-z0-9_.\-]*?{_SECRET_CFG_NAMES_NOSPACE})"
+    rf"(?=[A-Za-z0-9_.\-]*?\.[A-Za-z0-9_.\-])[A-Za-z0-9_.\-]*+"
+    rf"|[A-Za-z0-9_.\-]*?api[ ]key"
+    rf"(?=[A-Za-z0-9_.\-]*?\.[A-Za-z0-9_.\-])[A-Za-z0-9_.\-]*+)"
     rf"={_CFG_VALUE}",
     re.IGNORECASE,
 )
@@ -199,8 +223,11 @@ _CFG_DOTTED_RE = re.compile(
 # gutter (``5|password=…`` from read_file, ``6:password=…`` from grep -n).
 # Anchored at ``^`` without it, the rendered read of a secret-bearing file
 # leaked what the raw text masked.
+# The key is atomic ``(?>…)`` for the reason given at _CFG_DOTTED_RE (keyword
+# runs were quadratic); here ``api.key`` / ``api key`` are the spellings that
+# cross the ``[A-Za-z0-9_\-]`` class.
 _CFG_ANCHORED_RE = re.compile(
-    rf"(^[ \t]*{_LINE_NUMBER_GUTTER}(?:export[ \t]+)?[A-Za-z0-9_\-]*{_SECRET_CFG_NAMES}[A-Za-z0-9_\-]*)={_CFG_VALUE}",
+    rf"(^[ \t]*{_LINE_NUMBER_GUTTER}(?:export[ \t]+)?(?>[A-Za-z0-9_\-]*{_SECRET_CFG_NAMES}[A-Za-z0-9_\-]*))={_CFG_VALUE}",
     re.IGNORECASE | re.MULTILINE,
 )
 
@@ -214,9 +241,11 @@ _CFG_ANCHORED_RE = re.compile(
 # the ``token`` keyword. Quoted values defer to _JSON_FIELD_RE via the lookahead.
 _YAML_CFG_NAMES = r"(?:api[ _.\-]?key|token|secret|passwd|password|credential)"
 # NOTE(perf): possessive quantifiers wherever the successor is disjoint; the
-# leading ``[A-Za-z0-9_.\-]*`` stays backtrackable (see _CFG_DOTTED_RE note).
+# key is atomic ``(?>…)`` so a keyword run (``token`` * N) settles on its
+# rightmost keyword once instead of retrying every occurrence (quadratic; exact
+# for the reason given at _CFG_DOTTED_RE).
 _YAML_ASSIGN_RE = re.compile(
-    rf"(^[ \t]*+{_LINE_NUMBER_GUTTER}[A-Za-z0-9_.\-]*{_YAML_CFG_NAMES}[A-Za-z0-9_.\-]*+)(:[ \t]*+)(?!['\"])([^\s&]++)",
+    rf"(^[ \t]*+{_LINE_NUMBER_GUTTER}(?>[A-Za-z0-9_.\-]*{_YAML_CFG_NAMES}[A-Za-z0-9_.\-]*+))(:[ \t]*+)(?!['\"])([^\s&]++)",
     re.IGNORECASE | re.MULTILINE,
 )
 # Quoted YAML scalar (``api_key: "value"`` / ``password: 'value'``). The
@@ -225,7 +254,7 @@ _YAML_ASSIGN_RE = re.compile(
 # Only run for secret-bearing files (``secret_file=True``): elsewhere a quoted
 # value next to a keyword is as likely to be code or prose.
 _YAML_QUOTED_ASSIGN_RE = re.compile(
-    rf"(^[ \t]*+{_LINE_NUMBER_GUTTER}[A-Za-z0-9_.\-]*{_YAML_CFG_NAMES}[A-Za-z0-9_.\-]*+)(:[ \t]*+)(['\"])([^'\"\n]+)\3",
+    rf"(^[ \t]*+{_LINE_NUMBER_GUTTER}(?>[A-Za-z0-9_.\-]*{_YAML_CFG_NAMES}[A-Za-z0-9_.\-]*+))(:[ \t]*+)(['\"])([^'\"\n]+)\3",
     re.IGNORECASE | re.MULTILINE,
 )
 
@@ -528,10 +557,89 @@ _FORM_BODY_RE = re.compile(
     r"^[A-Za-z_][A-Za-z0-9_.-]*=[^&\s]*(?:&[A-Za-z_][A-Za-z0-9_.-]*=[^&\s]*)+$"
 )
 
+# Control / zero-width characters that can split a token body: a secret
+# emitted as ``sk-abc\x1bdef…`` or wrapped as ``ghp_abc\n123…`` escapes the
+# contiguous prefix regexes (upstream #77484). Used by
+# _mask_control_split_tokens. A single character class, so it is linear.
+_CONTROL_CHARS_RE = re.compile(
+    r"[\x00-\x1f\x7f\u200b-\u200f\u2028-\u202f\u2060\ufeff]"
+)
+
+# Union of every _PREFIX_PATTERNS body class. A control-stripped match may only
+# span original chars that are token-body or control chars. ``=`` is excluded on
+# purpose: a KEY=value separator must never let a match span unrelated text.
+_TOKEN_BODY_CHARS = frozenset(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-."
+)
+
 # Compile known prefix patterns into one alternation
 _PREFIX_RE = re.compile(
     r"(?<![A-Za-z0-9_-])(" + "|".join(_PREFIX_PATTERNS) + r")(?![A-Za-z0-9_-])"
 )
+
+# Zhipu API keys use an unprefixed ``id.secret`` form. Deliberately
+# provider-shaped rather than a generic high-entropy dotted-token rule: the id
+# is exactly 32 lowercase hex chars and the secret a run of at least 16
+# alphanumerics, so content-hash filenames (``<sha>.bundle``, ``<md5>.sqlite3``)
+# never match. A trailing dot is allowed only when it ends the token (sentence
+# punctuation), not when another segment follows (local: upstream leaves a
+# sentence-final key in cleartext). Fixed-width id + one unbounded run: linear.
+_ZHIPU_API_KEY_RE = re.compile(
+    r"(?<![A-Za-z0-9_.-])([0-9a-f]{32}\.[A-Za-z0-9]{16,})(?![A-Za-z0-9_-]|\.[A-Za-z0-9_-])"
+)
+
+
+def _mask_control_split_tokens(text: str, mask_fn) -> str:
+    """Mask tokens whose body is split by control/zero-width characters.
+
+    A credential like ``sk-abc\\x1bdef456…`` or ``ghp_abc\\n123def…`` has its
+    body interrupted, so the contiguous _PREFIX_RE cannot match it and the
+    secret leaks verbatim (upstream #77484). Match on a control-stripped copy
+    (where the token is contiguous again, even when each fragment alone is too
+    short), then mask the corresponding span in the ORIGINAL, but only when
+    that span holds solely token-body and control chars, so a match can never
+    cross into another line's unrelated text (``EXA_API_KEY=…``).
+
+    Linear: one strip, one index map, one _PREFIX_RE scan of the stripped copy,
+    and per-match work bounded by the match span (matches do not overlap).
+    """
+    ctrl = [m.start() for m in _CONTROL_CHARS_RE.finditer(text)]
+    if not ctrl:
+        return text
+    stripped = _CONTROL_CHARS_RE.sub("", text)
+    # Control i sits before ``ctrl[i] - i`` stripped chars, so stripped index j
+    # maps back to ``j + (controls at or before j)`` in the original.
+    ctrl_at = [pos - i for i, pos in enumerate(ctrl)]
+
+    def orig(j: int) -> int:
+        return j + bisect.bisect_right(ctrl_at, j)
+
+    matches = []
+    for m in _PREFIX_RE.finditer(stripped):
+        start_orig = orig(m.start(1))
+        end_orig = orig(m.end(1) - 1) + 1
+        span = text[start_orig:end_orig]
+        # A span crossing a LINE boundary whose fragment already matches on its
+        # own is left to the ordinary prefix pass: joining would swallow the
+        # next line (``ghp_<tok>\nbutton [ref=e3]`` masked ``button``). Non-line
+        # controls (ESC, ZWSP, …) never legitimately sit between a token and
+        # prose, so there the join proceeds even when the head self-matches, or
+        # the tail of ``sk-<head>\x1b<tail>`` would leak.
+        if ("\n" in span or "\r" in span) and _PREFIX_RE.search(span):
+            continue
+        # Reject spans holding a non-token char, and matches running into a
+        # ``KEY=`` name (a real value is followed by a newline/space/end).
+        if (all(c in _TOKEN_BODY_CHARS or _CONTROL_CHARS_RE.match(c) for c in span)
+                and (end_orig >= len(text) or text[end_orig] != "=")):
+            matches.append((start_orig, end_orig, mask_fn(m.group(1))))
+    if not matches:
+        return text
+    parts, last = [], 0
+    for start_orig, end_orig, replacement in matches:
+        parts += (text[last:start_orig], replacement)
+        last = end_orig
+    parts.append(text[last:])
+    return "".join(parts)
 
 
 def mask_secret(
@@ -879,7 +987,16 @@ def redact_sensitive_text(
     # Known prefixes (sk-, ghp_, etc.) — gate on substring presence
     if _has_known_prefix_substring(text):
         _prefix_sub = _mask_token_nonreusable if file_read else _mask_token
+        # Control/zero-width chars (\n, \r, ESC, U+200B, …) can split a token
+        # body so _PREFIX_RE cannot match across them (upstream #77484).
+        text = _mask_control_split_tokens(text, _prefix_sub)
         text = _PREFIX_RE.sub(lambda m: _prefix_sub(m.group(1)), text)
+
+    # Prefix-less Zhipu ``id.secret`` keys (upstream 7b57cda6d9 / aebc71d78c).
+    # Runs on every surface, code files included, like the prefix pass.
+    if "." in text:
+        _zhipu_sub = _mask_token_nonreusable if file_read else _mask_token
+        text = _ZHIPU_API_KEY_RE.sub(lambda m: _zhipu_sub(m.group(1)), text)
 
     # ENV assignments: OPENAI_API_KEY=***  (skip for code files — false positives)
     if not code_file:

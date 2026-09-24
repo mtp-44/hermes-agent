@@ -394,6 +394,10 @@ _HARDLINE_SYSTEM_DIRS = (
 # catching `rm -rf "/"`.
 _RM_FLAG_PREFIX = _CMDPOS + r'rm\s+(-[^\s]*\s+)*'
 
+# Package-manager global options, each optionally taking ONE non-dash operand
+# (`npm --prefix DIR`, `pip --proxy URL`, `yarn --cwd DIR`).
+_PKG_OPTS = r'(?:-[^\s]+(?:\s+[^-\s][^\s]*)?\s+)*'
+
 HARDLINE_PATTERNS = [
     # rm recursive targeting the root filesystem or protected roots.
     # `${HOME}` brace form and quoted paths (`rm -rf "/"`, `rm -rf "$HOME"`)
@@ -639,7 +643,32 @@ DANGEROUS_PATTERNS = [
     (r':\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:', "fork bomb"),
     # Any shell invocation via -c or combined flags like -lc, -ic, etc.
     (rf'\b(?:{_SHELL_NAMES_RE})\s+-[^\s]*c(\s+|$)', "shell command via -c/-lc flag"),
+    # Local widening (behaviour subset of upstream b90dbac1d6): options before
+    # -c, where `-o/+o/-O/+O <name>` and `--rcfile/--init-file <file>` take one
+    # operand, so `bash -o pipefail -c ...` and `bash --norc -c ...` are caught.
+    # Operands never start with - or +, which keeps the option loop
+    # unambiguous. Not after a `.`, so `./deploy.sh -v -c conf` is a script
+    # run, not `sh -c`.
+    (rf'(?<![.\w-])(?:{_SHELL_NAMES_RE})\s+'
+     r'(?:[-+]o\s+[^\s+-]\S*\s+|--(?:rcfile|init-file)\s+[^\s+-]\S*\s+|[-+]\S+\s+)+'
+     r'-[^\s]*c(\s+|$)', "shell command via -c/-lc flag"),
     (r'\b(python[23]?|perl|ruby|node)\s+-[ec]\s+', "script execution via -e/-c flag"),
+    # Deno runs inline code through its bare `eval` subcommand. Its CLI is
+    # `deno [OPTIONS] [COMMAND]`, so global options may precede the subcommand
+    # (`deno -q eval`, `deno --quiet eval`, `deno -L debug eval`, `deno -Ldebug
+    # eval`, `deno --log-level=debug eval`); `-L/--log-level` is the one global
+    # that takes a separate value. The FIRST positional word decides: `deno run
+    # eval.ts` stays data, and a lone `--` stops the option scan (`deno --
+    # eval` runs nothing). Local addition: `deno repl --eval[-file]` also runs
+    # its argument before the prompt opens. Verified against deno 2.9.0.
+    (_CMDPOS + r'(?:[^\s;&|`]*/)?deno(?:\.exe)?\s+'
+     r'(?:(?:-l|--log-level)\s+[^\s-]\S*\s+|-[^\s-]\S*\s+|--[^\s=-]\S*\s+)*'
+     r'(?:eval\b|repl\b[^;&|\n]*\s--eval(?:-file)?\b)', "script execution via -e/-c flag"),
+    # Bun evaluates inline code with -e/--eval (and -p/--print, which also
+    # prints the result). Global options may precede it, each with at most
+    # one operand (`bun --cwd ./app -e ...`).
+    (_CMDPOS + r'(?:[^\s;&|`]*/)?bun(?:\.exe)?\s+(?:-[^\s]+(?:\s+[^-\s][^\s]*)?\s+)*'
+     r'(?:-e|--eval|-p|--print)(?:\s|=|$)', "script execution via -e/-c flag"),
     (rf'\b(curl|wget)\b.*\|\s*{_PIPE_SHELL_LAUNCHER_RE}(?:[/\w]*/)?(?:{_PIPE_SHELL_NAMES_RE})(?:\s|$|-c)', "pipe remote content to shell"),
     (rf'\b(?:{_SHELL_NAMES_RE})\s+<\s*<?\s*\(\s*(curl|wget)\b', "execute remote script via process substitution"),
     # Remote content executed via command substitution: eval/source/. $(curl ...)
@@ -684,8 +713,40 @@ DANGEROUS_PATTERNS = [
     # containers without approval.  These are agent-initiated lifecycle operations
     # that should always require user consent, just like `hermes gateway restart`
     # already does for the gateway process.
-    (r'\bdocker\s+compose\s+(restart|stop|kill|down)\b', "docker compose restart/stop/kill/down (container lifecycle)"),
-    (r'\bdocker\s+(restart|stop|kill)\b', "docker restart/stop/kill (container lifecycle)"),
+    # Docker/Podman daemon redirect — global flags or env prefixes that point
+    # the CLI at a DIFFERENT daemon, often a remote host over ssh/tcp.  A
+    # command that looks local (`docker -H ssh://prod stop app`) silently
+    # operates on remote infrastructure, so any docker/podman invocation
+    # carrying a redirect requires approval regardless of subcommand.  The
+    # redirect flag must appear in the global-flag position (before the
+    # subcommand) and -H/--host/--context must carry a value, which keeps
+    # `docker -h` (help) and subcommand flags like `docker run -h <hostname>`
+    # out of the deny.  Listed BEFORE the lifecycle rules so a redirected
+    # lifecycle command surfaces the more specific "remote daemon" reason.
+    # Inspired by Claude Code 2.1.214, which added permission prompts for
+    # docker/podman commands carrying daemon-redirect flags (--url,
+    # --connection, --identity, remote mode).
+    (r'\bdocker\s+(?:-{1,2}\S+(?:[=\s]\S+)?\s+)*(?:-h|--host)[=\s]+\S+',
+     "docker with remote daemon redirect (-H/--host)"),
+    (r'\bdocker\s+(?:-{1,2}\S+(?:[=\s]\S+)?\s+)*(?:-c|--context)[=\s]+\S+',
+     "docker with daemon redirect (--context: alternate daemon)"),
+    (r'\bdocker\s+context\s+use\b',
+     "docker context use (switches default daemon for future commands)"),
+    (r'\bpodman\s+(?:-{1,2}\S+(?:[=\s]\S+)?\s+)*(?:--url|--connection|--identity)[=\s]+\S+',
+     "podman with remote daemon redirect (--url/--connection/--identity)"),
+    (r'\bpodman\s+(?:-{1,2}\S+(?:[=\s]\S+)?\s+)*(?:-r\b|--remote\b)',
+     "podman remote mode (-r/--remote: remote daemon)"),
+    (r'\b(?:docker_host|docker_context|container_host|container_connection)=\S+',
+     "docker/podman daemon redirect via environment (DOCKER_HOST/CONTAINER_HOST)"),
+    # Allow global flags between `docker`/`compose` and the verb (e.g.
+    # `docker compose -f prod.yml down`, `docker --log-level debug stop app`)
+    # and the legacy hyphenated `docker-compose` binary, so a flag can't slip
+    # a lifecycle command past the guard — same treatment as the `hermes ...
+    # gateway` pattern above.
+    (r'\bdocker(?:-compose|\s+compose)\s+(?:-{1,2}\S+(?:[=\s]\S+)?\s+)*(restart|stop|kill|down)\b',
+     "docker compose restart/stop/kill/down (container lifecycle)"),
+    (r'\bdocker\s+(?:-{1,2}\S+(?:[=\s]\S+)?\s+)*(restart|stop|kill)\b',
+     "docker restart/stop/kill (container lifecycle)"),
     # Gateway protection: never start gateway outside systemd management
     (r'gateway\s+run\b.*(&\s*$|&\s*;|\bdisown\b|\bsetsid\b)', "start gateway outside systemd (use 'systemctl --user restart hermes-gateway')"),
     (r'\bnohup\b.*gateway\s+run\b', "start gateway outside systemd (use 'systemctl --user restart hermes-gateway')"),
@@ -738,7 +799,11 @@ DANGEROUS_PATTERNS = [
     # ~/.ssh/authorized_keys` cannot silently plant login commands or keys.
     (rf'\bsed\s+-[^\s]*i.*(?:{_USER_SENSITIVE_WRITE_TARGET})[^\s"\']*', "in-place edit of sensitive credential/SSH/shell-rc path"),
     (rf'\bsed\s+--in-place\b.*(?:{_USER_SENSITIVE_WRITE_TARGET})[^\s"\']*', "in-place edit of sensitive credential/SSH/shell-rc path (long flag)"),
-    (rf'\b(?:perl|ruby)\b.*(?:^|\s)-[^\s]*i\b.*(?:{_USER_SENSITIVE_WRITE_TARGET})[^\s"\']*', "in-place edit of sensitive credential/SSH/shell-rc path (perl/ruby)"),
+    # The first ``-i`` flag is committed atomically: if any in-place flag precedes
+    # the target, the first one does, so the match set is unchanged, but a run of
+    # thousands of ``-I`` options no longer backtracks through every flag and
+    # rescans for the target each time (quadratic: 5,000 ``-I`` took ~1.2 s).
+    (rf'\b(?:perl|ruby)\b(?>.*?(?:^|\s)-[^\s]*i\b).*(?:{_USER_SENSITIVE_WRITE_TARGET})[^\s"\']*', "in-place edit of sensitive credential/SSH/shell-rc path (perl/ruby)"),
     (rf'\bsed\s+-[^\s]*i.*\s{_SYSTEM_CONFIG_PATH}', "in-place edit of system config"),
     (rf'\bsed\s+--in-place\b.*\s{_SYSTEM_CONFIG_PATH}', "in-place edit of system config (long flag)"),
     # In-place edit of a Hermes-managed security file (~/.hermes/config.yaml or
@@ -755,10 +820,40 @@ DANGEROUS_PATTERNS = [
     # backup suffix (`perl -i.bak`). Match any flag token containing `i`
     # anywhere in the args, not just the first token — `perl -e '...'` (code
     # eval, no -i) does not trip because it has no `-...i` flag token.
-    (rf'\b(?:perl|ruby)\b.*(?:^|\s)-[^\s]*i\b.*(?:{_HERMES_CONFIG_PATH}|{_HERMES_ENV_PATH})', "in-place edit of Hermes config/env (perl/ruby)"),
+    (rf'\b(?:perl|ruby)\b(?>.*?(?:^|\s)-[^\s]*i\b).*(?:{_HERMES_CONFIG_PATH}|{_HERMES_ENV_PATH})', "in-place edit of Hermes config/env (perl/ruby)"),
+    # Local widening of the "script execution via -e/-c flag" rule (behaviour
+    # subset of upstream b90dbac1d6, which unifies execution-bearing options
+    # with a parser this fork does not have). Listed after the in-place edit
+    # rules so `perl -i -pe ... ~/.bashrc` keeps its more specific reason.
+    # The command is lowercased before matching.
+    # Python: versioned names (python3.12), options before -c (`python -I -c`,
+    # `python -W ignore -c`) and -c combined with other flags (`python3 -Bc`).
+    # Only letters that never take an operand may precede the c, so
+    # `python -m pytest` and `python3 script.py` stay unprompted.
+    (r'(?<![.\w-])python(?:[23](?:\.\d+)?)?(?:\.exe)?\s+'
+     r'(?:-[wx]\s+[^\s-]\S*\s+|-[a-z]+\s+|--[a-z][\w-]*(?:=\S*)?\s+)*'
+     r'-[bdehiopqrsuvx]*c', "script execution via -e/-c flag"),
+    # Node: -e/-p/-pe/--eval/--print, after options (`node --no-warnings -e`,
+    # `node -r ts-node/register -e`). `node app.js` stops the option scan.
+    (r'(?<![.\w-])node(?:js)?(?:\.exe)?\s+'
+     r'(?:(?:-r|--require|--import|--loader|--experimental-loader|--conditions|--env-file|--title)\s+[^\s-]\S*\s+'
+     r'|-[a-z]+\s+|--[a-z][\w-]*(?:=\S*)?\s+)*'
+     r'(?:-[a-z]*[ep](?=[\s\'"=]|$)|--eval\b|--print\b)', "script execution via -e/-c flag"),
+    # Perl / Ruby: -e/-E combined with switches that take no operand (`perl
+    # -we`, `perl -lane`, `ruby -ne`), after other switches (`ruby -w -e`,
+    # `perl -Mstrict -e`, `ruby -I lib -e`), or with the code glued on
+    # (`perl -e'print 1'`).
+    (r'(?<![.\w-])(?:perl|ruby)(?:[\d.]+)?(?:\.exe)?\s+'
+     r'(?:-[icr]\s+[^\s-]\S*\s+|-\S+\s+)*'
+     r'-[acdlnpstuvwxy]*e(?=[\s\'"]|$)', "script execution via -e/-c flag"),
     # Script execution via heredoc — bypasses the -e/-c flag patterns above.
     # `python3 << 'EOF'` feeds arbitrary code via stdin without -c/-e flags.
-    (r'\b(python[23]?|perl|ruby|node)\s+<<', "script execution via heredoc"),
+    (r'\b(python[23]?|perl|ruby|node|bun|deno)\s+<<', "script execution via heredoc"),
+    # Local widening: options and an explicit `-` (read the program from
+    # stdin) before the heredoc: `python3 - <<EOF`, `python3 -u - <<EOF`,
+    # `python3.12 <<EOF`. `python3 script.py <<EOF` feeds data, not code.
+    (r'(?<![.\w-])(?:python(?:[23](?:\.\d+)?)?|perl|ruby|node)(?:\.exe)?\s+(?:-\S+\s+)*(?:-\s*)?<<',
+     "script execution via heredoc"),
     # Shell execution via heredoc — `bash <<'EOF' ... EOF` runs arbitrary
     # shell commands without triggering the `bash -c` pattern above. The
     # inner commands may not individually match any dangerous pattern (e.g.
@@ -818,6 +913,16 @@ DANGEROUS_PATTERNS = [
     # into a single -X token. Catches the same threat class.
     (r'\bsudo\b[^;|&\n]*?\s+-[a-z]*[sa][a-z]*\b',
      "sudo with combined-flag privilege escalation"),
+    # Package-manager uninstall commands remove installed software outside the
+    # current project (notably `npm uninstall -g`, `brew uninstall`). Installs
+    # and updates stay unprompted. _CMDPOS-anchored so quoted prose such as
+    # `git commit -m "document npm uninstall usage"` is data; the option group
+    # also swallows one operand (`npm --prefix DIR uninstall x`).
+    (_CMDPOS + r'npm\s+' + _PKG_OPTS + r'(?:uninstall|unlink|remove|rm|r|un)\b', "package manager uninstall"),
+    (_CMDPOS + r'pnpm\s+' + _PKG_OPTS + r'(?:uninstall|remove|rm|un)\b', "package manager uninstall"),
+    (_CMDPOS + r'yarn\s+' + _PKG_OPTS + r'(?:global\s+)?(?:uninstall|remove)\b', "package manager uninstall"),
+    (_CMDPOS + r'pip(?:3(?:\.\d+)?)?\s+' + _PKG_OPTS + r'uninstall\b', "package manager uninstall"),
+    (_CMDPOS + r'brew\s+' + _PKG_OPTS + r'(?:uninstall|remove|rm)\b', "package manager uninstall"),
 ]
 
 
@@ -1364,7 +1469,11 @@ def _iter_shell_command_starts(command: str):
         # `echo "{ reboot; }"` — never registers a command start. That is the
         # whole reason this lives in the quote-aware tokenizer instead of the
         # flat `_CMDPOS` regex, which cannot tell quoted text from real syntax.
-        if ch in ("(", "{"):
+        # `${` opens a parameter expansion, not a brace group: a start marked
+        # inside it would split `${IFS}` and defeat the IFS collapse in
+        # normalization (matters for the faithful variant, which marks starts
+        # BEFORE normalizing).
+        if ch in ("(", "{") and not (ch == "{" and i > 0 and command[i - 1] == "$"):
             starts.append(i + 1)
             i += 1
             continue
@@ -1400,8 +1509,24 @@ def _iter_shell_command_starts(command: str):
             yield start
 
 
-def _mark_command_starts(command: str) -> str:
-    """Insert a newline before each real (quote-aware) command start.
+def _splice(command: str, edits) -> str:
+    """Apply sorted, non-overlapping ``(start, end, text)`` edits in one pass.
+
+    Re-slicing the whole string per edit is quadratic in the number of edits
+    (a heredoc of quoted lines has one command start per line).
+    """
+    parts: list[str] = []
+    previous = 0
+    for start, end, text in edits:
+        parts.append(command[previous:start])
+        parts.append(text)
+        previous = end
+    parts.append(command[previous:])
+    return "".join(parts)
+
+
+def _mark_command_starts(command: str, marker: str = "\n") -> str:
+    """Insert *marker* (a newline) before each real (quote-aware) command start.
 
     ``\\n`` is already a ``_CMDPOS`` separator, so this rewrites subshell
     ``(cmd)`` and brace-group ``{ cmd; }`` openers — which the flat pattern
@@ -1412,15 +1537,11 @@ def _mark_command_starts(command: str) -> str:
     ``--title "block (reboot)"`` are left exactly as-is.
     """
     # Collect the (whitespace-skipped) start offsets, drop 0 (already anchored
-    # by ``^``), and splice a newline in front of each — right-to-left so the
-    # earlier offsets stay valid as we mutate.
+    # by ``^``), and splice the marker in front of each in one pass.
     offsets = sorted(o for o in _iter_shell_command_starts(command) if o > 0)
     if not offsets:
         return command
-    out = command
-    for offset in reversed(offsets):
-        out = out[:offset] + "\n" + out[offset:]
-    return out
+    return _splice(command, [(o, o, marker) for o in offsets])
 
 
 def _iter_shell_command_word_spans(command: str):
@@ -1484,18 +1605,48 @@ def _command_detection_variants(command: str):
     if marked != normalized and marked not in seen:
         seen.add(marked)
         yield marked
+    # Both variants above track quotes on NORMALIZED text, where `\"` has
+    # already become `"`. That flips quote parity: in `echo "a\"b"; (reboot)`
+    # the `(reboot)` start sat "inside" a phantom quote, no start was marked
+    # and the hardline floor let it through. Mark starts on the RAW command
+    # (the author's quote state), then normalize. The marker is " \n" so a
+    # preceding literal backslash (`printf \\<newline>reboot`) cannot eat it
+    # as a `\<newline>` line continuation.
+    faithful = _normalize_command_for_detection(_mark_command_starts(command, marker=" \n"))
+    if faithful not in seen:
+        seen.add(faithful)
+        yield faithful
     # Shell quoting/escaping can spell a dangerous executable name in pieces
     # (for example r\m or r''m). Keep that deobfuscation scoped to command
     # words so similarly shaped arguments do not become false positives.
-    for word_start, word_end, word in _iter_shell_command_word_spans(normalized):
-        deobfuscated = _deobfuscate_shell_word_for_detection(word)
-        if not deobfuscated or deobfuscated == word:
-            continue
-        variant = normalized[:word_start] + deobfuscated + normalized[word_end:]
-        if variant in seen:
-            continue
-        seen.add(variant)
-        yield variant
+    #
+    # One variant with EVERY command word deobfuscated, not one full-length
+    # variant per word: a heredoc of quoted lines has hundreds of quoted
+    # command words, and per-word variants made both detection passes
+    # O(words * len) (16 KB took ~4.6 s, 33 KB ~19 s, holding the GIL).
+    # Spans can nest (a `$(...)` command word inside another command word),
+    # so apply them sorted; a span overlapping an applied one waits for the
+    # next round, giving one combined variant per nesting level.
+    pending = sorted(
+        (word_start, word_end, deobfuscated)
+        for word_start, word_end, word in _iter_shell_command_word_spans(normalized)
+        if (deobfuscated := _deobfuscate_shell_word_for_detection(word)) and deobfuscated != word
+    )
+    while pending:
+        applied: list[tuple[int, int, str]] = []
+        carry: list[tuple[int, int, str]] = []
+        cursor = 0
+        for span in pending:
+            if span[0] < cursor:
+                carry.append(span)
+            else:
+                applied.append(span)
+                cursor = span[1]
+        variant = _splice(normalized, applied)
+        if variant not in seen:
+            seen.add(variant)
+            yield variant
+        pending = carry
 
 
 # -------------------------------------------------------------------------
@@ -2164,18 +2315,74 @@ def _command_matches_permanent_allowlist(command: str) -> bool:
 # Config persistence for permanent allowlist
 # =========================================================================
 
+_MALFORMED_ALLOWLIST = object()
+
+
+def _parse_command_allowlist(raw):
+    """Return ``command_allowlist`` as a set of strings, or ``_MALFORMED_ALLOWLIST``.
+
+    ``set()`` over a scalar string yields one entry per character, and a lone
+    ``*`` entry is an fnmatch glob matching every command. ``hermes config set
+    command_allowlist "ls *"`` writes exactly such a string. Old config-set
+    versions serialised list values as scalar strings, so a string that parses
+    as a YAML list of strings is recovered (with a warning); any other shape
+    is ignored and grants nothing. Nothing is rewritten on read.
+    """
+    legacy = isinstance(raw, str)
+    if legacy:
+        import yaml
+        try:
+            raw = yaml.safe_load(raw)
+        except yaml.YAMLError:
+            raw = False
+    if raw is None and not legacy:
+        raw = []
+    if not isinstance(raw, list) or any(not isinstance(item, str) for item in raw):
+        logger.warning(
+            "Ignoring malformed command_allowlist; configure a list of strings."
+        )
+        return _MALFORMED_ALLOWLIST
+    if legacy:
+        logger.warning(
+            "Recovered legacy string command_allowlist; re-save it as a list of strings."
+        )
+    return set(raw)
+
+
+def _read_permanent_allowlist() -> set:
+    """``command_allowlist`` from config as a set (empty on malformed input)."""
+    from hermes_cli.config import load_config_readonly
+    parsed = _parse_command_allowlist(load_config_readonly().get("command_allowlist"))
+    return set() if parsed is _MALFORMED_ALLOWLIST else parsed
+
+
+# What ``command_allowlist`` held the last time this process synchronised with
+# the file. Everything in ``_permanent_approved`` beyond it is an approval THIS
+# process made, and is the only thing a save is entitled to add: the difference
+# separates "the operator granted this here" from "this was on disk when we
+# started, and may since have been revoked". Two live processes share one
+# config.yaml (the messaging gateway and the dashboard tui_gateway), so each
+# keeps its own baseline and merges instead of overwriting.
+_permanent_baseline: set = set()
+
+
 def load_permanent_allowlist() -> set:
     """Load permanently allowed command patterns from config.
 
     Also syncs them into the approval module so is_approved() works for
-    patterns added via 'always' in a previous session.
+    patterns added via 'always' in a previous session. A re-load (tui_gateway
+    runs one per session init) drops entries the operator removed on disk
+    since the last sync, and keeps approvals this process made that are not on
+    disk yet.
     """
+    global _permanent_baseline
     try:
-        from hermes_cli.config import load_config
-        config = load_config()
-        patterns = set(config.get("command_allowlist", []) or [])
-        if patterns:
-            load_permanent(patterns)
+        patterns = _read_permanent_allowlist()
+        with _lock:
+            own = _permanent_approved - _permanent_baseline
+            _permanent_approved.clear()
+            _permanent_approved.update(patterns | own)
+            _permanent_baseline = set(patterns)
         return patterns
     except Exception as e:
         logger.warning("Failed to load permanent allowlist: %s", e)
@@ -2183,12 +2390,38 @@ def load_permanent_allowlist() -> set:
 
 
 def save_permanent_allowlist(patterns: set):
-    """Save permanently allowed command patterns to config."""
+    """Save permanently allowed command patterns to config, reconciling with the file.
+
+    ``command_allowlist`` is a file an operator edits by hand; removing an entry
+    there is the documented way to withdraw a standing approval. Writing the
+    in-memory set straight back deleted entries added on disk since the last
+    load and resurrected the ones removed (and let the gateway and the
+    tui_gateway overwrite each other). The result written is ``what is on disk
+    now`` plus ``what this process approved since its own baseline``; revoked
+    entries are also dropped from ``_permanent_approved`` so ``is_approved()``
+    stops honouring them. ``patterns`` can only ADD. Nothing re-reads the file
+    on the approval hot path, so a revocation takes effect on the next load or
+    save. A malformed on-disk value is left alone (the approval still holds for
+    this process) rather than replaced.
+    """
+    global _permanent_baseline
     try:
         from hermes_cli.config import load_config, save_config
         config = load_config()
-        config["command_allowlist"] = list(patterns)
-        save_config(config)
+        on_disk = _parse_command_allowlist(config.get("command_allowlist"))
+        if on_disk is _MALFORMED_ALLOWLIST:
+            logger.warning(
+                "Not saving command_allowlist: the value in config.yaml is not a "
+                "list of strings; fix it with `hermes config edit`."
+            )
+            return
+        with _lock:
+            merged = on_disk | (set(patterns) - _permanent_baseline)
+            config["command_allowlist"] = sorted(merged)
+            save_config(config)
+            _permanent_baseline = set(merged)
+            _permanent_approved.clear()
+            _permanent_approved.update(merged)
     except Exception as e:
         logger.warning("Could not save allowlist: %s", e)
 
@@ -2200,16 +2433,24 @@ def save_permanent_allowlist(patterns: set):
 def prompt_dangerous_approval(command: str, description: str,
                               timeout_seconds: int | None = None,
                               allow_permanent: bool = True,
-                              approval_callback=None) -> str:
+                              approval_callback=None,
+                              *, allow_session: bool = True) -> str:
     """Prompt the user to approve a dangerous command (CLI only).
 
     Args:
         allow_permanent: When False, hide the [a]lways option (used when
             tirith warnings are present, since broad permanent allowlisting
             is inappropriate for content-level security findings).
+        allow_session: When False, hide the [s]ession option too: the
+            caller grants one operation and re-asks next time (the
+            protected agent-instruction gate in ``tools/file_tools.py``).
+            Offering a scope the caller discards makes every later write
+            re-prompt and reads as a broken gate. Only once/deny remain.
         approval_callback: Optional callback registered by the CLI for
             prompt_toolkit integration. Signature:
-            (command, description, *, allow_permanent=True) -> str.
+            (command, description, *, allow_permanent=True,
+            allow_session=True) -> str. ``allow_session`` is only passed
+            when False, so legacy callbacks keep working by default.
 
     Returns: 'once', 'session', 'always', or 'deny'
     """
@@ -2224,10 +2465,15 @@ def prompt_dangerous_approval(command: str, description: str,
     display_command = redact_sensitive_text(command)
     display_description = redact_sensitive_text(description)
 
+    once_only = not allow_session
+
     if approval_callback is not None:
         try:
+            callback_kwargs = {"allow_permanent": allow_permanent}
+            if once_only:
+                callback_kwargs["allow_session"] = False
             return approval_callback(display_command, display_description,
-                                     allow_permanent=allow_permanent)
+                                     **callback_kwargs)
         except Exception as e:
             logger.error("Approval callback failed: %s", e, exc_info=True)
             return "deny"
@@ -2269,7 +2515,9 @@ def prompt_dangerous_approval(command: str, description: str,
             print(f"  {t('approval.dangerous_header', description=display_description)}")
             print(f"      {display_command}")
             print()
-            if allow_permanent:
+            if once_only:
+                print(t("approval.choose_once_only"))
+            elif allow_permanent:
                 print(t("approval.choose_long"))
             else:
                 print(t("approval.choose_short"))
@@ -2280,7 +2528,10 @@ def prompt_dangerous_approval(command: str, description: str,
 
             def get_input():
                 try:
-                    prompt = t("approval.prompt_long") if allow_permanent else t("approval.prompt_short")
+                    if once_only:
+                        prompt = t("approval.prompt_once_only")
+                    else:
+                        prompt = t("approval.prompt_long") if allow_permanent else t("approval.prompt_short")
                     result["choice"] = input(prompt).strip().lower()
                 except (EOFError, OSError):
                     result["choice"] = ""
@@ -2297,6 +2548,11 @@ def prompt_dangerous_approval(command: str, description: str,
             if choice in {'o', 'once'}:
                 print(t("approval.allowed_once"))
                 return "once"
+            elif once_only:
+                # No scope beyond this one operation is on offer; anything
+                # but an explicit "once" is a denial.
+                print(t("approval.denied"))
+                return "deny"
             elif choice in {'s', 'session'}:
                 print(t("approval.allowed_session"))
                 return "session"
@@ -3158,7 +3414,15 @@ def check_all_command_guards(command: str, env_type: str,
     combined_desc = "; ".join(desc for _, desc, _ in warnings)
     primary_key = warnings[0][0]
     all_keys = [key for key, _, _ in warnings]
-    has_tirith = any(is_t for _, _, is_t in warnings)
+    # "Always" is offered when at least one warning is a dangerous-pattern
+    # key that the persistence layer would actually allowlist permanently.
+    # Pure-tirith findings are session-max by design (no broad permanent
+    # allowlisting of content-level security findings), so a prompt with
+    # ONLY tirith warnings keeps Always hidden. Mixed prompts (pattern +
+    # tirith) used to hide it too, although choosing it persists the
+    # pattern key and downgrades the tirith key to session (see both
+    # "always" branches below): the UI was stricter than the persistence.
+    has_permanent_capable = any(not is_t for _, _, is_t in warnings)
 
     # Gateway/async approval — block the agent thread until the user
     # responds with /approve or /deny, mirroring the CLI's synchronous
@@ -3187,9 +3451,14 @@ def check_all_command_guards(command: str, env_type: str,
                 "pattern_key": primary_key,
                 "pattern_keys": all_keys,
                 "description": redact_sensitive_text(combined_desc),
-                # Mirror the CLI's allow_permanent gate: a tirith warning downgrades
-                # "always" to session scope below, so the UI must not offer it.
-                "allow_permanent": not has_tirith,
+                # Mirror the CLI's allow_permanent gate: tirith warnings are
+                # downgraded to session scope below, so Always is offered only
+                # when some warning can actually be persisted permanently.
+                "allow_permanent": has_permanent_capable,
+                # Session approval is valid for every command prompt,
+                # including tirith-only ones. Adapters render the session
+                # tier from this, independently of the permanent tier.
+                "allow_session": True,
             }
             decision = _await_gateway_decision(
                 session_key, notify_cb, approval_data, surface="gateway"
@@ -3283,7 +3552,7 @@ def check_all_command_guards(command: str, env_type: str,
         }
 
     # CLI interactive: single combined prompt
-    # Hide [a]lways when any tirith warning is present
+    # Hide [a]lways when no persistable (non-tirith) warning is present
     _fire_approval_hook(
         "pre_approval_request",
         command=command,
@@ -3294,7 +3563,7 @@ def check_all_command_guards(command: str, env_type: str,
         surface="cli",
     )
     choice = prompt_dangerous_approval(command, combined_desc,
-                                       allow_permanent=not has_tirith,
+                                       allow_permanent=has_permanent_capable,
                                        approval_callback=approval_callback)
     _fire_approval_hook(
         "post_approval_response",

@@ -67,6 +67,50 @@ def _make_background_cli_stub():
 
 
 class TestCliApprovalUi:
+    def test_session_less_gate_offers_only_once_and_deny(self):
+        """A gate that re-asks every time must not advertise a session scope.
+
+        The protected agent-instruction gate (tools/file_tools.py) grants one
+        operation and persists nothing, so offering "session" here makes every
+        later write re-prompt and reads as a broken gate (upstream 165d1849e2).
+        """
+        cli = _make_cli_stub()
+        result = {}
+
+        def _run_callback():
+            result["value"] = cli._approval_callback(
+                "<write to AGENTS.md>",
+                "protected agent-instruction file",
+                allow_permanent=False,
+                allow_session=False,
+            )
+
+        thread = threading.Thread(target=_run_callback, daemon=True)
+        thread.start()
+
+        deadline = time.time() + 2
+        while cli._approval_state is None and time.time() < deadline:
+            time.sleep(0.01)
+
+        assert cli._approval_state is not None
+        assert cli._approval_state["choices"] == ["once", "deny"]
+
+        cli._approval_state["response_queue"].put("once")
+        thread.join(timeout=2)
+        assert result["value"] == "once"
+
+    def test_approval_choices_respect_scope_flags(self):
+        cli = _make_cli_stub()
+        assert cli._approval_choices("ls") == ["once", "session", "always", "deny"]
+        assert cli._approval_choices("ls", allow_permanent=False) == ["once", "session", "deny"]
+        assert cli._approval_choices(
+            "ls", allow_permanent=False, allow_session=False
+        ) == ["once", "deny"]
+        long_cmd = "x" * 80
+        assert cli._approval_choices(
+            long_cmd, allow_permanent=False, allow_session=False
+        ) == ["once", "deny", "view"]
+
     def test_sudo_prompt_restores_existing_draft_after_response(self):
         cli = _make_cli_stub()
         cli._app.current_buffer = _FakeBuffer("draft command", cursor_position=5)

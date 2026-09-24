@@ -140,6 +140,39 @@ describe('PendingToolApproval', () => {
     expect(screen.queryByRole('menuitem', { name: /Always allow/ })).toBeNull()
   })
 
+  it('hides "Allow this session" on a once-only (protected file) prompt', async () => {
+    // Protected instruction-file writes are granted once only: allow_session=false.
+    $activeSessionId.set('sess-1')
+    setApprovalRequest({
+      allowSession: false,
+      command: 'Write to AGENTS.md',
+      description: 'protected agent-instruction file',
+      sessionId: 'sess-1'
+    })
+    render(<PendingToolApproval part={part('write_file')} />)
+
+    fireEvent.keyDown(screen.getByRole('button', { name: /More approval options/ }), { key: 'Enter' })
+
+    expect(await screen.findByRole('menuitem', { name: /Always allow/ })).toBeTruthy()
+    expect(screen.queryByRole('menuitem', { name: /Allow this session/ })).toBeNull()
+  })
+
+  it('drops the options menu when the prompt offers neither session nor permanent scope', () => {
+    $activeSessionId.set('sess-1')
+    setApprovalRequest({
+      allowPermanent: false,
+      allowSession: false,
+      command: 'Write to AGENTS.md',
+      description: 'protected agent-instruction file',
+      sessionId: 'sess-1'
+    })
+    render(<PendingToolApproval part={part('write_file')} />)
+
+    expect(screen.getByRole('button', { name: /Run/ })).toBeTruthy()
+    expect(screen.getByRole('button', { name: /Reject/ })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: /More approval options/ })).toBeNull()
+  })
+
   it('renders a floating fallback when no pending tool row is mounted', () => {
     setRequest('rm /tmp/hermes_approval_test.txt')
     const { container } = render(<PendingApprovalFallback />)

@@ -312,7 +312,9 @@ class TestPipeToLaunchedShell:
         start = time.perf_counter()
         detect_dangerous_command("curl x | sudo " + "-a " * 20000 + "cat")
         detect_dangerous_command("curl x | env " + "A=b " * 20000 + "cat")
-        assert time.perf_counter() - start < 2.0
+        # ~0.3 s locally, ~2 s on a shared CI runner: both inputs are 60-80 KB, so
+        # a quadratic regression would take minutes, well past this bound.
+        assert time.perf_counter() - start < 6.0
 
 
 class TestDetectSqlPatterns:
@@ -732,12 +734,14 @@ class TestHermesConfigWriteProtection:
         assert dangerous is True
 
     def test_perl_eval_no_inplace_safe(self):
-        # `perl -e` with no -i flag is code evaluation, not file mutation —
-        # the perl/ruby -i pattern must not fire on it.
+        # `perl -e` with no -i flag is code evaluation, not file mutation. It
+        # requires approval (combined `-wne` inline code), but must not be
+        # attributed to the in-place rule.
         dangerous, key, desc = detect_dangerous_command(
             "perl -wne 'print' ~/.hermes/config.yaml"
         )
-        assert dangerous is False
+        assert dangerous is True
+        assert key != "in-place edit of Hermes config/env (perl/ruby)"
 
     def test_read_is_safe(self):
         # Reading config is not a write — must not trip.

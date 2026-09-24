@@ -7,6 +7,8 @@ approval:
   choose_short:    "      [o]один раз  |  [s]сеанс  |  [d]відхилити"
   prompt_long:     "      Вибір [o/s/a/D]: "
   prompt_short:    "      Вибір [o/s/D]: "
+  choose_once_only: "      [o]один раз  |  [d]відхилити"
+  prompt_once_only: "      Вибір [o/D]: "
   timeout:         "      ⏱ Час очікування вичерпано — команду відхилено"
   allowed_once:    "      ✓ Дозволено один раз"
   allowed_session: "      ✓ Дозволено для цього сеансу"

@@ -7,6 +7,8 @@ approval:
   choose_short:    "      [o]僅此一次  |  [s]本次工作階段  |  [d]拒絕"
   prompt_long:     "      選擇 [o/s/a/D]: "
   prompt_short:    "      選擇 [o/s/D]: "
+  choose_once_only: "      [o]僅此一次  |  [d]拒絕"
+  prompt_once_only: "      選擇 [o/D]: "
   timeout:         "      ⏱ 逾時 — 已拒絕指令"
   allowed_once:    "      ✓ 本次允許"
   allowed_session: "      ✓ 本次工作階段內允許"

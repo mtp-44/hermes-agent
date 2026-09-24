@@ -7,6 +7,8 @@ approval:
   choose_short:    "      [b]ir kez  |  [o]turum  |  [r]eddet"
   prompt_long:     "      Seçim [b/o/h/R]: "
   prompt_short:    "      Seçim [b/o/R]: "
+  choose_once_only: "      [b]ir kez  |  [r]eddet"
+  prompt_once_only: "      Seçim [b/R]: "
   timeout:         "      ⏱ Zaman aşımı — komut reddedildi"
   allowed_once:    "      ✓ Bir kez izin verildi"
   allowed_session: "      ✓ Bu oturum için izin verildi"
