@@ -77,6 +77,11 @@ Re-run by hand after triage, with the live `~/.hermes/config.yaml`:
 
 ### P2 — low
 
+> **Landed 2026-09-24 as `sec/p2-2026-09-24`:
+> [`HA-0010`](../decisions/0010-security-p2-port-2026-09-24.md).**
+> `b90dbac1d6` was replaced by a local behaviour subset. The partials are
+> listed in the ADR.
+
 - **Approval state:** `7876d183c9` + `9b06d3d081` (a string
   `command_allowlist` becomes per-character globs, so `*` allows everything;
   hand-removed entries are resurrected on save). `2afb405337` (lock-commit

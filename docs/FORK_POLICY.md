@@ -33,6 +33,20 @@
 
 Upstream pulls under policy 1 (security fixes only). Newest first.
 
+### 2026-09-24 (night) — `sec/p2-2026-09-24`: HA-0008's P2 batch
+
+This is the rest of the approval/redaction triage:
+
+- control-char and dotted-key redaction, plus a local fix making keyword runs
+  linear;
+- uninstall, docker, deno/bun and interpreter detection, plus the combined
+  deobfuscation variant (33 KB heredocs went from 19 s to 0.13 s);
+- allowlist type safety and hand-edit preservation;
+- truthful approval scopes on the CLI, Telegram, Signal and the PWA.
+
+The digest is now at 0 undecided. Full account: ADR
+[`HA-0010`](decisions/0010-security-p2-port-2026-09-24.md).
+
 ### 2026-09-24 (evening) — `sec/p1-2026-09-24`: HA-0008's P1 batch
 
 This is the high-priority batch from the triage of 85 approval/redaction
