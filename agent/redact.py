@@ -7,6 +7,7 @@ Short tokens (< 18 chars) are fully masked. Longer tokens preserve
 the first 6 and last 4 characters for debuggability.
 """
 
+import bisect
 import logging
 import os
 import re
@@ -528,10 +529,78 @@ _FORM_BODY_RE = re.compile(
     r"^[A-Za-z_][A-Za-z0-9_.-]*=[^&\s]*(?:&[A-Za-z_][A-Za-z0-9_.-]*=[^&\s]*)+$"
 )
 
+# Control / zero-width characters that can split a token body: a secret
+# emitted as ``sk-abc\x1bdef…`` or wrapped as ``ghp_abc\n123…`` escapes the
+# contiguous prefix regexes (upstream #77484). Used by
+# _mask_control_split_tokens. A single character class, so it is linear.
+_CONTROL_CHARS_RE = re.compile(
+    r"[\x00-\x1f\x7f\u200b-\u200f\u2028-\u202f\u2060\ufeff]"
+)
+
+# Union of every _PREFIX_PATTERNS body class. A control-stripped match may only
+# span original chars that are token-body or control chars. ``=`` is excluded on
+# purpose: a KEY=value separator must never let a match span unrelated text.
+_TOKEN_BODY_CHARS = frozenset(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-."
+)
+
 # Compile known prefix patterns into one alternation
 _PREFIX_RE = re.compile(
     r"(?<![A-Za-z0-9_-])(" + "|".join(_PREFIX_PATTERNS) + r")(?![A-Za-z0-9_-])"
 )
+
+
+def _mask_control_split_tokens(text: str, mask_fn) -> str:
+    """Mask tokens whose body is split by control/zero-width characters.
+
+    A credential like ``sk-abc\\x1bdef456…`` or ``ghp_abc\\n123def…`` has its
+    body interrupted, so the contiguous _PREFIX_RE cannot match it and the
+    secret leaks verbatim (upstream #77484). Match on a control-stripped copy
+    (where the token is contiguous again, even when each fragment alone is too
+    short), then mask the corresponding span in the ORIGINAL, but only when
+    that span holds solely token-body and control chars, so a match can never
+    cross into another line's unrelated text (``EXA_API_KEY=…``).
+
+    Linear: one strip, one index map, one _PREFIX_RE scan of the stripped copy,
+    and per-match work bounded by the match span (matches do not overlap).
+    """
+    ctrl = [m.start() for m in _CONTROL_CHARS_RE.finditer(text)]
+    if not ctrl:
+        return text
+    stripped = _CONTROL_CHARS_RE.sub("", text)
+    # Control i sits before ``ctrl[i] - i`` stripped chars, so stripped index j
+    # maps back to ``j + (controls at or before j)`` in the original.
+    ctrl_at = [pos - i for i, pos in enumerate(ctrl)]
+
+    def orig(j: int) -> int:
+        return j + bisect.bisect_right(ctrl_at, j)
+
+    matches = []
+    for m in _PREFIX_RE.finditer(stripped):
+        start_orig = orig(m.start(1))
+        end_orig = orig(m.end(1) - 1) + 1
+        span = text[start_orig:end_orig]
+        # A span crossing a LINE boundary whose fragment already matches on its
+        # own is left to the ordinary prefix pass: joining would swallow the
+        # next line (``ghp_<tok>\nbutton [ref=e3]`` masked ``button``). Non-line
+        # controls (ESC, ZWSP, …) never legitimately sit between a token and
+        # prose, so there the join proceeds even when the head self-matches, or
+        # the tail of ``sk-<head>\x1b<tail>`` would leak.
+        if ("\n" in span or "\r" in span) and _PREFIX_RE.search(span):
+            continue
+        # Reject spans holding a non-token char, and matches running into a
+        # ``KEY=`` name (a real value is followed by a newline/space/end).
+        if (all(c in _TOKEN_BODY_CHARS or _CONTROL_CHARS_RE.match(c) for c in span)
+                and (end_orig >= len(text) or text[end_orig] != "=")):
+            matches.append((start_orig, end_orig, mask_fn(m.group(1))))
+    if not matches:
+        return text
+    parts, last = [], 0
+    for start_orig, end_orig, replacement in matches:
+        parts += (text[last:start_orig], replacement)
+        last = end_orig
+    parts.append(text[last:])
+    return "".join(parts)
 
 
 def mask_secret(
@@ -879,6 +948,9 @@ def redact_sensitive_text(
     # Known prefixes (sk-, ghp_, etc.) — gate on substring presence
     if _has_known_prefix_substring(text):
         _prefix_sub = _mask_token_nonreusable if file_read else _mask_token
+        # Control/zero-width chars (\n, \r, ESC, U+200B, …) can split a token
+        # body so _PREFIX_RE cannot match across them (upstream #77484).
+        text = _mask_control_split_tokens(text, _prefix_sub)
         text = _PREFIX_RE.sub(lambda m: _prefix_sub(m.group(1)), text)
 
     # ENV assignments: OPENAI_API_KEY=***  (skip for code files — false positives)

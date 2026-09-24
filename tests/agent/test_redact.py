@@ -199,6 +199,95 @@ class TestBareSecretEnvSuffixes:
         assert "username=bob" in result
 
 
+class TestControlCharSplitTokens:
+    """Tokens split by control/zero-width chars must still mask (upstream #77484)."""
+
+    def _assert_split_masked(self, text, tok):
+        # Bare token (no KEY= context). Assert the LONGEST FRAGMENT is gone: the
+        # token is split in the input, so the whole contiguous ``tok`` is absent
+        # from ANY output, even one that leaks every fragment verbatim.
+        result = redact_sensitive_text(text, force=True)
+        longest = max(tok[10:], tok[:10], key=len)
+        assert longest not in result, result
+
+    def test_newline_split_token_masks(self):
+        tok = "ghp_abcdef1234567890ABCDEF1234567890abcdef"
+        self._assert_split_masked(f"{tok[:10]}\n{tok[10:]}", tok)
+
+    def test_crlf_wrapped_token_masks(self):
+        # A key whose tail wraps onto the next line of terminal output.
+        tok = "sk-proj-abcd1234EFGH5678ijkl9012MNOP3456qrst"
+        self._assert_split_masked(f"OPENAI: {tok[:10]}\r\n{tok[10:]}\n", tok)
+
+    def test_esc_split_token_masks(self):
+        tok = "ghp_abcdef1234567890ABCDEF1234567890abcdef"
+        self._assert_split_masked(f"{tok[:10]}\x1b{tok[10:]}", tok)
+
+    def test_zero_width_split_token_masks(self):
+        tok = "ghp_abcdef1234567890ABCDEF1234567890abcdef"
+        self._assert_split_masked(f"{tok[:10]}​{tok[10:]}", tok)
+
+    def test_complete_token_does_not_swallow_next_line(self):
+        # A COMPLETE token at end-of-line followed by ordinary text must not be
+        # joined across the newline: the ordinary prefix pass masks the token;
+        # joining would swallow the adjacent line (browser accessibility
+        # annotations regressed this way upstream, aecb9ca894).
+        tok = "ghp_" + "F" * 29
+        text = f"text: Token: {tok}\nbutton [ref=e3]: Copy\n"
+        result = redact_sensitive_text(text, force=True)
+        assert "F" * 20 not in result
+        assert "button" in result
+        assert "ref=e3" in result
+
+    def test_selfmatching_head_esc_split_tail_masked(self):
+        # The HEAD fragment alone already matches the prefix rule but the tail
+        # doesn't: for non-newline controls the join must still run, or the
+        # tail leaks. Only LINE-crossing spans skip the join (9377c5a539).
+        head = "sk-" + "a" * 15
+        tail = "b" * 25
+        result = redact_sensitive_text(head + "\x1b" + tail, force=True)
+        assert tail not in result
+        assert "a" * 12 not in result
+
+    def test_env_dump_lines_not_joined(self):
+        # Control-stripping must not join unrelated env lines into one match.
+        env_dump = (
+            "HOME=/home/user\n"
+            "ELEVENLABS_API_KEY=sk_abc123def456ghi789jkl\n"
+            "EXA_API_KEY=exa_XY789abcdef01234\n"
+            "SHELL=/bin/bash\n"
+        )
+        result = redact_sensitive_text(env_dump, force=True)
+        assert "SHELL=/bin/bash" in result
+        assert "HOME=/home/user" in result
+        assert "EXA_API_KEY=" in result
+        assert "sk_abc123def456ghi789jkl" not in result
+        assert "exa_XY789abcdef01234" not in result
+
+    def test_file_read_split_token_gets_sentinel(self):
+        tok = "ghp_abcdef1234567890ABCDEF1234567890abcdef"
+        result = redact_sensitive_text(f"{tok[:10]}\x1b{tok[10:]}", file_read=True)
+        assert tok[10:] not in result
+        assert "«redacted:ghp_…»" in result
+
+    def test_control_char_split_scan_stays_linear(self):
+        """20 KB of control chars / newlines interleaved with token-looking
+        fragments must not stall the redactor (it runs on every log line)."""
+        import time
+
+        payloads = [
+            "sk-ab\x1b" * 3400,
+            "ghp_abcdefghi\n" * 1450,
+            "sk-abcdefghij\x1bKLMN\n​ghp_x\r" * 700,
+            "\x1b\n\x00​" * 5000,
+            ("ghp_" + "a" * 9 + "\x1b") * 1500,
+        ]
+        for text in payloads:
+            t0 = time.perf_counter()
+            redact_sensitive_text(text, force=True)
+            assert time.perf_counter() - t0 < 1.0, repr(text[:40])
+
+
 class TestKeywordWordBoundary:
     """Ported from upstream (nearai/ironclaw#6129) — a secret keyword that is
     the PREFIX of a larger prose word (``Secretary`` ⊃ ``secret``,
