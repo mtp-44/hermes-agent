@@ -1426,7 +1426,11 @@ def _iter_shell_command_starts(command: str):
         # `echo "{ reboot; }"` — never registers a command start. That is the
         # whole reason this lives in the quote-aware tokenizer instead of the
         # flat `_CMDPOS` regex, which cannot tell quoted text from real syntax.
-        if ch in ("(", "{"):
+        # `${` opens a parameter expansion, not a brace group: a start marked
+        # inside it would split `${IFS}` and defeat the IFS collapse in
+        # normalization (matters for the faithful variant, which marks starts
+        # BEFORE normalizing).
+        if ch in ("(", "{") and not (ch == "{" and i > 0 and command[i - 1] == "$"):
             starts.append(i + 1)
             i += 1
             continue
@@ -1462,8 +1466,24 @@ def _iter_shell_command_starts(command: str):
             yield start
 
 
-def _mark_command_starts(command: str) -> str:
-    """Insert a newline before each real (quote-aware) command start.
+def _splice(command: str, edits) -> str:
+    """Apply sorted, non-overlapping ``(start, end, text)`` edits in one pass.
+
+    Re-slicing the whole string per edit is quadratic in the number of edits
+    (a heredoc of quoted lines has one command start per line).
+    """
+    parts: list[str] = []
+    previous = 0
+    for start, end, text in edits:
+        parts.append(command[previous:start])
+        parts.append(text)
+        previous = end
+    parts.append(command[previous:])
+    return "".join(parts)
+
+
+def _mark_command_starts(command: str, marker: str = "\n") -> str:
+    """Insert *marker* (a newline) before each real (quote-aware) command start.
 
     ``\\n`` is already a ``_CMDPOS`` separator, so this rewrites subshell
     ``(cmd)`` and brace-group ``{ cmd; }`` openers — which the flat pattern
@@ -1474,15 +1494,11 @@ def _mark_command_starts(command: str) -> str:
     ``--title "block (reboot)"`` are left exactly as-is.
     """
     # Collect the (whitespace-skipped) start offsets, drop 0 (already anchored
-    # by ``^``), and splice a newline in front of each — right-to-left so the
-    # earlier offsets stay valid as we mutate.
+    # by ``^``), and splice the marker in front of each in one pass.
     offsets = sorted(o for o in _iter_shell_command_starts(command) if o > 0)
     if not offsets:
         return command
-    out = command
-    for offset in reversed(offsets):
-        out = out[:offset] + "\n" + out[offset:]
-    return out
+    return _splice(command, [(o, o, marker) for o in offsets])
 
 
 def _iter_shell_command_word_spans(command: str):
@@ -1546,18 +1562,48 @@ def _command_detection_variants(command: str):
     if marked != normalized and marked not in seen:
         seen.add(marked)
         yield marked
+    # Both variants above track quotes on NORMALIZED text, where `\"` has
+    # already become `"`. That flips quote parity: in `echo "a\"b"; (reboot)`
+    # the `(reboot)` start sat "inside" a phantom quote, no start was marked
+    # and the hardline floor let it through. Mark starts on the RAW command
+    # (the author's quote state), then normalize. The marker is " \n" so a
+    # preceding literal backslash (`printf \\<newline>reboot`) cannot eat it
+    # as a `\<newline>` line continuation.
+    faithful = _normalize_command_for_detection(_mark_command_starts(command, marker=" \n"))
+    if faithful not in seen:
+        seen.add(faithful)
+        yield faithful
     # Shell quoting/escaping can spell a dangerous executable name in pieces
     # (for example r\m or r''m). Keep that deobfuscation scoped to command
     # words so similarly shaped arguments do not become false positives.
-    for word_start, word_end, word in _iter_shell_command_word_spans(normalized):
-        deobfuscated = _deobfuscate_shell_word_for_detection(word)
-        if not deobfuscated or deobfuscated == word:
-            continue
-        variant = normalized[:word_start] + deobfuscated + normalized[word_end:]
-        if variant in seen:
-            continue
-        seen.add(variant)
-        yield variant
+    #
+    # One variant with EVERY command word deobfuscated, not one full-length
+    # variant per word: a heredoc of quoted lines has hundreds of quoted
+    # command words, and per-word variants made both detection passes
+    # O(words * len) (16 KB took ~4.6 s, 33 KB ~19 s, holding the GIL).
+    # Spans can nest (a `$(...)` command word inside another command word),
+    # so apply them sorted; a span overlapping an applied one waits for the
+    # next round, giving one combined variant per nesting level.
+    pending = sorted(
+        (word_start, word_end, deobfuscated)
+        for word_start, word_end, word in _iter_shell_command_word_spans(normalized)
+        if (deobfuscated := _deobfuscate_shell_word_for_detection(word)) and deobfuscated != word
+    )
+    while pending:
+        applied: list[tuple[int, int, str]] = []
+        carry: list[tuple[int, int, str]] = []
+        cursor = 0
+        for span in pending:
+            if span[0] < cursor:
+                carry.append(span)
+            else:
+                applied.append(span)
+                cursor = span[1]
+        variant = _splice(normalized, applied)
+        if variant not in seen:
+            seen.add(variant)
+            yield variant
+        pending = carry
 
 
 # -------------------------------------------------------------------------
