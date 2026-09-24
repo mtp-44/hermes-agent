@@ -1053,9 +1053,26 @@ def _skip_shell_whitespace(command: str, pos: int) -> int:
     return pos
 
 
+@functools.lru_cache(maxsize=64)
+def _dollar_paren_end_memo(command: str) -> dict[int, int | None]:
+    """Per-command memo of ``$(`` offset -> end offset (None = unbalanced)."""
+    return {}
+
+
 def _scan_dollar_paren_end(command: str, start: int) -> int | None:
-    """Return the offset after a balanced ``$(...)`` command substitution."""
-    depth = 1
+    """Return the offset after a balanced ``$(...)`` command substitution.
+
+    A scan that starts at a ``$(`` nested inside this one would walk exactly
+    the same characters with the same quote/escape state from there on, so
+    one pass records the end of every nested ``$(`` it meets (a stack of open
+    offsets) and later calls answer from the memo. Rescanning instead made
+    unbalanced nesting quadratic per word read and cubic per detection:
+    ``"$(e" * 400`` (1.2 KB) took ~7 s, 3 KB ~100 s.
+    """
+    memo = _dollar_paren_end_memo(command)
+    if start in memo:
+        return memo[start]
+    open_offsets = [start]
     quote: str | None = None
     i = start + 2
     while i < len(command):
@@ -1076,16 +1093,18 @@ def _scan_dollar_paren_end(command: str, start: int) -> int | None:
             i += 2
             continue
         if command.startswith("$(", i):
-            depth += 1
+            open_offsets.append(i)
             i += 2
             continue
         if ch == ")":
-            depth -= 1
             i += 1
-            if depth == 0:
+            memo[open_offsets.pop()] = i
+            if not open_offsets:
                 return i
             continue
         i += 1
+    for offset in open_offsets:
+        memo[offset] = None
     return None
 
 
@@ -1190,26 +1209,59 @@ def _literal_command_substitution_output(script: str) -> str | None:
     return None
 
 
+# Every character a body can contain for _literal_command_substitution_output to
+# resolve it: _SIMPLE_SHELL_LITERAL_RE's set, plus the shlex whitespace, quotes
+# and backslash it strips. "$", "(", ")" and "`" are not in it.
+_LITERAL_SUBSTITUTION_BODY_CHARS = frozenset(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+    "_./:@%+=,- \t\r\n'\"\\"
+)
+
+
+def _resolve_literal_substitution(word: str, body_start: int, closer: str, scan_end) -> tuple[str, int] | None:
+    """Resolve the substitution whose body starts at *body_start*, cheaply.
+
+    A body that resolves holds only _LITERAL_SUBSTITUTION_BODY_CHARS, so it
+    has no ")" or "`" of its own and ends at the first character outside that
+    set, which must be *closer*. Only that run is tokenised; a success is then
+    confirmed with the balanced scanner (*scan_end*), so the result is exactly
+    what scanning and tokenising the whole balanced body would give.
+
+    Scanning the whole body at every ``$(`` instead re-read and re-tokenised
+    the rest of the word per nesting level: 400 levels of ``$(`` (1.2 KB) took
+    ~16 s per detection, ``$(e`` nesting 22 s for 1.6 KB.
+    """
+    run_end = body_start
+    while run_end < len(word) and word[run_end] in _LITERAL_SUBSTITUTION_BODY_CHARS:
+        run_end += 1
+    if run_end >= len(word) or word[run_end] != closer:
+        return None
+    replacement = _literal_command_substitution_output(word[body_start:run_end])
+    if replacement is None:
+        return None
+    # A quote left open in the run means the balanced scanner reads past this
+    # closer; then the true body contains a closer and cannot resolve.
+    if scan_end(word, body_start - (2 if closer == ")" else 1)) != run_end + 1:
+        return None
+    return replacement, run_end + 1
+
+
 def _replace_simple_command_substitutions(word: str) -> str:
     chars: list[str] = []
     i = 0
     while i < len(word):
         if word.startswith("$(", i):
-            end = _scan_dollar_paren_end(word, i)
-            if end is not None:
-                replacement = _literal_command_substitution_output(word[i + 2:end - 1])
-                if replacement is not None:
-                    chars.append(replacement)
-                    i = end
-                    continue
+            resolved = _resolve_literal_substitution(word, i + 2, ")", _scan_dollar_paren_end)
+            if resolved is not None:
+                chars.append(resolved[0])
+                i = resolved[1]
+                continue
         if word[i] == "`":
-            end = _scan_backtick_end(word, i)
-            if end is not None:
-                replacement = _literal_command_substitution_output(word[i + 1:end - 1])
-                if replacement is not None:
-                    chars.append(replacement)
-                    i = end
-                    continue
+            resolved = _resolve_literal_substitution(word, i + 1, "`", _scan_backtick_end)
+            if resolved is not None:
+                chars.append(resolved[0])
+                i = resolved[1]
+                continue
         chars.append(word[i])
         i += 1
     return "".join(chars)

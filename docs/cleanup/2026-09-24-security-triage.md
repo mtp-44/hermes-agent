@@ -90,6 +90,13 @@ Re-run by hand after triage, with the live `~/.hermes/config.yaml`:
 - **Detection regexes:** `85ce25687e` + `ce0b10cb21` (package uninstalls),
   `6437701228` (docker daemon redirects; applies cleanly), `6ae1fab336`
   (deno eval).
+- **Nested `$(` slowdown (found during P1): fixed locally, PR
+  `fix/detector-nested-subst`.** The scanner is memoised and the
+  literal-substitution rewrite only tokenises literal runs. 400 levels of
+  `$(` went from 16.5 s to about 0.1 s, `"$(e" * 400` from 7 s and 3 KB from
+  about 100 s. Word reading is still quadratic in the number of nested
+  command starts (a 9 KB pathological string still takes about 20 s), which
+  is the parser rework below.
 - **Detector parser:** `4eff83cdec` (quadratic variant loop; 33 KB quoted
   heredoc = 15 s) with `e383c28d2f` (faithful variant). `b90dbac1d6`
   (execution-bearing options, ~570 lines, pulls in `d41f621071`,
