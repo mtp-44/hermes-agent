@@ -119,3 +119,6 @@ d48bf743f2 out of scope: smart-deny owner override (52 files)
 b03c94dbed out of scope: observer hooks for smart verdicts
 c5e841ab0e behaviour choice, not taken: would cut Telegram/Signal/PWA approval waits from 300s to approvals.timeout (60); upstream later reversed that (a31a31826c)
 117f49b7d4 not applicable: plugin escalation gate gateway round-trip; _run_approval_gate absent
+# 2026-09-24 P1 port (HA-0009): partial or superseded by local work
+2afb405337 lock-commit half landed locally in 1d2b123816 (outcomes committed under _lock); the withdraw half targets upstream-only server->client approval requests
+ba0f5839d4 not applicable: fixes the lowercase env-assignment regex from 8563fe3435, which P1 deliberately did not take (no value-shape gating here; it would mask `api_key = config.get(...)`)
