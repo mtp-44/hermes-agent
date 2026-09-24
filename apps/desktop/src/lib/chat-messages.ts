@@ -76,6 +76,8 @@ export type GatewayEventPayload = {
   description?: string
   // False when a tirith content-security warning forbids a permanent allow.
   allow_permanent?: boolean
+  // False when the prompt grants one operation only (protected instruction files).
+  allow_session?: boolean
   // secret.request (skill credential capture)
   env_var?: string
   prompt?: string
