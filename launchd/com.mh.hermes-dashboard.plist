@@ -2,24 +2,43 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+    <!-- Tailnet dashboard backend (admin SPA + /api/* + the /api/ws gateway the
+         desktop client speaks), bound to the tailnet address with the auth gate
+         on; credentials come from ~/.hermes/.env (HERMES_DASHBOARD_BASIC_AUTH_*).
+
+         MUST run via the repo .venv python — the ~/.local/bin/hermes shim
+         re-execs into the separate ~/.hermes/hermes-agent upstream install, which
+         is how this service ran unpatched upstream code until 2026-09-24 (HA-0006).
+
+         --skip-build + HERMES_WEB_DIST / HERMES_TUI_DIR point at a prebuilt
+         release so the dashboard never runs npm/esbuild inside the production
+         checkout. Releases live in ~/state/releases/hermes-dashboard/releases/
+         <UTC stamp>-<sha>/{web_dist,ui-tui/dist/entry.js}; `current` is the live
+         one. Rebuild from a clean `git archive` export of the deployed sha
+         (npm ci --workspace web && npm run build -w web; npm install
+         --workspace ui-tui && npm run build -w ui-tui), never in the repo.
+
+         Install: cp launchd/com.mh.hermes-dashboard.plist ~/Library/LaunchAgents/ -->
     <key>Label</key>
     <string>com.mh.hermes-dashboard</string>
 
     <key>ProgramArguments</key>
     <array>
-        <string>/Users/mh/.local/bin/hermes</string>
+        <string>/Users/mh/ai/hermes-agent/.venv/bin/python</string>
+        <string>-m</string>
+        <string>hermes_cli.main</string>
         <string>dashboard</string>
         <string>--tui</string>
         <string>--host</string>
-        <string>0.0.0.0</string>
+        <string>100.93.233.4</string>
         <string>--port</string>
         <string>9119</string>
-        <string>--insecure</string>
         <string>--no-open</string>
+        <string>--skip-build</string>
     </array>
 
     <key>WorkingDirectory</key>
-    <string>/Users/mh/ai/agents/hermes-agent</string>
+    <string>/Users/mh/ai/hermes-agent</string>
 
     <key>EnvironmentVariables</key>
     <dict>
@@ -27,6 +46,10 @@
         <string>/Users/mh/.local/bin:/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin</string>
         <key>HOME</key>
         <string>/Users/mh</string>
+        <key>HERMES_WEB_DIST</key>
+        <string>/Users/mh/state/releases/hermes-dashboard/current/web_dist</string>
+        <key>HERMES_TUI_DIR</key>
+        <string>/Users/mh/state/releases/hermes-dashboard/current/ui-tui</string>
     </dict>
 
     <key>RunAtLoad</key>
