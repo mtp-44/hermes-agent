@@ -12,10 +12,12 @@ under ``_lock`` and the waiter reads it under the same lock when it leaves
 the queue, so a choice acked to the user can never be reported as a timeout.
 """
 
+import os
 import sys
 import threading
 import time
 from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -23,6 +25,7 @@ _repo = str(Path(__file__).resolve().parents[2])
 if _repo not in sys.path:
     sys.path.insert(0, _repo)
 
+from tests.gateway.test_telegram_approval_buttons import _make_adapter  # noqa: E402
 from tools import approval as mod  # noqa: E402
 
 SESSION = "agent:main:telegram:dm:12345"
@@ -236,3 +239,121 @@ class TestLockCommit:
         assert d["resolved"] is False
         assert mod.resolve_gateway_approval(SESSION, "once", request_id=seen["request_id"]) == 0
         assert mod.resolve_gateway_approval(SESSION, "once") == 0
+
+
+# ---------------------------------------------------------------------------
+# Telegram buttons, end to end through the real queue
+# ---------------------------------------------------------------------------
+
+def _tap(adapter, data):
+    query = AsyncMock()
+    query.data = data
+    query.message = MagicMock()
+    query.message.chat_id = 12345
+    query.from_user = MagicMock()
+    query.from_user.first_name = "Mark"
+    query.from_user.id = "12345"
+    query.answer = AsyncMock()
+    query.edit_message_text = AsyncMock()
+    update = MagicMock()
+    update.callback_query = query
+    return update, query
+
+
+async def _send_prompt(adapter, waiter):
+    """What gateway/run.py's notify callback does for a button adapter."""
+    from gateway.run import _exec_approval_request_kwargs
+
+    msg = MagicMock()
+    msg.message_id = 1
+    adapter._bot.send_message = AsyncMock(return_value=msg)
+    before = set(adapter._approval_state)
+    await adapter.send_exec_approval(
+        chat_id="12345", command=waiter.command, session_key=SESSION,
+        **_exec_approval_request_kwargs(adapter, waiter.data),
+    )
+    (approval_id,) = set(adapter._approval_state) - before
+    return approval_id
+
+
+class TestTelegramBinding:
+    @pytest.mark.asyncio
+    async def test_late_tap_on_expired_prompt_does_not_approve_newer_one(self, monkeypatch):
+        adapter = _make_adapter()
+        _set_timeout(monkeypatch, 1)
+        a = _Waiter("rm -rf /expired").start()
+        a_id = await _send_prompt(adapter, a)
+        assert a.join()["resolved"] is False  # prompt A timed out
+
+        _set_timeout(monkeypatch, 30)
+        b = _Waiter("rm -rf /newer").start()
+        await _send_prompt(adapter, b)
+
+        update, query = _tap(adapter, f"ea:once:{a_id}")
+        with patch.dict(os.environ, {"TELEGRAM_ALLOWED_USERS": "*"}, clear=False):
+            await adapter._handle_callback_query(update, MagicMock())
+
+        # B is untouched and still waiting for its own answer.
+        assert _pending_commands() == ["rm -rf /newer"]
+        assert b.thread.is_alive()
+        # A's message says so instead of "Approved".
+        rendered = query.edit_message_text.call_args[1]["text"]
+        assert "Approved" not in rendered
+        assert "no longer pending" in rendered
+        assert a_id not in adapter._approval_state
+        assert a_id not in adapter._approval_request_ids
+
+        mod.resolve_gateway_approval(SESSION, "deny", resolve_all=True)
+        b.join()
+
+    @pytest.mark.asyncio
+    async def test_tap_on_second_prompt_approves_the_second_only(self, monkeypatch):
+        adapter = _make_adapter()
+        _set_timeout(monkeypatch, 30)
+        first = _Waiter("rm -rf /first").start()
+        await _send_prompt(adapter, first)
+        second = _Waiter("rm -rf /second").start()
+        second_id = await _send_prompt(adapter, second)
+
+        update, query = _tap(adapter, f"ea:once:{second_id}")
+        with patch.dict(os.environ, {"TELEGRAM_ALLOWED_USERS": "*"}, clear=False):
+            await adapter._handle_callback_query(update, MagicMock())
+
+        d = second.join()
+        assert d["resolved"] is True and d["choice"] == "once"
+        assert _pending_commands() == ["rm -rf /first"]
+        assert first.thread.is_alive()
+        assert "Approved once" in query.edit_message_text.call_args[1]["text"]
+
+        mod.resolve_gateway_approval(SESSION, "deny", resolve_all=True)
+        first.join()
+
+    @pytest.mark.asyncio
+    async def test_approval_state_is_bounded(self, monkeypatch):
+        adapter = _make_adapter()
+        monkeypatch.setattr(type(adapter), "_APPROVAL_STATE_MAX", 3)
+        msg = MagicMock()
+        msg.message_id = 1
+        adapter._bot.send_message = AsyncMock(return_value=msg)
+        # Five prompts whose requests are not pending (already expired).
+        for i in range(5):
+            await adapter.send_exec_approval(
+                chat_id="12345", command=f"c{i}", session_key=SESSION,
+                request_id=f"gone-{i}",
+            )
+        assert len(adapter._approval_state) == 3
+        assert set(adapter._approval_request_ids) == set(adapter._approval_state)
+        # The newest survive.
+        assert sorted(adapter._approval_request_ids.values()) == ["gone-2", "gone-3", "gone-4"]
+
+    def test_wiring_passes_request_id_only_to_adapters_that_accept_it(self):
+        from gateway.run import _exec_approval_request_kwargs
+
+        class _Legacy:
+            async def send_exec_approval(self, chat_id, command, session_key,
+                                         description="", metadata=None):
+                pass
+
+        assert _exec_approval_request_kwargs(_make_adapter(), {"request_id": "r"}) == {"request_id": "r"}
+        assert _exec_approval_request_kwargs(_Legacy(), {"request_id": "r"}) == {}
+        assert _exec_approval_request_kwargs(_make_adapter(), {}) == {}
