@@ -1,0 +1,38 @@
+# Upstream security commits deliberately NOT taken, so upstream_digest.py stops
+# re-reporting them. One per line: <upstream sha> <reason>. Commits we landed or
+# ported need no entry — their `cherry picked from` / `Ported from upstream`
+# trailer already marks them. Remove a line if the reason stops being true
+# (e.g. we start using Slack or Docker). Per-commit detail for the 2026-09-24
+# entries: docs/cleanup/2026-09-24-security-sync.md and HA-0006.
+
+# 2026-07-22 sync (HA-0002)
+9ae17b8ac5 landed: adapted in PR #7 as local 0940b798b (no Ported-from trailer)
+16332af60 not applicable: api_server MEDIA data-URL inlining is not in our tree
+
+# 2026-09-24 sync (HA-0006): vulnerable code not in our tree
+3966e5de94 not applicable: our async_delegation has no direct state.db writer
+56d2438a45 not applicable: no hermes_cli/config_home.py; ensure_hermes_home never skipped on symlinks
+5921ba8c06 not applicable: our lifecycle guard is a raw-text regex, wrapper prefixes already caught
+6b3a7af73d not applicable: same lifecycle-guard shape as 5921ba8c06
+9345c67854 not applicable: per-route webhook toolsets feature (GHSA-2fmg-cjqm-hhrj) absent
+940c610994 not applicable: blocklist is defined in tools/environments/local.py itself
+
+# 2026-09-24 sync (HA-0006): out of scope for this deployment
+2e08b778ab out of scope: Slack platform not used
+2b30744c34 out of scope: photon platform not used
+f21332f073 out of scope: CI OSV scan of photon/whatsapp lockfiles
+c7fd21add3 out of scope: OpenViking memory provider not used
+e1caf88c6c out of scope: Windows-only approval patterns
+d966b34cc3 out of scope: Windows-only lifecycle-guard spellings
+77ca6a6d12 out of scope: Electron desktop app (GHSA-9f4c-93c8-jc8g) not deployed
+fc61608a17 out of scope: Docker terminal backend not used
+1aa62ceb45 out of scope: multiplex profiles not enabled
+0c74353c86 out of scope: profile isolation, single profile
+e70db09f51 out of scope: profile isolation, single profile
+c26f75baab out of scope: profile exports into Docker images / CI
+3933fdf63b out of scope: pet / provider_media / image-provider features absent
+5eeafc8d25 out of scope: OSV preflight caching is a performance change
+37e42808e7 out of scope: httplib2 pin in the google-workspace optional skill (no dependency changes)
+8fdda828a8 out of scope: npm nanoid override (desktop/web deps; no dependency changes)
+fc83fb42d3 out of scope: tornado bump (GHSA-5w76-955r-9v8r); no dependency changes this sync
+fe66596df3 deferred: new protected-instruction-file approval feature, not a fix
