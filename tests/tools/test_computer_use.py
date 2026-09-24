@@ -1200,11 +1200,15 @@ class TestLazyMcpInstall:
     """
 
     def test_feature_registered_in_allowlist(self):
+        """The lazy-install spec must match the [computer-use] extra, so a
+        dependency bump cannot update one and leave the other behind."""
+        import tomllib
+        from pathlib import Path
+
         from tools import lazy_deps
-        assert lazy_deps.feature_specs("tool.computer_use") == (
-            "mcp==1.26.0",
-            "starlette==1.0.1",
-        )
+        pyproject = Path(__file__).resolve().parents[2] / "pyproject.toml"
+        extra = tomllib.loads(pyproject.read_text())["project"]["optional-dependencies"]["computer-use"]
+        assert lazy_deps.feature_specs("tool.computer_use") == tuple(extra)
 
     def test_start_lazy_installs_mcp(self):
         from tools.computer_use import cua_backend
