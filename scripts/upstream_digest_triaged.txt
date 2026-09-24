@@ -36,3 +36,29 @@ c26f75baab out of scope: profile exports into Docker images / CI
 8fdda828a8 out of scope: npm nanoid override (desktop/web deps; no dependency changes)
 fc83fb42d3 out of scope: tornado bump (GHSA-5w76-955r-9v8r); no dependency changes this sync
 fe66596df3 deferred: new protected-instruction-file approval feature, not a fix
+
+# 2026-09-24 triage of the 32 the fixed digest surfaced (HA-0006). The 13 to PORT
+# are deliberately absent here so the digest keeps listing them: e4dbb67bf5
+# (model-controlled delegate ACP transport — HIGH), a6d9d1d2cf (code_execution
+# RPC token), and the dependency/supply-chain group 2b618fe7e5 ea266a6061
+# 09da075505 eeab0a251d abcd213504 0945cc5b52 a7efeb0829 e9f64e83c1 88aed1b797
+# 43f18cca81 2158f2a5ad.
+d83cd6f7c3 out of scope: Azure provider not configured
+1f46145e03 not applicable: hardens hermes_cli/urllib_security.py, a post-fork module absent here; PR #7's a061788d4 strips credentials on cross-host redirects in fetch_models
+92c2146039 not applicable: urllib_security.py chain, see 1f46145e03
+4530a4ca4c not applicable: urllib_security.py chain, see 1f46145e03
+27a1042b13 not applicable: urllib_security.py chain, see 1f46145e03
+cf34a1e8c7 not applicable: urllib_security.py chain, see 1f46145e03
+6e75ba7fa0 not applicable: consolidates redirect credential policy into urllib_security.py; see 1f46145e03
+b9b463f3bd deferred: new tool-output risk-scoring feature, not a fix
+70449a4939 out of scope: opt-in V2 replay-protected webhook signature; our only route is loopback-bound (127.0.0.1:18099) with one local sender
+f7082c5172 out of scope: website/ docs site is neither built nor deployed here
+94c27cae60 out of scope: website/ docs site is neither built nor deployed here
+a4ffe39f73 out of scope: website/ docs site is neither built nor deployed here
+f8d032588c out of scope: pytest is a dev-only test runner, absent from the gateway venv
+bb2539ea16 out of scope: pyasn1 is absent from the gateway venv (google-workspace skill dependency)
+a3fdc189a4 out of scope: httplib2 is absent from the gateway venv (google-workspace skill dependency)
+9bdfa9f36e not applicable: cbor2 absent from the gateway venv; the repo .venv already has 6.1.4
+515e88a80f deferred to the next dashboard/TUI release rebuild: JS lockfile pinning only matters when web/ or ui-tui is rebuilt
+390a1771b2 deferred to the next dashboard/TUI release rebuild: npm-audit bumps (also edits the undeployed desktop app)
+8789cf9f0c deferred to the next dashboard/TUI release rebuild: npm advisories in the root lockfile (photon/whatsapp/website parts out of scope)
