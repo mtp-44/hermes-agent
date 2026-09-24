@@ -118,3 +118,12 @@ def test_shared_snapshot_no_cross_session_leak(tmp_path):
                 assert "HERMES_SESSION_ID" not in f.read()
     finally:
         env.cleanup()
+
+
+def test_export_snippet_quotes_extra_excluded_names():
+    """Caller-supplied exclusion names (profile-scoped passthrough, port of
+    upstream 7138b9587a) are shell-quoted so config can never inject syntax."""
+    snippet = _export_dump_excluding_session_vars(
+        '"$__hermes_snap_tmp"', ["SERVICE_TOKEN", "bad;rm -rf /"])
+    assert " SERVICE_TOKEN" in snippet
+    assert "'bad;rm -rf /'" in snippet

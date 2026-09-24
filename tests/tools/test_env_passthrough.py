@@ -269,7 +269,6 @@ class TestTerminalIntegration:
 
         assert "SERVICE_TOKEN" not in child_env
 
-    @pytest.mark.skip(reason="fork port of 7138b9587a omits the base.py snapshot save/restore half (multiplex_profiles unused in this deployment; depends on the absent _export_dump_excluding_session_vars helper)")
     def test_shared_local_snapshot_re_resolves_current_profile(self, monkeypatch, tmp_path):
         """A persistent shell snapshot must not retain the previous profile's value."""
         from tools.environments.local import LocalEnvironment
