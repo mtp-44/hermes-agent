@@ -72,7 +72,15 @@ _REDACT_ENABLED = os.getenv("HERMES_REDACT_SECRETS", "true").lower() in {"1", "t
 
 # Known API key prefixes -- match the prefix + contiguous token chars
 _PREFIX_PATTERNS = [
-    r"sk-[A-Za-z0-9_-]{10,}",           # OpenAI / OpenRouter / Anthropic (sk-ant-*)
+    # OpenAI / OpenRouter / Anthropic (sk-ant-*). Some provider-issued ``sk-``
+    # keys carry dot-delimited body segments (Alibaba ``sk-sp-…``/``sk-ws-…``).
+    # Each unit is one body char optionally preceded by a single dot, so the
+    # body ends on its last non-dot char (sentence punctuation is never
+    # consumed) and can never span ``..``: the ``sk-pro...EFGH`` display mask is
+    # left alone by a second redaction pass instead of collapsing to ``***``.
+    # No nested unbounded repeat: the dot is optional and followed by exactly
+    # one body char, so every position has one parse (linear).
+    r"sk-[A-Za-z0-9_-](?:\.?[A-Za-z0-9_-]){9,}",
     r"ghp_[A-Za-z0-9]{10,}",            # GitHub PAT (classic)
     r"github_pat_[A-Za-z0-9_]{10,}",    # GitHub PAT (fine-grained)
     r"gho_[A-Za-z0-9]{10,}",            # GitHub OAuth access token
@@ -549,6 +557,17 @@ _PREFIX_RE = re.compile(
     r"(?<![A-Za-z0-9_-])(" + "|".join(_PREFIX_PATTERNS) + r")(?![A-Za-z0-9_-])"
 )
 
+# Zhipu API keys use an unprefixed ``id.secret`` form. Deliberately
+# provider-shaped rather than a generic high-entropy dotted-token rule: the id
+# is exactly 32 lowercase hex chars and the secret a run of at least 16
+# alphanumerics, so content-hash filenames (``<sha>.bundle``, ``<md5>.sqlite3``)
+# never match. A trailing dot is allowed only when it ends the token (sentence
+# punctuation), not when another segment follows (local: upstream leaves a
+# sentence-final key in cleartext). Fixed-width id + one unbounded run: linear.
+_ZHIPU_API_KEY_RE = re.compile(
+    r"(?<![A-Za-z0-9_.-])([0-9a-f]{32}\.[A-Za-z0-9]{16,})(?![A-Za-z0-9_-]|\.[A-Za-z0-9_-])"
+)
+
 
 def _mask_control_split_tokens(text: str, mask_fn) -> str:
     """Mask tokens whose body is split by control/zero-width characters.
@@ -952,6 +971,12 @@ def redact_sensitive_text(
         # body so _PREFIX_RE cannot match across them (upstream #77484).
         text = _mask_control_split_tokens(text, _prefix_sub)
         text = _PREFIX_RE.sub(lambda m: _prefix_sub(m.group(1)), text)
+
+    # Prefix-less Zhipu ``id.secret`` keys (upstream 7b57cda6d9 / aebc71d78c).
+    # Runs on every surface, code files included, like the prefix pass.
+    if "." in text:
+        _zhipu_sub = _mask_token_nonreusable if file_read else _mask_token
+        text = _ZHIPU_API_KEY_RE.sub(lambda m: _zhipu_sub(m.group(1)), text)
 
     # ENV assignments: OPENAI_API_KEY=***  (skip for code files — false positives)
     if not code_file:

@@ -17,6 +17,82 @@ def _ensure_redaction_enabled(monkeypatch):
 
 
 class TestKnownPrefixes:
+    def test_dotted_sk_and_prefixless_zhipu_keys_fully_masked_on_every_surface(self):
+        """A key whose body carries dots must never leave a cleartext tail, and the
+        prefix-less Zhipu ``id.secret`` shape must mask at all: on the terminal
+        ``cat`` path (code_file=True) and on the file-read path, where the mask
+        must be the non-reusable sentinel (upstream 7b57cda6d9 / c2aa2ff25f)."""
+        from agent.redact import redact_terminal_output
+
+        dotted_sk = "sk-sp-" + "ABCDEFGH1234567890" + "." + "abcdefgh1234567890_XYZ-0987654321"
+        multi_dot_sk = "sk-ws-" + "H.EEPXREE.pFau.MEUCIQC6UnD-jj2a" + "ABCDEFGHIJKLMNOP"
+        zhipu = "50aaed1234567890abcdef1234567890" + "." + "ZpSh99AbCdEfGh12"
+        yaml = f"a:\n  api_key: {dotted_sk}\nb:\n  api_key: {zhipu}\nc:\n  api_key: {multi_dot_sk}\n"
+        tails = ("abcdefgh1234567890_XYZ", "ZpSh99", "MEUCIQC6UnD", "EEPXREE")
+
+        term = redact_terminal_output(yaml, "cat /tmp/keys.yaml")
+        for secret_tail in tails:
+            assert secret_tail not in term, term
+
+        read = redact_sensitive_text(yaml, file_read=True)
+        assert "«redacted:sk-…»" in read and "«redacted-secret»" in read, read
+        for secret_tail in tails:
+            assert secret_tail not in read, read
+
+        # Bare, no key context, and followed by sentence punctuation.
+        prose = redact_sensitive_text(f"use {dotted_sk}. or {zhipu}.", force=True)
+        for secret_tail in ("abcdefgh1234567890_XYZ", "ZpSh99AbCdEfGh12"):
+            assert secret_tail not in prose, prose
+        assert prose.endswith(".")
+
+    def test_display_mask_survives_second_pass(self):
+        """Display masks (``sk-pro...EFGH``) contain ``..``, which no real key
+        does: a second pass over an already-masked token must be a no-op, not
+        ``***`` (tool_executor redacts browser_type args, then
+        build_tool_preview redacts them again; upstream aebc71d78c)."""
+        assert redact_sensitive_text("sk-pro...EFGH", force=True) == "sk-pro...EFGH"
+        dotted_sk = "sk-sp-ABCDEFGH1234567890.abcdefgh1234567890_XYZ-0987654321"
+        once = redact_sensitive_text(f"key {dotted_sk} end", force=True)
+        assert "abcdefgh1234567890_XYZ" not in once
+        assert redact_sensitive_text(once, force=True) == once
+
+    def test_dotted_and_prefixless_matchers_leave_benign_tokens_alone(self):
+        """The Zhipu matcher is provider-shaped, not a generic dotted-token sweep:
+        content-hash filenames (incl. ``<sha>.bundle`` / ``<md5>.sqlite3``), bare
+        git shas, short ``sk-`` fragments and a 31-char id stay byte-identical."""
+        from agent.redact import redact_terminal_output
+
+        benign = (
+            "blob 0123456789abcdef0123456789abcdef.png\n"
+            "git bundle create 0123456789abcdef0123456789abcdef01234567.bundle\n"
+            "/cache/0123456789abcdef0123456789abcdef.sqlite3\n"
+            "cp " + "a1" * 18 + ".example\n"
+            "commit 0123456789abcdef0123456789abcdef01234567\n"
+            "sk-short sk-abc.def\n"
+            "release=" + "a" * 31 + ".ZpSh99AbCdEfGh12\n"
+        )
+        assert redact_terminal_output(benign, "git log --stat") == benign
+        assert redact_sensitive_text(benign, file_read=True) == benign
+
+    def test_dotted_and_zhipu_scans_stay_linear(self):
+        """No nested unbounded repeats: long dot runs and hex/dot soups that
+        almost match must not stall the redactor (upstream c2aa2ff25f)."""
+        import time
+
+        payloads = [
+            "sk-" + "a." * 10_000,
+            "sk-a" + ".." * 10_000 + "b",
+            "sk-abcdefghi." * 1_600,
+            ".sk-a" * 4_000,
+            ("0123456789abcdef" * 2 + ".") * 600,
+            ("0123456789abcdef" * 2 + "." + "A" * 15 + "_") * 400,
+            "0123456789abcdef" * 1_300 + ".abcdefghijklmnopq",
+        ]
+        for text in payloads:
+            t0 = time.perf_counter()
+            redact_sensitive_text(text, force=True)
+            assert time.perf_counter() - t0 < 1.0, repr(text[:40])
+
     def test_openai_sk_key(self):
         text = "Using key sk-proj-abc123def456ghi789jkl012"
         result = redact_sensitive_text(text)
