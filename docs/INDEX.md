@@ -1,5 +1,5 @@
 <!-- GENERATED FILE — do not edit by hand.
-     Source: /private/tmp/claude-501/-Users-mh-ai/bdfd5f82-12ed-431a-89b6-9ab63b31b587/scratchpad/root/hermes-agent/docs/
+     Source: /Users/mh/ai/hermes-agent/docs/
      Regenerate: uv run /Users/mh/ai/bootstrap/scripts/gen_docs_index.py -->
 
 # `hermes-agent` — doc index
