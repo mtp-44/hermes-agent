@@ -4,12 +4,14 @@ import os
 import pytest
 import yaml
 
+from agent import secret_scope as ss
 import tools.env_passthrough as _ep_mod
 from tools.env_passthrough import (
     clear_env_passthrough,
     get_all_passthrough,
     is_env_passthrough,
     register_env_passthrough,
+    resolve_passthrough_value,
 )
 
 
@@ -18,9 +20,11 @@ def _clean_passthrough():
     """Ensure a clean passthrough state for every test."""
     clear_env_passthrough()
     _ep_mod._config_passthrough = None
+    ss.set_multiplex_active(False)
     yield
     clear_env_passthrough()
     _ep_mod._config_passthrough = None
+    ss.set_multiplex_active(False)
 
 
 class TestSkillScopedPassthrough:
@@ -61,7 +65,7 @@ class TestConfigPassthrough:
     def test_reads_from_config(self, tmp_path, monkeypatch):
         config = {"terminal": {"env_passthrough": ["MY_CUSTOM_KEY", "ANOTHER_TOKEN"]}}
         config_path = tmp_path / "config.yaml"
-        config_path.write_text(yaml.dump(config))
+        config_path.write_text(yaml.dump(config), encoding="utf-8")
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
         _ep_mod._config_passthrough = None
 
@@ -96,7 +100,7 @@ class TestConfigPassthrough:
     def test_union_of_skill_and_config(self, tmp_path, monkeypatch):
         config = {"terminal": {"env_passthrough": ["CONFIG_KEY"]}}
         config_path = tmp_path / "config.yaml"
-        config_path.write_text(yaml.dump(config))
+        config_path.write_text(yaml.dump(config), encoding="utf-8")
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
         _ep_mod._config_passthrough = None
 
@@ -104,6 +108,42 @@ class TestConfigPassthrough:
         all_pt = get_all_passthrough()
         assert "CONFIG_KEY" in all_pt
         assert "SKILL_KEY" in all_pt
+
+
+class TestProfileScopedResolution:
+    def test_active_scope_overrides_process_fallback(self):
+        ss.set_multiplex_active(True)
+        token = ss.set_secret_scope({"SERVICE_TOKEN": "profile-b"})
+        try:
+            assert resolve_passthrough_value("SERVICE_TOKEN", "profile-a") == "profile-b"
+        finally:
+            ss.reset_secret_scope(token)
+
+    def test_active_scope_does_not_fall_back_to_another_profile(self):
+        ss.set_multiplex_active(True)
+        token = ss.set_secret_scope({})
+        try:
+            assert resolve_passthrough_value("SERVICE_TOKEN", "profile-a") is None
+        finally:
+            ss.reset_secret_scope(token)
+
+    def test_unscoped_multiplex_read_fails_closed(self):
+        ss.set_multiplex_active(True)
+        with pytest.raises(ss.UnscopedSecretError):
+            resolve_passthrough_value("SERVICE_TOKEN", "profile-a")
+
+    def test_single_profile_keeps_callers_fallback(self):
+        assert resolve_passthrough_value("SERVICE_TOKEN", "profile-a") == "profile-a"
+
+    def test_active_scope_keeps_explicit_global_override(self, monkeypatch):
+        """Global terminal settings still honor a caller-provided override."""
+        monkeypatch.setenv("TERMINAL_CWD", "/default")
+        ss.set_multiplex_active(True)
+        token = ss.set_secret_scope({})
+        try:
+            assert resolve_passthrough_value("TERMINAL_CWD", "/explicit") == "/explicit"
+        finally:
+            ss.reset_secret_scope(token)
 
 
 class TestExecuteCodeIntegration:
@@ -158,9 +198,113 @@ class TestExecuteCodeIntegration:
         assert "TENOR_API_KEY" in child_env
         assert child_env["TENOR_API_KEY"] == "test123"
 
+    def test_execute_code_uses_active_profile_for_passthrough(self, monkeypatch):
+        """The execute_code child must receive the routed profile's value."""
+        from tools.code_execution_tool import _scrub_child_env
+
+        register_env_passthrough(["SERVICE_TOKEN"])
+        monkeypatch.setenv("SERVICE_TOKEN", "token-for-default")
+        ss.set_multiplex_active(True)
+        token = ss.set_secret_scope({"SERVICE_TOKEN": "token-for-routed-profile"})
+        try:
+            child_env = _scrub_child_env({"SERVICE_TOKEN": "token-for-default"})
+        finally:
+            ss.reset_secret_scope(token)
+            ss.set_multiplex_active(False)
+
+        assert child_env["SERVICE_TOKEN"] == "token-for-routed-profile"
+
+    def test_execute_code_omits_missing_scoped_passthrough(self, monkeypatch):
+        """A missing routed secret must not leak into the execute_code child."""
+        from tools.code_execution_tool import _scrub_child_env
+
+        register_env_passthrough(["SERVICE_TOKEN"])
+        monkeypatch.setenv("SERVICE_TOKEN", "token-for-default")
+        ss.set_multiplex_active(True)
+        token = ss.set_secret_scope({})
+        try:
+            child_env = _scrub_child_env({"SERVICE_TOKEN": "token-for-default"})
+        finally:
+            ss.reset_secret_scope(token)
+            ss.set_multiplex_active(False)
+
+        assert "SERVICE_TOKEN" not in child_env
+
 
 class TestTerminalIntegration:
     """Verify that the passthrough is checked in terminal's env sanitizers."""
+
+    def test_background_terminal_uses_active_profile_for_passthrough(self, monkeypatch):
+        """Background/PTY terminal children must use the routed profile value."""
+        from tools.environments.local import _sanitize_subprocess_env
+
+        register_env_passthrough(["SERVICE_TOKEN"])
+        monkeypatch.setenv("SERVICE_TOKEN", "token-for-default")
+        ss.set_multiplex_active(True)
+        token = ss.set_secret_scope({"SERVICE_TOKEN": "token-for-routed-profile"})
+        try:
+            child_env = _sanitize_subprocess_env(
+                {"SERVICE_TOKEN": "token-for-default"},
+                {"SERVICE_TOKEN": "token-for-default"},
+            )
+        finally:
+            ss.reset_secret_scope(token)
+            ss.set_multiplex_active(False)
+
+        assert child_env["SERVICE_TOKEN"] == "token-for-routed-profile"
+
+    def test_background_terminal_omits_missing_scoped_passthrough(self, monkeypatch):
+        """A missing routed secret must not leak into background terminal work."""
+        from tools.environments.local import _sanitize_subprocess_env
+
+        register_env_passthrough(["SERVICE_TOKEN"])
+        monkeypatch.setenv("SERVICE_TOKEN", "token-for-default")
+        ss.set_multiplex_active(True)
+        token = ss.set_secret_scope({})
+        try:
+            child_env = _sanitize_subprocess_env({"SERVICE_TOKEN": "token-for-default"})
+        finally:
+            ss.reset_secret_scope(token)
+            ss.set_multiplex_active(False)
+
+        assert "SERVICE_TOKEN" not in child_env
+
+    def test_shared_local_snapshot_re_resolves_current_profile(self, monkeypatch, tmp_path):
+        """A persistent shell snapshot must not retain the previous profile's value."""
+        from tools.environments.local import LocalEnvironment
+
+        register_env_passthrough(["SERVICE_TOKEN"])
+        monkeypatch.setenv("SERVICE_TOKEN", "token-for-default")
+        ss.set_multiplex_active(True)
+        env = None
+        token_b = None
+        token_c = None
+        try:
+            token_a = ss.set_secret_scope({"SERVICE_TOKEN": "token-for-profile-a"})
+            try:
+                env = LocalEnvironment(cwd=str(tmp_path))
+                assert env.execute("printf '%s' \"$SERVICE_TOKEN\"")["output"] == "token-for-profile-a"
+            finally:
+                ss.reset_secret_scope(token_a)
+
+            token_b = ss.set_secret_scope({"SERVICE_TOKEN": "token-for-profile-b"})
+            result = env.execute("printf '%s' \"$SERVICE_TOKEN\"")
+            ss.reset_secret_scope(token_b)
+            token_b = None
+
+            token_c = ss.set_secret_scope({})
+            missing = env.execute("printf '%s' \"${SERVICE_TOKEN-unset}\"")
+        finally:
+            if token_b is not None:
+                ss.reset_secret_scope(token_b)
+            if token_c is not None:
+                ss.reset_secret_scope(token_c)
+            ss.set_multiplex_active(False)
+            if env is not None:
+                env.cleanup()
+
+        assert result["output"] == "token-for-profile-b"
+        assert missing["output"] == "unset"
 
     def test_blocklisted_var_blocked_by_default(self):
         from tools.environments.local import _sanitize_subprocess_env, _HERMES_PROVIDER_ENV_BLOCKLIST
@@ -194,6 +338,62 @@ class TestTerminalIntegration:
         result = _sanitize_subprocess_env(env)
         assert blocked_var not in result
         assert "PATH" in result
+
+    def test_passthrough_case_variant_of_blocklist_rejected(self):
+        """A case-variant registration (``openai_api_key``) must be refused just
+        like the canonical name: ``os.getenv`` is case-insensitive on Windows,
+        so a variant would tunnel the real ``OPENAI_API_KEY`` value into
+        children: the same GHSA-rhgp-j443-p4rf primitive."""
+        for var in ("openai_api_key", "OpenAi_Api_Key", "anthropic_api_key",
+                    "Aws_Bearer_Token_Bedrock"):
+            register_env_passthrough([var])
+            assert not is_env_passthrough(var), (
+                f"{var} should be refused passthrough registration")
+
+    def test_passthrough_case_variant_via_config_rejected(self, tmp_path, monkeypatch):
+        """The config-based allowlist (terminal.env_passthrough) must refuse
+        case variants of provider credentials on the same filter."""
+        config = {"terminal": {"env_passthrough": ["openai_api_key", "MY_OWN_KEY"]}}
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(yaml.dump(config), encoding="utf-8")
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        _ep_mod._config_passthrough = None
+
+        assert not is_env_passthrough("openai_api_key")
+        assert is_env_passthrough("MY_OWN_KEY")
+
+    def test_passthrough_case_variant_never_reaches_docker_exec_env(self, monkeypatch):
+        """Defense in depth, load-bearing on POSIX too: even if a case-variant
+        name were in the registered set, the docker env builder must drop it
+        via the folded blocklist. (Fork adaptation: upstream exercises
+        remote_common.resolve_passthrough_env, which this tree lacks.)"""
+        from tools.environments import docker as docker_env
+
+        env = docker_env.DockerEnvironment.__new__(docker_env.DockerEnvironment)
+        env._forward_env = []
+        env._env = {}
+        monkeypatch.setenv("openai_api_key", "sk-variant-value")
+        monkeypatch.setenv("MY_OWN_KEY", "own-value")
+        monkeypatch.setattr(docker_env, "_load_hermes_env_vars", lambda: {})
+        monkeypatch.setattr(
+            "tools.env_passthrough.get_all_passthrough",
+            lambda: {"openai_api_key", "MY_OWN_KEY"})
+        args = env._build_init_env_args()
+        assert not any(a.lower().startswith("openai_api_key=") for a in args)
+        assert "MY_OWN_KEY=own-value" in args
+
+    def test_passthrough_case_variant_never_reaches_execute_code_env(self):
+        """The GHSA-rhgp-j443-p4rf path end to end: the variant registration
+        is refused, so is_env_passthrough cannot carry the name past the
+        execute_code scrub."""
+        from tools.code_execution_tool import _scrub_child_env
+
+        register_env_passthrough(["openai_api_key"])
+        child_env = _scrub_child_env(
+            {"openai_api_key": "sk-real", "PATH": "/usr/bin"},
+            is_passthrough=is_env_passthrough, is_windows=False)
+        assert "openai_api_key" not in child_env
+        assert child_env["PATH"] == "/usr/bin"
 
     def test_passthrough_cannot_override_internal_dynamic_secret(self):
         """A skill must NOT be able to register dynamically-named Hermes

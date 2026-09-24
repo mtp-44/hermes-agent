@@ -113,6 +113,34 @@ class TestProviderEnvBlocklist:
             "AWS_BEARER_TOKEN_BEDROCK leaked into subprocess env (see #32314)"
         )
 
+    def test_case_variant_blocked_vars_are_stripped(self):
+        """A blocklisted credential stored under variant casing must not reach
+        subprocess env: on Windows the environment block is case-insensitive,
+        so a lowercase-stored ``openai_api_key`` IS the real credential."""
+        leaked_vars = {
+            "openai_api_key": "sk-fake-key",
+            "Anthropic_Api_Key": "ant-fake-key",
+            "aws_bearer_token_bedrock": "bedrock-bearer-secret",
+        }
+        result_env = _run_with_env(extra_os_env=leaked_vars)
+
+        for var in leaked_vars:
+            assert var not in result_env, (
+                f"{var} (case variant of a blocklisted credential) leaked"
+            )
+
+    def test_case_variant_blocked_vars_stripped_from_background_env(self):
+        """Same fold on the background/PTY path (_sanitize_subprocess_env)."""
+        from tools.environments.local import _sanitize_subprocess_env
+
+        result = _sanitize_subprocess_env(
+            {"openai_api_key": "sk-fake", "PATH": "/usr/bin"},
+            {"Anthropic_Api_Key": "ant-fake"},
+        )
+        assert "openai_api_key" not in result
+        assert "Anthropic_Api_Key" not in result
+        assert result["PATH"] == "/usr/bin"
+
     def test_vertex_credentials_path_is_stripped(self):
         """The Vertex AI service-account JSON path must not leak into
         subprocesses, even though it is filesystem path metadata rather
@@ -307,6 +335,48 @@ class TestActiveVenvMarkerStripping:
         from tools.environments.local import _ACTIVE_VENV_MARKER_VARS
         assert "VIRTUAL_ENV" in _ACTIVE_VENV_MARKER_VARS
         assert "CONDA_PREFIX" in _ACTIVE_VENV_MARKER_VARS
+
+
+class TestProfileScopedPassthrough:
+    def test_make_run_env_uses_active_profile_for_passthrough(self, monkeypatch):
+        """Allowlisted values must come from the routed profile, not os.environ."""
+        from agent import secret_scope as ss
+        from tools.env_passthrough import clear_env_passthrough, register_env_passthrough
+        from tools.environments.local import _make_run_env
+
+        clear_env_passthrough()
+        register_env_passthrough(["SERVICE_TOKEN"])
+        monkeypatch.setenv("SERVICE_TOKEN", "token-for-default")
+        ss.set_multiplex_active(True)
+        token = ss.set_secret_scope({"SERVICE_TOKEN": "token-for-routed-profile"})
+        try:
+            result = _make_run_env({})
+        finally:
+            ss.reset_secret_scope(token)
+            ss.set_multiplex_active(False)
+            clear_env_passthrough()
+
+        assert result["SERVICE_TOKEN"] == "token-for-routed-profile"
+
+    def test_make_run_env_omits_missing_scoped_passthrough(self, monkeypatch):
+        """A missing routed secret must not fall back to the default profile."""
+        from agent import secret_scope as ss
+        from tools.env_passthrough import clear_env_passthrough, register_env_passthrough
+        from tools.environments.local import _make_run_env
+
+        clear_env_passthrough()
+        register_env_passthrough(["SERVICE_TOKEN"])
+        monkeypatch.setenv("SERVICE_TOKEN", "token-for-default")
+        ss.set_multiplex_active(True)
+        token = ss.set_secret_scope({})
+        try:
+            result = _make_run_env({})
+        finally:
+            ss.reset_secret_scope(token)
+            ss.set_multiplex_active(False)
+            clear_env_passthrough()
+
+        assert "SERVICE_TOKEN" not in result
 
 
 class TestBlocklistCoverage:

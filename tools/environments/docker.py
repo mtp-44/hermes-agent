@@ -17,9 +17,10 @@ from pathlib import Path
 from typing import Optional
 
 from tools.environments.base import BaseEnvironment, _popen_bash
-from tools.environments.local import (
+from tools.environments.local import (  # noqa: F401 — _HERMES_PROVIDER_ENV_BLOCKLIST stays importable from here
     _HERMES_PROVIDER_ENV_BLOCKLIST,
     _is_hermes_internal_secret,
+    _is_provider_env_blocklisted,
 )
 
 logger = logging.getLogger(__name__)
@@ -1001,7 +1002,9 @@ class DockerEnvironment(BaseEnvironment):
         _implicit_forward = {
             k for k in passthrough_keys if not _is_hermes_internal_secret(k)
         }
-        forward_keys = explicit_forward_keys | (_implicit_forward - _HERMES_PROVIDER_ENV_BLOCKLIST)
+        forward_keys = explicit_forward_keys | {
+            k for k in _implicit_forward if not _is_provider_env_blocklisted(k)
+        }
         hermes_env = _load_hermes_env_vars() if forward_keys else {}
         for key in sorted(forward_keys):
             value = os.getenv(key)
