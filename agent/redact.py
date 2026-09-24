@@ -132,7 +132,13 @@ _PREFIX_PATTERNS = [
 # ENV assignment patterns: KEY=value where KEY contains a secret-like name.
 # Uppercase keys tolerate spaces around "=" (e.g. ``FOO_SECRET = bar``) because
 # an all-caps key is almost never prose/code.
-_SECRET_ENV_NAMES = r"(?:API_?KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTH)"
+# Bare ``KEY`` / ``PASS`` / ``PW`` suffixes are included (``MCP_ACCESS_KEY=…``,
+# ``FAL_KEY=…``, ``MYSQL_PASS=…``, ``DB_PW=…``). Those three are short enough
+# to sit inside ordinary words (``KEYBOARD``, ``PASSAGE``, ``PWD``), so a match
+# that rests on one of them alone must be word-bounded — see
+# _key_has_secret_keyword. The legacy names keep embedded matching
+# (``MYTOKEN=…``).
+_SECRET_ENV_NAMES = r"(?:API_?KEY|KEY|TOKEN|SECRET|PASSWORD|PASSWD|PASS|PW|CREDENTIAL|AUTH)"
 _ENV_ASSIGN_RE = re.compile(
     rf"([A-Z0-9_]{{0,50}}{_SECRET_ENV_NAMES}[A-Z0-9_]{{0,50}})\s*=\s*(['\"]?)(\S+)\2",
 )
@@ -203,6 +209,84 @@ _YAML_ASSIGN_RE = re.compile(
     rf"(^[ \t]*+[A-Za-z0-9_.\-]*{_YAML_CFG_NAMES}[A-Za-z0-9_.\-]*+)(:[ \t]*+)(?!['\"])([^\s&]++)",
     re.IGNORECASE | re.MULTILINE,
 )
+
+# Word-boundary validation for the assignment passes above.
+#
+# The key classes allow arbitrary affixes around the secret keyword so real key
+# names (``client_secret``, ``clientSecret``, ``s3.secret-key``, ``dbpassword``)
+# match. The side effect: ordinary document words that merely CONTAIN a keyword
+# matched too — ``Secretary: J.Smith``, ``tokenizer: cl100k_base``,
+# ``author=Smith`` — and had their values mangled (ported from upstream,
+# nearai/ironclaw#6129).
+#
+# Mixed/lowercase keys: a keyword occurrence counts only when it ENDS a word —
+# at the key's edge, before a non-letter (``_ - . 3``), at a camelCase
+# transition (``secretKey``) or before a plural ``s`` (``secrets:``). Unlike
+# upstream, the START of the keyword is not checked, so concatenated compounds
+# (``dbpassword``, ``clientsecret``, ``mytoken``) stay masked; only the
+# keyword-as-word-prefix prose shape (``secretary``, ``tokenizer``,
+# ``authored``, ``credentialing``, ``passwordless``) is let through.
+#
+# ALL-CAPS keys (the _ENV_ASSIGN_RE shape) keep legacy embedded matching for
+# the long names (``MYTOKEN=…``) — an all-caps key is almost never prose. The
+# short bare ``KEY``/``PASS``/``PW`` names must be word-bounded on BOTH sides,
+# so ``MCP_ACCESS_KEY`` / ``DB_PW`` match and ``KEYBOARD`` / ``PASSAGE`` /
+# ``PWD`` / ``OLDPWD`` / ``BYPASS`` do not.
+_KEY_KEYWORD_RE = re.compile(
+    r"(?:api|auth|access|refresh|session|secret)[ _.\-]?(?:key|token)"
+    r"|token|secret|passwd|password|credential|auth",
+    re.IGNORECASE,
+)
+_UPPER_LEGACY_KEYWORD_RE = re.compile(r"API_?KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTH")
+_UPPER_BARE_KEYWORD_RE = re.compile(r"KEY|PASS|PW")
+
+
+def _is_word_start(s: str, i: int) -> bool:
+    """True if position ``i`` in ``s`` begins a word (not mid-word)."""
+    if i == 0:
+        return True
+    prev, cur = s[i - 1], s[i]
+    if not prev.isalpha():
+        return True
+    if cur.isupper() and prev.islower():
+        return True  # camelCase: clientSecret
+    # Acronym run ending: APIToken — the 'T' begins a new word when it is
+    # followed by lowercase while the preceding run is uppercase.
+    if cur.isupper() and prev.isupper() and i + 1 < len(s) and s[i + 1].islower():
+        return True
+    return False
+
+
+def _is_word_end(s: str, j: int, *, allow_plural: bool = True) -> bool:
+    """True if position ``j`` (exclusive end) in ``s`` ends a word."""
+    if j >= len(s):
+        return True
+    cur = s[j]
+    if not cur.isalpha():
+        return True
+    if cur.isupper() and s[j - 1].islower():
+        return True  # camelCase continuation: secretKey
+    if allow_plural and cur in "sS":
+        return _is_word_end(s, j + 1, allow_plural=False)
+    return False
+
+
+def _key_has_secret_keyword(key: str) -> bool:
+    """Post-match validator for the ENV / config / YAML assignment passes.
+
+    Rejects keys whose only keyword is embedded in a larger word (see the
+    comment above _KEY_KEYWORD_RE for the exact rule per key shape).
+    """
+    letters = [c for c in key if c.isalpha()]
+    if letters and all(c.isupper() for c in letters):
+        if _UPPER_LEGACY_KEYWORD_RE.search(key):
+            return True
+        return any(
+            _is_word_start(key, m.start()) and _is_word_end(key, m.end())
+            for m in _UPPER_BARE_KEYWORD_RE.finditer(key)
+        )
+    return any(_is_word_end(key, m.end()) for m in _KEY_KEYWORD_RE.finditer(key))
+
 
 # JSON field patterns: "apiKey": "value", "token": "value", etc.
 _JSON_KEY_NAMES = r"(?:api_?[Kk]ey|token|secret|password|access_token|refresh_token|auth_token|bearer|secret_value|raw_secret|secret_input|key_material)"
@@ -581,6 +665,10 @@ def redact_sensitive_text(
         if "=" in text:
             def _redact_env(m):
                 name, quote, value = m.group(1), m.group(2), m.group(3)
+                # Keyword must sit at a word boundary within the key —
+                # ``KEYBOARD=…`` / ``author=Smith`` are not credentials.
+                if not _key_has_secret_keyword(name):
+                    return m.group(0)
                 return f"{name}={quote}{_mask_token(value)}{quote}"
             text = _ENV_ASSIGN_RE.sub(_redact_env, text)
             # Lowercase/dotted config keys (issue #16413). Skip URLs entirely —
@@ -611,6 +699,10 @@ def redact_sensitive_text(
         if ":" in text and "://" not in text:
             def _redact_yaml(m):
                 key, sep, value = m.group(1), m.group(2), m.group(3)
+                # ``Secretary: J.Smith`` / ``tokenizer: cl100k_base`` are
+                # document text, not credentials.
+                if not _key_has_secret_keyword(key):
+                    return m.group(0)
                 return f"{key}{sep}{_mask_token(value)}"
             text = _YAML_ASSIGN_RE.sub(_redact_yaml, text)
 

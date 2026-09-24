@@ -163,6 +163,138 @@ class TestEnvAssignments:
         assert "mypassword" not in result
 
 
+class TestBareSecretEnvSuffixes:
+    """Bare *_KEY / *_PASS / *_PW env suffixes mask (upstream #77484)."""
+
+    def test_upper_suffix_keys_mask(self):
+        for text in ("FAL_KEY=opaqueFalValue123456", "MCP_ACCESS_KEY=opaqueMcpValue123456",
+                     "MYSQL_PASS=ghi789", "DB_PW=jkl012"):
+            result = redact_sensitive_text(text, force=True)
+            assert "=" in result and result.split("=", 1)[1] != text.split("=", 1)[1], text
+
+    def test_mcp_access_key_in_env_dump_masks(self):
+        from agent.redact import redact_terminal_output
+
+        out = redact_terminal_output(
+            "HOME=/home/u\nMCP_ACCESS_KEY=fakeMcpAccessKey0123456789\nPWD=/tmp\n", "env"
+        )
+        assert "fakeMcpAccessKey0123456789" not in out
+        assert "MCP_ACCESS_KEY=" in out
+        assert "HOME=/home/u" in out and "PWD=/tmp" in out
+
+    def test_prose_words_with_keyword_unchanged(self):
+        # KEYBOARD / PASSAGE / PWD embed the bare keyword but are not creds
+        for text in ("KEYBOARD=notsecret", "PASSAGE=notsecret", "PWD=/home/u",
+                     "OLDPWD=/tmp/x", "BYPASS=1", "KEYMAP=de"):
+            result = redact_sensitive_text(text, force=True)
+            assert result == text
+
+    def test_form_body_not_swallowed(self):
+        # A bare `password=`/`token=` in a form body must not be eaten greedily
+        text = "password=mysecret&username=bob&token=opaqueValue"
+        result = redact_sensitive_text(text, force=True)
+        assert "mysecret" not in result
+        assert "opaqueValue" not in result
+        assert "username=bob" in result
+
+
+class TestKeywordWordBoundary:
+    """Ported from upstream (nearai/ironclaw#6129) — a secret keyword that is
+    the PREFIX of a larger prose word (``Secretary`` ⊃ ``secret``,
+    ``tokenizer`` ⊃ ``token``, ``author`` ⊃ ``auth``) must NOT trigger the
+    lowercase/dotted/YAML config passes. Real key shapes must keep redacting.
+    """
+
+    # ── prose words embedding a keyword are preserved ──────────────────
+
+    def test_secretary_yaml_value_preserved(self):
+        text = "Secretary: JanetYellen1234567890"
+        assert redact_sensitive_text(text) == text
+
+    def test_undersecretary_preserved(self):
+        text = "Undersecretary: RobertSmith123456789"
+        assert redact_sensitive_text(text) == text
+
+    def test_tokenizer_yaml_value_preserved(self):
+        # HuggingFace model-card style metadata.
+        text = "tokenizer: cl100k_base_long_name_x"
+        assert redact_sensitive_text(text) == text
+
+    def test_secretariat_preserved(self):
+        text = "secretariat: GenevaOffice123456789"
+        assert redact_sensitive_text(text) == text
+
+    def test_secretary_equals_assignment_preserved(self):
+        text = "secretary=JohnSmith12345678901234"
+        assert redact_sensitive_text(text) == text
+
+    def test_dotted_secretary_preserved(self):
+        text = "press.secretary=KarineJeanPierre123"
+        assert redact_sensitive_text(text) == text
+
+    def test_bibtex_author_assignment_preserved(self):
+        # ``author`` embeds the ``auth`` keyword — citation keys are prose.
+        text = "author=Smith2020LongCitationKey1"
+        assert redact_sensitive_text(text) == text
+
+    def test_credentialing_preserved(self):
+        text = "credentialing=enabled_long_value_12345"
+        assert redact_sensitive_text(text) == text
+
+    # ── real key shapes still redact ────────────────────────────────────
+
+    def test_separator_keys_still_redacted(self):
+        for text in (
+            "client_secret: abc123def456ghi789jkl",
+            "auth_token: xyz789xyz789xyz789xyz",
+            "my_secret: topvalue123456789012345",
+            "db.password=hunter2verylongpassword",
+        ):
+            result = redact_sensitive_text(text)
+            assert result != text, text
+
+    def test_camelcase_keys_still_redacted(self):
+        for text in (
+            "clientSecret: abc123def456ghi789jkl",
+            "secretKey: abc123def456ghi789jklmno",
+            "APIToken: abc123def456ghi789jklmn",
+        ):
+            result = redact_sensitive_text(text)
+            assert result != text, text
+
+    def test_concatenated_compounds_still_redacted(self):
+        # ngrok authtoken, tailscale authkey, minio secretkey, accesstoken —
+        # and (local rule: the keyword START is not checked) plain
+        # concatenations that end in a keyword.
+        for text in (
+            "authtoken: 2abcdefghij0123456789_ngrok",
+            "authkey=tskey-auth-abcdef123456789",
+            "secretkey: abc123def456ghi789jklmno",
+            "accesstoken: abcdefghij0123456789xyz",
+            "dbpassword: hunter2hunter2hunter2hh",
+            "clientsecret: abc123def456ghi789jkl",
+            "mytoken=abcdefgh1234567890123456",
+        ):
+            result = redact_sensitive_text(text)
+            assert result != text, text
+
+    def test_plural_keys_still_redacted(self):
+        text = "secrets: hunter2hunter2hunter2hh"
+        result = redact_sensitive_text(text)
+        assert "hunter2hunter2hunter2hh" not in result
+
+    def test_digit_boundary_still_redacted(self):
+        text = "oauth2_token: abcdefghij0123456789"
+        result = redact_sensitive_text(text)
+        assert "abcdefghij0123456789" not in result
+
+    def test_all_caps_embedded_keyword_still_redacted(self):
+        # All-caps keys keep legacy embedded matching (MYTOKEN=…).
+        text = "MYTOKEN=abcdefgh1234567890123456"
+        result = redact_sensitive_text(text)
+        assert "abcdefgh1234567890123456" not in result
+
+
 class TestJsonFields:
     def test_json_api_key(self):
         text = '{"apiKey": "sk-proj-abc123def456ghi789jkl012"}'
