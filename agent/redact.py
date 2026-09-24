@@ -185,21 +185,36 @@ _CFG_SECRET_WORD_RE = re.compile(_SECRET_CFG_NAMES, re.IGNORECASE)
 # Namespaced (dotted) key: the secret word may sit anywhere in a dotted path.
 # NOTE(perf): possessive quantifiers (py3.11+) replace the nested quantifier
 # ``(?:[A-Za-z0-9_\-]+\.)+`` (exponential backtracking on long dotted runs).
-# The ``*`` runs bordering {_SECRET_CFG_NAMES} must stay backtrackable
-# (secret words are matchable by the class, e.g. ``app.api.key=…``).
 # The lookbehind anchors each attempt to the start of a key run: without it,
-# ``re.sub`` retries the backtrackable ``*`` prefix at every byte of a long
-# non-matching dotted run, making the sub quadratic whenever the text contains
-# a secret keyword anywhere (the ``_CFG_SECRET_WORD_RE`` pre-gate only skips
-# secret-free text). Match set is unchanged — any match starting mid-run
-# implies a leftmost match starting at the run start. The leading ``\.*+``
-# keeps that true for runs that open with a dot (``.app.password=…``): the
-# pre-lookbehind pattern matched those from the first segment, and without it
-# the anchored form would skip them.
+# ``re.sub`` retries the prefix at every byte of a long non-matching dotted
+# run. Match set is unchanged — any match starting mid-run implies a leftmost
+# match starting at the run start. The leading ``\.*+`` keeps that true for
+# runs that open with a dot (``.app.password=…``).
+#
+# Keyword runs (``token`` * N, ``api.key`` * N): the key is ``<class>*`` KEYWORD
+# ``<class>*``, and a backtrackable ``*`` on each side of the keyword retried
+# every keyword occurrence in the run, each with a fresh scan to the end of the
+# run — quadratic, and cubic for ``api.key`` runs (keyword x dot x tail scan),
+# ~2 s at 5 KB. Both key shapes are now committed per attempt, which is exact
+# because the key always ends where the ``[A-Za-z0-9_.\-]`` run ends: the only
+# character a key can hold outside that class is the space in ``api key``, so
+# once the rightmost keyword occurrence is found, every other occurrence ends
+# the key at the same place and can only fail the same way.
+#   1. ``<segment>.<…keyword…>``: atomic ``(?>…)`` over the part after the first
+#      dot, so the greedy prefix settles on the rightmost keyword once.
+#   2. ``<…keyword…>.<segment>``: needs SOME keyword followed later by a dot with
+#      a char after it; the leftmost keyword leaves the longest tail, so commit
+#      to it (atomic lazy prefix) and check the tail with one lookahead. The
+#      ``api key`` spelling crosses the space, so it gets its own branch (2b);
+#      branch 2a uses the keyword set without the space separator.
+_SECRET_CFG_NAMES_NOSPACE = r"(?:api[_.\-]?key|token|secret|passwd|password|credential|auth)"
 _CFG_DOTTED_RE = re.compile(
     rf"(?<![A-Za-z0-9_.\-])"
-    rf"(\.*+[A-Za-z0-9_\-]++\.[A-Za-z0-9_.\-]*{_SECRET_CFG_NAMES}[A-Za-z0-9_.\-]*+"
-    rf"|[A-Za-z0-9_.\-]*{_SECRET_CFG_NAMES}[A-Za-z0-9_.\-]*\.[A-Za-z0-9_.\-]++)"
+    rf"(\.*+[A-Za-z0-9_\-]++\.(?>[A-Za-z0-9_.\-]*{_SECRET_CFG_NAMES}[A-Za-z0-9_.\-]*+)"
+    rf"|(?>[A-Za-z0-9_.\-]*?{_SECRET_CFG_NAMES_NOSPACE})"
+    rf"(?=[A-Za-z0-9_.\-]*?\.[A-Za-z0-9_.\-])[A-Za-z0-9_.\-]*+"
+    rf"|[A-Za-z0-9_.\-]*?api[ ]key"
+    rf"(?=[A-Za-z0-9_.\-]*?\.[A-Za-z0-9_.\-])[A-Za-z0-9_.\-]*+)"
     rf"={_CFG_VALUE}",
     re.IGNORECASE,
 )
@@ -208,8 +223,11 @@ _CFG_DOTTED_RE = re.compile(
 # gutter (``5|password=…`` from read_file, ``6:password=…`` from grep -n).
 # Anchored at ``^`` without it, the rendered read of a secret-bearing file
 # leaked what the raw text masked.
+# The key is atomic ``(?>…)`` for the reason given at _CFG_DOTTED_RE (keyword
+# runs were quadratic); here ``api.key`` / ``api key`` are the spellings that
+# cross the ``[A-Za-z0-9_\-]`` class.
 _CFG_ANCHORED_RE = re.compile(
-    rf"(^[ \t]*{_LINE_NUMBER_GUTTER}(?:export[ \t]+)?[A-Za-z0-9_\-]*{_SECRET_CFG_NAMES}[A-Za-z0-9_\-]*)={_CFG_VALUE}",
+    rf"(^[ \t]*{_LINE_NUMBER_GUTTER}(?:export[ \t]+)?(?>[A-Za-z0-9_\-]*{_SECRET_CFG_NAMES}[A-Za-z0-9_\-]*))={_CFG_VALUE}",
     re.IGNORECASE | re.MULTILINE,
 )
 
@@ -223,9 +241,11 @@ _CFG_ANCHORED_RE = re.compile(
 # the ``token`` keyword. Quoted values defer to _JSON_FIELD_RE via the lookahead.
 _YAML_CFG_NAMES = r"(?:api[ _.\-]?key|token|secret|passwd|password|credential)"
 # NOTE(perf): possessive quantifiers wherever the successor is disjoint; the
-# leading ``[A-Za-z0-9_.\-]*`` stays backtrackable (see _CFG_DOTTED_RE note).
+# key is atomic ``(?>…)`` so a keyword run (``token`` * N) settles on its
+# rightmost keyword once instead of retrying every occurrence (quadratic; exact
+# for the reason given at _CFG_DOTTED_RE).
 _YAML_ASSIGN_RE = re.compile(
-    rf"(^[ \t]*+{_LINE_NUMBER_GUTTER}[A-Za-z0-9_.\-]*{_YAML_CFG_NAMES}[A-Za-z0-9_.\-]*+)(:[ \t]*+)(?!['\"])([^\s&]++)",
+    rf"(^[ \t]*+{_LINE_NUMBER_GUTTER}(?>[A-Za-z0-9_.\-]*{_YAML_CFG_NAMES}[A-Za-z0-9_.\-]*+))(:[ \t]*+)(?!['\"])([^\s&]++)",
     re.IGNORECASE | re.MULTILINE,
 )
 # Quoted YAML scalar (``api_key: "value"`` / ``password: 'value'``). The
@@ -234,7 +254,7 @@ _YAML_ASSIGN_RE = re.compile(
 # Only run for secret-bearing files (``secret_file=True``): elsewhere a quoted
 # value next to a keyword is as likely to be code or prose.
 _YAML_QUOTED_ASSIGN_RE = re.compile(
-    rf"(^[ \t]*+{_LINE_NUMBER_GUTTER}[A-Za-z0-9_.\-]*{_YAML_CFG_NAMES}[A-Za-z0-9_.\-]*+)(:[ \t]*+)(['\"])([^'\"\n]+)\3",
+    rf"(^[ \t]*+{_LINE_NUMBER_GUTTER}(?>[A-Za-z0-9_.\-]*{_YAML_CFG_NAMES}[A-Za-z0-9_.\-]*+))(:[ \t]*+)(['\"])([^'\"\n]+)\3",
     re.IGNORECASE | re.MULTILINE,
 )
 
