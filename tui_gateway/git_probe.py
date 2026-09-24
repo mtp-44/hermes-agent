@@ -31,7 +31,12 @@ import time
 from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor
 
-from hermes_cli._subprocess_compat import IS_WINDOWS, windows_hide_flags
+from hermes_cli._subprocess_compat import (
+    IS_WINDOWS,
+    harden_git_argv,
+    noninteractive_git_env,
+    windows_hide_flags,
+)
 
 _GIT_TIMEOUT = 1.5
 _WARM_WORKERS = 8
@@ -50,7 +55,7 @@ def run_git(cwd: str, *args: str) -> str:
     _popen_kwargs = {"creationflags": windows_hide_flags()} if IS_WINDOWS else {}
     try:
         result = subprocess.run(
-            ["git", "-C", cwd, *args],
+            ["git", "-C", cwd, *harden_git_argv(args)],
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -58,6 +63,8 @@ def run_git(cwd: str, *args: str) -> str:
             timeout=_GIT_TIMEOUT,
             check=False,
             stdin=subprocess.DEVNULL,
+            # GHSA-7x36-8jrh-v4pw: project-tree builds probe arbitrary dirs.
+            env=noninteractive_git_env(),
             **_popen_kwargs,
         )
         return result.stdout.strip() if result.returncode == 0 else ""

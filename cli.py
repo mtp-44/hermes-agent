@@ -175,6 +175,10 @@ from hermes_cli.browser_connect import (
     try_launch_chrome_debug,
 )
 from hermes_cli.env_loader import load_hermes_dotenv
+from hermes_cli._subprocess_compat import (
+    harden_git_argv as _harden_git_argv,
+    noninteractive_git_env as _noninteractive_git_env,
+)
 from utils import base_url_host_matches, fast_safe_load
 
 _hermes_home = get_hermes_home()
@@ -1243,6 +1247,7 @@ def _git_repo_root() -> Optional[str]:
         result = subprocess.run(
             ["git", "rev-parse", "--show-toplevel"],
             capture_output=True, text=True, timeout=5,
+            stdin=subprocess.DEVNULL, env=_noninteractive_git_env(),
         )
         if result.returncode == 0:
             return _normalize_git_bash_path(result.stdout.strip())
@@ -1288,8 +1293,9 @@ def _resolve_worktree_base(repo_root: str) -> tuple:
 
     def _git(args, timeout=20):
         return subprocess.run(
-            ["git", *args],
+            ["git", *_harden_git_argv(args)],
             capture_output=True, text=True, timeout=timeout, cwd=repo_root,
+            stdin=subprocess.DEVNULL, env=_noninteractive_git_env(),
         )
 
     # 1. Current branch's upstream, if it tracks one.
@@ -1389,6 +1395,7 @@ def _setup_worktree(repo_root: str = None, sync_base: bool = True) -> Optional[D
         result = subprocess.run(
             ["git", "worktree", "add", str(wt_path), "-b", branch_name, base_ref],
             capture_output=True, text=True, timeout=30, cwd=repo_root,
+            stdin=subprocess.DEVNULL, env=_noninteractive_git_env(),
         )
         if result.returncode != 0:
             # If branching from the resolved remote ref failed for any reason
@@ -1403,6 +1410,7 @@ def _setup_worktree(repo_root: str = None, sync_base: bool = True) -> Optional[D
                 result = subprocess.run(
                     ["git", "worktree", "add", str(wt_path), "-b", branch_name, base_ref],
                     capture_output=True, text=True, timeout=30, cwd=repo_root,
+                    stdin=subprocess.DEVNULL, env=_noninteractive_git_env(),
                 )
             if result.returncode != 0:
                 print(f"\033[31m✗ Failed to create worktree: {result.stderr.strip()}\033[0m")
@@ -1484,6 +1492,7 @@ def _setup_worktree(repo_root: str = None, sync_base: bool = True) -> Optional[D
         subprocess.run(
             ["git", "worktree", "lock", "--reason", f"hermes pid={os.getpid()}", str(wt_path)],
             capture_output=True, text=True, timeout=10, cwd=repo_root,
+            stdin=subprocess.DEVNULL, env=_noninteractive_git_env(),
         )
         logger.debug("Worktree locked: %s (pid=%s)", wt_path, os.getpid())
     except Exception as e:
@@ -1517,6 +1526,7 @@ def _worktree_has_unpushed_commits(worktree_path: str, timeout: int = 10) -> boo
         remote_refs = subprocess.run(
             ["git", "for-each-ref", "--format=%(refname)", "refs/remotes"],
             capture_output=True, text=True, timeout=timeout, cwd=worktree_path,
+            stdin=subprocess.DEVNULL, env=_noninteractive_git_env(),
         )
         if remote_refs.returncode != 0:
             return True
@@ -1524,8 +1534,9 @@ def _worktree_has_unpushed_commits(worktree_path: str, timeout: int = 10) -> boo
             return False
 
         result = subprocess.run(
-            ["git", "log", "--oneline", "HEAD", "--not", "--remotes"],
+            ["git", *_harden_git_argv(["log", "--oneline", "HEAD", "--not", "--remotes"])],
             capture_output=True, text=True, timeout=timeout, cwd=worktree_path,
+            stdin=subprocess.DEVNULL, env=_noninteractive_git_env(),
         )
         if result.returncode != 0:
             return True
@@ -1547,6 +1558,7 @@ def _worktree_is_dirty(worktree_path: str, timeout: int = 10) -> bool:
         result = subprocess.run(
             ["git", "status", "--porcelain"],
             capture_output=True, text=True, timeout=timeout, cwd=worktree_path,
+            stdin=subprocess.DEVNULL, env=_noninteractive_git_env(),
         )
         if result.returncode != 0:
             return True
@@ -1580,6 +1592,7 @@ def _worktree_lock_is_live(repo_root: str, worktree_path: str, timeout: int = 10
         result = subprocess.run(
             ["git", "worktree", "list", "--porcelain"],
             capture_output=True, text=True, timeout=timeout, cwd=repo_root,
+            stdin=subprocess.DEVNULL, env=_noninteractive_git_env(),
         )
         if result.returncode != 0:
             return "live"
@@ -1655,6 +1668,7 @@ def _cleanup_worktree(info: Dict[str, str] = None) -> None:
         subprocess.run(
             ["git", "worktree", "unlock", wt_path],
             capture_output=True, text=True, timeout=10, cwd=repo_root,
+            stdin=subprocess.DEVNULL, env=_noninteractive_git_env(),
         )
     except Exception as e:
         logger.debug("git worktree unlock failed (non-fatal): %s", e)
@@ -1663,6 +1677,7 @@ def _cleanup_worktree(info: Dict[str, str] = None) -> None:
         subprocess.run(
             ["git", "worktree", "remove", wt_path, "--force"],
             capture_output=True, text=True, timeout=15, cwd=repo_root,
+            stdin=subprocess.DEVNULL, env=_noninteractive_git_env(),
         )
     except Exception as e:
         logger.debug("Failed to remove worktree: %s", e)
@@ -1672,6 +1687,7 @@ def _cleanup_worktree(info: Dict[str, str] = None) -> None:
         subprocess.run(
             ["git", "branch", "-D", branch],
             capture_output=True, text=True, timeout=10, cwd=repo_root,
+            stdin=subprocess.DEVNULL, env=_noninteractive_git_env(),
         )
     except Exception as e:
         logger.debug("Failed to delete branch %s: %s", branch, e)
@@ -1833,6 +1849,7 @@ def _prune_stale_worktrees(repo_root: str, max_age_hours: int = 24) -> None:
                 subprocess.run(
                     ["git", "worktree", "unlock", str(entry)],
                     capture_output=True, text=True, timeout=10, cwd=repo_root,
+                    stdin=subprocess.DEVNULL, env=_noninteractive_git_env(),
                 )
             except Exception as e:
                 logger.debug("Failed to unlock dead worktree %s: %s", entry.name, e)
@@ -1842,12 +1859,14 @@ def _prune_stale_worktrees(repo_root: str, max_age_hours: int = 24) -> None:
             branch_result = subprocess.run(
                 ["git", "branch", "--show-current"],
                 capture_output=True, text=True, timeout=5, cwd=str(entry),
+                stdin=subprocess.DEVNULL, env=_noninteractive_git_env(),
             )
             branch = branch_result.stdout.strip()
 
             remove_result = subprocess.run(
                 ["git", "worktree", "remove", str(entry), "--force"],
                 capture_output=True, text=True, timeout=15, cwd=repo_root,
+                stdin=subprocess.DEVNULL, env=_noninteractive_git_env(),
             )
             if remove_result.returncode != 0:
                 # Removal failed — keep the branch so any commits stay
@@ -1861,6 +1880,7 @@ def _prune_stale_worktrees(repo_root: str, max_age_hours: int = 24) -> None:
                 subprocess.run(
                     ["git", "branch", "-D", branch],
                     capture_output=True, text=True, timeout=10, cwd=repo_root,
+                    stdin=subprocess.DEVNULL, env=_noninteractive_git_env(),
                 )
             logger.debug("Pruned stale worktree: %s (force=%s)", entry.name, force)
         except Exception as e:
@@ -1882,6 +1902,7 @@ def _prune_orphaned_branches(repo_root: str) -> None:
         result = subprocess.run(
             ["git", "branch", "--format=%(refname:short)"],
             capture_output=True, text=True, timeout=10, cwd=repo_root,
+            stdin=subprocess.DEVNULL, env=_noninteractive_git_env(),
         )
         if result.returncode != 0:
             return
@@ -1895,6 +1916,7 @@ def _prune_orphaned_branches(repo_root: str) -> None:
         wt_result = subprocess.run(
             ["git", "worktree", "list", "--porcelain"],
             capture_output=True, text=True, timeout=10, cwd=repo_root,
+            stdin=subprocess.DEVNULL, env=_noninteractive_git_env(),
         )
         for line in wt_result.stdout.split("\n"):
             if line.startswith("branch refs/heads/"):
@@ -1907,6 +1929,7 @@ def _prune_orphaned_branches(repo_root: str) -> None:
         head_result = subprocess.run(
             ["git", "branch", "--show-current"],
             capture_output=True, text=True, timeout=5, cwd=repo_root,
+            stdin=subprocess.DEVNULL, env=_noninteractive_git_env(),
         )
         current = head_result.stdout.strip()
         if current:
@@ -1931,6 +1954,7 @@ def _prune_orphaned_branches(repo_root: str) -> None:
             subprocess.run(
                 ["git", "branch", "-D"] + batch,
                 capture_output=True, text=True, timeout=30, cwd=repo_root,
+                stdin=subprocess.DEVNULL, env=_noninteractive_git_env(),
             )
         except Exception as e:
             logger.debug("Failed to prune orphaned branches: %s", e)

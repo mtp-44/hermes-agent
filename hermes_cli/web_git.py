@@ -19,6 +19,8 @@ import shutil
 import subprocess
 from pathlib import Path
 
+from hermes_cli._subprocess_compat import harden_git_argv, noninteractive_git_env
+
 _GIT_TIMEOUT = 30
 _GH_TIMEOUT = 30
 _MAX_BUFFER = 32 * 1024 * 1024
@@ -34,11 +36,15 @@ def _git(cwd: str, args: list[str], *, timeout: int = _GIT_TIMEOUT) -> tuple[int
     on a non-zero exit (callers decide what an error means)."""
     try:
         proc = subprocess.run(
-            ["git", *args],
+            ["git", *harden_git_argv(args)],
             cwd=cwd,
             capture_output=True,
             text=True,
             timeout=timeout,
+            # GHSA-7x36-8jrh-v4pw: never execute the repo's own configured
+            # programs (fsmonitor/hooks/pager/credential helper/diff drivers).
+            stdin=subprocess.DEVNULL,
+            env=noninteractive_git_env(),
         )
     except (OSError, subprocess.SubprocessError):
         return 1, "", "git invocation failed"

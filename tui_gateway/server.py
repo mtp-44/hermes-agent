@@ -11951,9 +11951,11 @@ def _list_repo_files(root: str) -> list[str]:
             return cached[1]
 
     files: list[str] = []
-    from hermes_cli._subprocess_compat import windows_hide_flags
+    from hermes_cli._subprocess_compat import noninteractive_git_env, windows_hide_flags
 
     _creationflags = windows_hide_flags()
+    # GHSA-7x36-8jrh-v4pw: the listing probes whatever root the user browses.
+    _git_env = noninteractive_git_env()
     try:
         top_result = subprocess.run(
             ["git", "-C", root, "rev-parse", "--show-toplevel"],
@@ -11961,6 +11963,7 @@ def _list_repo_files(root: str) -> list[str]:
             timeout=2.0,
             check=False,
             stdin=subprocess.DEVNULL,
+            env=_git_env,
             creationflags=_creationflags,
         )
         if top_result.returncode == 0:
@@ -11980,6 +11983,7 @@ def _list_repo_files(root: str) -> list[str]:
                 timeout=2.0,
                 check=False,
                 stdin=subprocess.DEVNULL,
+                env=_git_env,
                 creationflags=_creationflags,
             )
             if list_result.returncode == 0:
