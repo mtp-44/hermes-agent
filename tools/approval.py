@@ -3263,7 +3263,15 @@ def check_all_command_guards(command: str, env_type: str,
     combined_desc = "; ".join(desc for _, desc, _ in warnings)
     primary_key = warnings[0][0]
     all_keys = [key for key, _, _ in warnings]
-    has_tirith = any(is_t for _, _, is_t in warnings)
+    # "Always" is offered when at least one warning is a dangerous-pattern
+    # key that the persistence layer would actually allowlist permanently.
+    # Pure-tirith findings are session-max by design (no broad permanent
+    # allowlisting of content-level security findings), so a prompt with
+    # ONLY tirith warnings keeps Always hidden. Mixed prompts (pattern +
+    # tirith) used to hide it too, although choosing it persists the
+    # pattern key and downgrades the tirith key to session (see both
+    # "always" branches below): the UI was stricter than the persistence.
+    has_permanent_capable = any(not is_t for _, _, is_t in warnings)
 
     # Gateway/async approval — block the agent thread until the user
     # responds with /approve or /deny, mirroring the CLI's synchronous
@@ -3292,9 +3300,14 @@ def check_all_command_guards(command: str, env_type: str,
                 "pattern_key": primary_key,
                 "pattern_keys": all_keys,
                 "description": redact_sensitive_text(combined_desc),
-                # Mirror the CLI's allow_permanent gate: a tirith warning downgrades
-                # "always" to session scope below, so the UI must not offer it.
-                "allow_permanent": not has_tirith,
+                # Mirror the CLI's allow_permanent gate: tirith warnings are
+                # downgraded to session scope below, so Always is offered only
+                # when some warning can actually be persisted permanently.
+                "allow_permanent": has_permanent_capable,
+                # Session approval is valid for every command prompt,
+                # including tirith-only ones. Adapters render the session
+                # tier from this, independently of the permanent tier.
+                "allow_session": True,
             }
             decision = _await_gateway_decision(
                 session_key, notify_cb, approval_data, surface="gateway"
@@ -3388,7 +3401,7 @@ def check_all_command_guards(command: str, env_type: str,
         }
 
     # CLI interactive: single combined prompt
-    # Hide [a]lways when any tirith warning is present
+    # Hide [a]lways when no persistable (non-tirith) warning is present
     _fire_approval_hook(
         "pre_approval_request",
         command=command,
@@ -3399,7 +3412,7 @@ def check_all_command_guards(command: str, env_type: str,
         surface="cli",
     )
     choice = prompt_dangerous_approval(command, combined_desc,
-                                       allow_permanent=not has_tirith,
+                                       allow_permanent=has_permanent_capable,
                                        approval_callback=approval_callback)
     _fire_approval_hook(
         "post_approval_response",
