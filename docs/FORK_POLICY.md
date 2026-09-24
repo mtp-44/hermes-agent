@@ -42,8 +42,9 @@ write-deny, child-process env scrubbing, shared-shell-snapshot session
 isolation, unattended-webhook approval deny, SSRF guards, and removal of the
 hijacked `blender-mcp` skill. Upstream drift meant 25 of them were hand-ported
 by behaviour rather than cherry-picked. Sync gate passed; full suite 0 new
-failures vs `main`. Deployed to the gateway and PWA; **the dashboard runs a
-stray upstream clone and did not receive it.** Full account: ADR
+failures vs `main`. Deployed to the gateway and PWA; the dashboard turned out
+to run a stray upstream clone and was repointed to this repo the same day.
+Full account: ADR
 [`HA-0006`](decisions/0006-security-sync-2026-09-24.md).
 
 ### 2026-07-30 — PR #7 `sync/security-2026-07-22` merged into the live branch
