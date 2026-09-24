@@ -12,6 +12,8 @@ import os
 import re
 import shlex
 
+from agent.file_safety import _BLOCKED_PROJECT_ENV_BASENAMES as _ENV_FILE_BASENAMES
+
 logger = logging.getLogger(__name__)
 
 # Sensitive query-string parameter names (case-insensitive exact match).
@@ -108,6 +110,23 @@ _PREFIX_PATTERNS = [
     r"xai-[A-Za-z0-9]{30,}",            # xAI (Grok) API key
     r"ntn_[A-Za-z0-9]{10,}",            # Notion internal integration token
     r"fw_[A-Za-z0-9]{30,}",             # Fireworks AI API key
+    # GitLab token families (each pattern keeps a full literal prefix so the
+    # _PREFIX_SUBSTRINGS pre-screen stays false-negative-free). Ported from
+    # openclaw/openclaw#112954; follow-up invited in #4541.
+    r"glpat-[A-Za-z0-9_\-]{10,}",       # GitLab personal access token
+    r"gloas-[A-Za-z0-9_\-]{10,}",       # GitLab OAuth application secret
+    r"gldt-[A-Za-z0-9_\-]{10,}",        # GitLab deploy token
+    r"glrt-[A-Za-z0-9_.\-]{10,}",       # GitLab runner authentication token (routable tokens are dotted)
+    r"glrtr-[A-Za-z0-9_.\-]{10,}",      # GitLab runner registration token (routable)
+    r"glcbt-[A-Za-z0-9_\-]{10,}",       # GitLab CI/CD job token
+    r"glptt-[A-Za-z0-9_\-]{10,}",       # GitLab pipeline trigger token
+    r"glft-[A-Za-z0-9_\-]{10,}",        # GitLab feed token
+    r"glimt-[A-Za-z0-9_\-]{10,}",       # GitLab incoming mail token
+    r"glagent-[A-Za-z0-9_\-]{10,}",     # GitLab agent (KAS) token
+    r"glsoat-[A-Za-z0-9_\-]{10,}",      # GitLab service-account access token
+    r"glffct-[A-Za-z0-9_\-]{10,}",      # GitLab feature-flags client token
+    r"glwt-[A-Za-z0-9_\-]{10,}",        # GitLab workspace token
+    r"GR1348941[A-Za-z0-9_\-]{10,}",    # GitLab legacy runner registration token
 ]
 
 # ENV assignment patterns: KEY=value where KEY contains a secret-like name.
@@ -666,6 +685,75 @@ def redact_sensitive_text(
 # fixtures, ``postgresql://{user}`` f-string templates). See issue #43025.
 _ENV_DUMP_COMMANDS = frozenset({"env", "printenv", "set", "export", "declare"})
 
+# Commands that read file contents to stdout. A ``.env`` target is a credential
+# dump (per AGENTS.md ``.env`` holds only secrets), so the ENV pass must run.
+_FILE_READ_COMMANDS = frozenset({
+    "cat", "head", "tail", "type", "bat", "less", "more", "nl",
+    "zcat", "tac", "view", "batcat",
+})
+_SECRET_BEARING_FILE_BASENAMES = frozenset({
+    ".bashrc", ".bash_profile", ".bash_login", ".profile",
+    ".zshrc", ".zprofile", ".zlogin", ".zshenv",
+})
+_TEXT_FILE_READ_COMMANDS = frozenset({"grep", "awk", "sed"})
+
+
+def _command_segments(command: str) -> list[str]:
+    """Pipeline/sequence segments of a shell command, stripped, empties dropped."""
+    return [seg.strip() for seg in re.split(r"[|;&]+", command) if seg.strip()]
+
+
+def _command_reads_env_file(command: str | None) -> bool:
+    """True if ``command`` reads a ``.env``-style file (by basename) to stdout.
+    Defense-in-depth, not a boundary: indirect reads (``sudo cat .env``, ``$(cat
+    .env)``, ``sed``/``awk``) are not detected, matching ``is_env_dump_command``."""
+    if not command:
+        return False
+    for seg in _command_segments(command):
+        tokens = seg.split()  # not shlex: it mangles Windows paths (``C:\Users\...\.env``)
+        if not tokens or tokens[0] not in _FILE_READ_COMMANDS:
+            continue
+        for arg in tokens[1:]:
+            if arg.startswith("-"):
+                continue
+            basename = arg.strip("\"'").rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+            if basename.lower() in _ENV_FILE_BASENAMES:
+                return True
+    return False
+
+
+def _is_secret_bearing_file_arg(arg: str) -> bool:
+    """Recognize explicit Hermes config and standard shell startup paths."""
+    path = arg.strip("\"'").replace("\\", "/")
+    if "$" in path:
+        return False
+    parts = [part.lower() for part in path.split("/") if part]
+    if not parts:
+        return False
+    if parts[-1] in _SECRET_BEARING_FILE_BASENAMES:
+        return True
+    return parts[-1] == "config.yaml" and ".hermes" in parts[:-1]
+
+
+def _command_reads_secret_bearing_file(command: str | None) -> bool:
+    """True for direct stdout reads of known secret-bearing config files."""
+    if not command or not isinstance(command, str):
+        return False
+    for seg in _command_segments(command):
+        tokens = seg.split()  # preserve Windows path separators; see _command_reads_env_file
+        if not tokens:
+            continue
+        reader = tokens[0].rsplit("/", 1)[-1].lower()
+        if reader in _FILE_READ_COMMANDS:
+            if any(_is_secret_bearing_file_arg(arg) for arg in tokens[1:] if not arg.startswith("-")):
+                return True
+            continue
+        if reader in _TEXT_FILE_READ_COMMANDS:
+            positional = [arg for arg in tokens[1:] if not arg.startswith("-")]
+            if any(_is_secret_bearing_file_arg(arg) for arg in positional[1:]):
+                return True
+    return False
+
 
 def is_env_dump_command(command: str | None) -> bool:
     """Return True if ``command`` dumps environment variables to stdout.
@@ -705,6 +793,11 @@ def redact_terminal_output(
 
     - env-dump command (``env``/``printenv``/``set``/``export``/``declare``)
       → ``code_file=False`` so the ENV-assignment pass masks opaque tokens.
+    - file-read command targeting a ``.env`` file (``cat .env``,
+      ``head .env.local``, etc.) → ``code_file=False`` for the same reason.
+    - direct read of a secret-bearing config file (``~/.hermes/config.yaml``,
+      profile ``config.yaml``, shell startup files like ``~/.bashrc``) via a
+      file-read command or ``grep``/``awk``/``sed`` → ``code_file=False``.
     - anything else (or unknown command) → ``code_file=True`` to avoid
       false positives on source/config dumps.
 
@@ -713,7 +806,11 @@ def redact_terminal_output(
     """
     if not output:
         return output
-    code_file = not is_env_dump_command(command or "")
+    code_file = not (
+        is_env_dump_command(command or "")
+        or _command_reads_env_file(command)
+        or _command_reads_secret_bearing_file(command)
+    )
     return redact_sensitive_text(output, force=force, code_file=code_file)
 
 

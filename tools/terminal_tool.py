@@ -2735,13 +2735,16 @@ def terminal_tool(
 
     except Exception as e:
         import traceback
+        from agent.redact import redact_sensitive_text
         tb_str = traceback.format_exc()
         logger.error("terminal_tool exception:\n%s", tb_str)
+        # Exception text can embed the failing command line (and any
+        # secrets inline in it) — redact before returning to the model.
         return json.dumps({
             "output": "",
             "exit_code": -1,
-            "error": f"Failed to execute command: {str(e)}",
-            "traceback": tb_str,
+            "error": redact_sensitive_text(f"Failed to execute command: {str(e)}"),
+            "traceback": redact_sensitive_text(tb_str),
             "status": "error"
         }, ensure_ascii=False)
 

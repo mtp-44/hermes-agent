@@ -95,13 +95,13 @@ class ScanResult:
 
 THREAT_PATTERNS = [
     # ── Exfiltration: shell commands leaking secrets ──
-    (r'curl\s+[^\n]*\$\{?\w*(KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|API)',
+    (r'curl\s+[^\n]*\$\{?\w*(?:KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL)S?\b',
      "env_exfil_curl", "critical", "exfiltration",
      "curl command interpolating secret environment variable"),
-    (r'wget\s+[^\n]*\$\{?\w*(KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|API)',
+    (r'wget\s+[^\n]*\$\{?\w*(?:KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL)S?\b',
      "env_exfil_wget", "critical", "exfiltration",
      "wget command interpolating secret environment variable"),
-    (r'fetch\s*\([^\n]*\$\{?\w*(KEY|TOKEN|SECRET|PASSWORD|API)',
+    (r'fetch\s*\([^\n]*\$\{?\w*(?:KEY|TOKEN|SECRET|PASSWORD)S?\b',
      "env_exfil_fetch", "critical", "exfiltration",
      "fetch() call interpolating secret environment variable"),
     (r'httpx?\.(get|post|put|patch)\s*\([^\n]*(KEY|TOKEN|SECRET|PASSWORD)',
@@ -482,6 +482,9 @@ THREAT_PATTERNS = [
     (r'AKIA[0-9A-Z]{16}',
      "aws_access_key_leaked", "critical", "credential_exposure",
      "AWS access key ID in skill content"),
+    (r'glpat-[A-Za-z0-9_\-]{20,}',
+     "gitlab_token_leaked", "critical", "credential_exposure",
+     "GitLab personal access token in skill content"),
 
     # ── Additional prompt injection: jailbreak patterns ──
     (r'\bDAN\s+mode\b|Do\s+Anything\s+Now',

@@ -103,6 +103,24 @@ class TestCompletionQueue:
         assert completion["termination_source"] == ""
         assert "build succeeded" in completion["output"]
 
+    def test_move_to_finished_redacts_secrets(self, registry, monkeypatch):
+        """Completion notifications apply the same redaction as poll/log/wait."""
+        monkeypatch.setattr("agent.redact._REDACT_ENABLED", True)
+        secret = "sk-proj-" + "A" * 40
+        s = _make_session(
+            notify_on_complete=True,
+            output=f"key is {secret}\nOPENAI_API_KEY={secret}\n",
+            exit_code=0,
+        )
+        s.exited = True
+        s.exit_code = 0
+        registry._running[s.id] = s
+        with patch.object(registry, "_write_checkpoint"):
+            registry._move_to_finished(s)
+
+        completion = registry.completion_queue.get_nowait()
+        assert secret not in completion["output"]
+
     def test_move_to_finished_nonzero_exit(self, registry):
         """Nonzero exit codes are captured correctly."""
         s = _make_session(

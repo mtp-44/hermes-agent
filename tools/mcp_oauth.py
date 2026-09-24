@@ -34,6 +34,7 @@ Configuration in config.yaml::
 
 import asyncio
 import contextvars
+import html
 import json
 import logging
 import os
@@ -304,7 +305,7 @@ class HermesTokenStorage:
         try:
             return OAuthToken.model_validate(data)
         except (ValueError, TypeError, KeyError) as exc:
-            logger.warning("Corrupt tokens at %s -- ignoring: %s", self._tokens_path(), exc)
+            logger.warning("Corrupt tokens at %s -- ignoring: %s", self._tokens_path(), _safe_validation_detail(exc))
             return None
 
     async def set_tokens(self, tokens: "OAuthToken") -> None:
@@ -336,7 +337,7 @@ class HermesTokenStorage:
         try:
             return OAuthClientInformationFull.model_validate(data)
         except (ValueError, TypeError, KeyError) as exc:
-            logger.warning("Corrupt client info at %s -- ignoring: %s", self._client_info_path(), exc)
+            logger.warning("Corrupt client info at %s -- ignoring: %s", self._client_info_path(), _safe_validation_detail(exc))
             return None
 
     async def set_client_info(self, client_info: "OAuthClientInformationFull") -> None:
@@ -362,7 +363,7 @@ class HermesTokenStorage:
         try:
             return OAuthMetadata.model_validate(data)
         except (ValueError, TypeError, KeyError) as exc:
-            logger.warning("Corrupt OAuth metadata at %s -- ignoring: %s", self._meta_path(), exc)
+            logger.warning("Corrupt OAuth metadata at %s -- ignoring: %s", self._meta_path(), _safe_validation_detail(exc))
             return None
 
     # -- cleanup -----------------------------------------------------------
@@ -417,6 +418,24 @@ class HermesTokenStorage:
 # ---------------------------------------------------------------------------
 
 
+def _safe_validation_detail(exc: BaseException) -> Any:
+    """Describe a token/metadata validation failure without echoing its input.
+
+    A pydantic ``ValidationError``'s ``str()`` echoes the raw input of the
+    failing field -- for a corrupt ``mcp-tokens/<server>.json`` that is the
+    access/refresh token itself. Log only which fields failed.
+    """
+    errors = getattr(exc, "errors", None)
+    if callable(errors):  # pydantic ValidationError
+        try:
+            return "validation failed for " + ", ".join(
+                ".".join(map(str, e.get("loc", ()))) for e in errors(include_input=False)
+            )
+        except Exception:
+            return f"validation failed ({type(exc).__name__})"
+    return exc
+
+
 def _make_callback_handler() -> tuple[type, dict]:
     """Create a per-flow callback HTTP handler class with its own result dict.
 
@@ -443,7 +462,7 @@ def _make_callback_handler() -> tuple[type, dict]:
                 "<p>You can close this tab and return to Hermes.</p></body></html>"
             ) if code else (
                 "<html><body><h2>Authorization Failed</h2>"
-                f"<p>Error: {error or 'unknown'}</p></body></html>"
+                f"<p>Error: {html.escape(error or 'unknown')}</p></body></html>"
             )
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")

@@ -36,6 +36,45 @@ class TestKnownPrefixes:
         result = redact_sensitive_text("github_pat_abc123def456ghi789jklmno")
         assert "abc123def456" not in result
 
+    def test_gitlab_token_prefixes(self):
+        """GitLab token families redact via their literal prefixes.
+
+        Ported from openclaw/openclaw#112954; follow-up invited in #4541.
+        """
+        tokens = [
+            # NOTE: every token is prefix + suffix CONCATENATION so no
+            # contiguous token literal exists in this file — GitHub push
+            # protection blocks realistic GitLab-token-shaped literals.
+            "glpat-" + "Zx9AbCdEfGhIjKlMnOpQ",       # personal access token
+            "gloas-" + "a" * 64,                     # OAuth application secret
+            "gldt-" + "AbCdEfGhIjKlMnOpQrSt",        # deploy token
+            "glrt-" + "t1_AbCdEfGhIjKlMnOpQrSt",     # runner auth token
+            "glrt-" + "A" * 27 + ".01." + "a" * 9,   # routable (dotted) runner token
+            "glrtr-" + "B" * 27 + ".01." + "b" * 9,  # routable runner registration
+            "glcbt-" + "a1B2_AbCdEfGhIjKlMnOpQ",     # CI/CD job token
+            "glptt-" + "c" * 40,                     # pipeline trigger token
+            "glft-" + "AbCdEfGhIjKlMnOp",            # feed token
+            "glimt-" + "AbCdEfGhIjKlMnOpQrStUvWxY",  # incoming mail token
+            "glagent-" + "d" * 50,                   # agent (KAS) token
+            "glsoat-" + "AbCdEfGhIjKlMnOpQrSt",      # service-account token
+            "glffct-" + "AbCdEfGhIjKlMnOpQrSt",      # feature-flags client token
+            "glwt-" + "AbCdEfGhIjKlMnOpQrSt",        # workspace token
+            "GR1348941" + "E" * 20,                  # legacy runner registration
+        ]
+        for token in tokens:
+            result = redact_sensitive_text(f"leaked {token} in output")
+            secret_body = token.split("-", 1)[-1] if "-" in token else token[9:]
+            assert secret_body not in result, f"{token!r} survived redaction: {result!r}"
+
+    def test_gitlab_prefix_requires_word_boundary_and_length(self):
+        """Prose and embedded identifiers must not false-positive."""
+        for benign in [
+            "the glossary explains gitlab tokens",   # no prefix at all
+            "glpat-short",                            # suffix under 10 chars
+            "myglpat-AbCdEfGhIjKlMnOpQrSt",           # embedded — lookbehind blocks
+        ]:
+            assert redact_sensitive_text(benign) == benign
+
     def test_slack_token(self):
         token = "xoxb-" + "0" * 12 + "-" + "a" * 14
         result = redact_sensitive_text(token)
@@ -825,6 +864,162 @@ class TestTerminalOutputRedaction:
         out = "OPAQUE=plainvalue123\nKEY=sk-proj-abc123def456ghi789jkl012"
         red = redact_terminal_output(out, None)
         assert "abc123def456" not in red
+
+    # ── .env file detection (issue #61352 v2) ──
+
+    def test_command_reads_env_file_detection(self):
+        from agent.redact import _command_reads_env_file
+        # Basic detection
+        assert _command_reads_env_file("cat .env")
+        assert _command_reads_env_file("cat .env.local")
+        assert _command_reads_env_file("cat .env.production")
+        assert _command_reads_env_file("cat .envrc")
+        assert _command_reads_env_file("head .env")
+        assert _command_reads_env_file("tail .env")
+        assert _command_reads_env_file("type .env")
+        assert _command_reads_env_file("nl .env")
+        assert _command_reads_env_file("bat .env")
+        # With flags
+        assert _command_reads_env_file("cat -n .env")
+        assert _command_reads_env_file("cat -A .env")
+        # With paths
+        assert _command_reads_env_file("cat ~/.hermes/.env")
+        assert _command_reads_env_file("cat /home/user/project/.env")
+        assert _command_reads_env_file("cat ./config/.env.local")
+        # In a pipeline / sequence
+        assert _command_reads_env_file("cat .env | grep KEY")
+        assert _command_reads_env_file("echo '---' && cat .env")
+        # Windows-style backslash paths
+        assert _command_reads_env_file("cat C:\\Users\\test\\.env")
+        # Quoted paths (plain split leaves the quotes attached)
+        assert _command_reads_env_file('cat ".env"')
+        assert _command_reads_env_file("cat '.env'")
+        # Case-insensitive basename (macOS/Windows filesystems)
+        assert _command_reads_env_file("cat .ENV")
+
+    def test_command_reads_env_file_excludes_templates(self):
+        from agent.redact import _command_reads_env_file
+        # Templates/examples should NOT trigger
+        assert not _command_reads_env_file("cat .env.example")
+        assert not _command_reads_env_file("cat .env.sample")
+        assert not _command_reads_env_file("cat .env.template")
+        assert not _command_reads_env_file("cat .env.dist")
+
+    def test_command_reads_env_file_rejects_non_env_files(self):
+        from agent.redact import _command_reads_env_file
+        assert not _command_reads_env_file("cat config.py")
+        assert not _command_reads_env_file("cat README.md")
+        assert not _command_reads_env_file("cat .envrc.bak")  # .bak not in list
+        assert not _command_reads_env_file("python app.py")
+        assert not _command_reads_env_file("echo .env")  # echo is not a file-read cmd
+        assert not _command_reads_env_file("")
+        assert not _command_reads_env_file(None)
+
+    def test_cat_env_file_masks_opaque_token(self):
+        """cat .env → code_file=False → generic ENV pass redacts opaque keys."""
+        from agent.redact import redact_terminal_output
+        out = (
+            "MISTRAL_API_KEY=abc123opaqueSecretValue\n"
+            "NOUS_API_KEY=xyz789opaqueKey\n"
+            "DEBUG=true\n"
+        )
+        red = redact_terminal_output(out, "cat .env")
+        assert "abc123opaqueSecretValue" not in red
+        assert "xyz789opaqueKey" not in red
+        assert "DEBUG=true" in red  # non-secret key preserved
+
+    def test_cat_env_file_with_flags_masks_opaque_token(self):
+        """cat -n .env → still detected as .env read."""
+        from agent.redact import redact_terminal_output
+        out = "     1\tMISTRAL_API_KEY=abc123opaqueSecretValue\n"
+        red = redact_terminal_output(out, "cat -n .env")
+        assert "abc123opaqueSecretValue" not in red
+
+    def test_cat_env_file_in_pipeline_masks_opaque_token(self):
+        """cat .env | grep KEY → still detected as .env read."""
+        from agent.redact import redact_terminal_output
+        out = "MISTRAL_API_KEY=abc123opaqueSecretValue"
+        red = redact_terminal_output(out, "cat .env | grep MISTRAL")
+        assert "abc123opaqueSecretValue" not in red
+
+    def test_cat_env_example_not_redacted_as_env(self):
+        """cat .env.example → NOT treated as .env read (template file)."""
+        from agent.redact import redact_terminal_output
+        out = "MISTRAL_API_KEY=placeholder_value_here"
+        red = redact_terminal_output(out, "cat .env.example")
+        # Should NOT be redacted by the ENV-assignment pass (code_file=True).
+        # The placeholder value should survive since it has no vendor prefix.
+        assert "placeholder_value_here" in red
+
+    def test_cat_env_local_masks_opaque_token(self):
+        """cat .env.local → detected as .env read."""
+        from agent.redact import redact_terminal_output
+        out = "CUSTOM_API_KEY=opaquecustomkey123456"
+        red = redact_terminal_output(out, "cat .env.local")
+        assert "opaquecustomkey123456" not in red
+
+    def test_cat_env_inline_comment_preserved(self):
+        """Inline comments after env values are preserved (issue #61352 review)."""
+        from agent.redact import redact_terminal_output
+        out = "MISTRAL_API_KEY=abc123secret # used for tests"
+        red = redact_terminal_output(out, "cat .env")
+        assert "abc123secret" not in red
+        assert "MISTRAL_API_KEY=*** # used for tests" in red
+
+    def test_cat_env_export_inline_comment_preserved(self):
+        """export KEY=VALUE # comment — comment preserved."""
+        from agent.redact import redact_terminal_output
+        out = "export MISTRAL_API_KEY=abc123secret # prod key"
+        red = redact_terminal_output(out, "cat .env")
+        assert "abc123secret" not in red
+        assert "export MISTRAL_API_KEY=*** # prod key" in red
+
+    @pytest.mark.parametrize(
+        ("command", "output", "secret"),
+        [
+            ("cat ~/.hermes/config.yaml", "api_key: hermesConfigSecret123", "hermesConfigSecret123"),
+            (
+                "head ~/.hermes/profiles/work/config.yaml",
+                "provider.token=profileConfigSecret456",
+                "profileConfigSecret456",
+            ),
+            ("tail ~/.bashrc", "export SERVICE_TOKEN=bashRcSecret789", "bashRcSecret789"),
+            ("grep TOKEN ~/.zshrc", "SERVICE_TOKEN=zshRcSecret123", "zshRcSecret123"),
+            (
+                "awk -F= '/TOKEN/ {print $2}' ~/.profile",
+                "SERVICE_TOKEN=profileSecret456",
+                "profileSecret456",
+            ),
+            ("sed -n '1,20p' ~/.zprofile", "api_key: zprofileSecret789", "zprofileSecret789"),
+        ],
+    )
+    def test_secret_bearing_file_commands_mask_assignments(self, command, output, secret):
+        from agent.redact import redact_terminal_output
+
+        assert secret not in redact_terminal_output(output, command)
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "cat config.yaml",
+            "cat /project/config.yaml",
+            "cat ~/.hermes/config.example.yaml",
+            "cat ~/.hermes/config.template.yaml",
+            "cat ~/.bashrc.example",
+            'cat "$HERMES_HOME/config.yaml"',
+            "grep TOKEN app.py",
+            "awk '/TOKEN/' settings.yaml",
+            "sed -n '1,20p' template.yaml",
+        ],
+    )
+    def test_secret_bearing_file_detection_preserves_fail_open_controls(self, command):
+        from agent.redact import redact_terminal_output
+
+        output = "SERVICE_TOKEN=placeholder_value_here"
+        assert redact_terminal_output(output, command) == output
+        assert "realEnvSecret123" not in redact_terminal_output(
+            "SERVICE_TOKEN=realEnvSecret123", "cat .env"
+        )
 
     def test_disabled_passes_through(self, monkeypatch):
         from agent.redact import redact_terminal_output
