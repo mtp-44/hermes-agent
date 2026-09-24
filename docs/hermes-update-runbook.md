@@ -8,7 +8,7 @@ apply the update, run smoke checks, and leave a rollback label.
 ## Prompt For Claude Or Codex
 
 When starting the next Hermes update cycle, open the agent in
-`/Users/mh/ai/agents/hermes-agent` and give it this instruction:
+`/Users/mh/ai/hermes-agent` and give it this instruction:
 
 ```text
 Read docs/hermes-update-runbook.md and follow it exactly for this Hermes update.
@@ -22,7 +22,7 @@ If you hit a blocker, stop and report the failing check, suspected cause, and sa
 
 ## Current Production Contract
 
-- Production repo: `/Users/mh/ai/agents/hermes-agent`
+- Production repo: `/Users/mh/ai/hermes-agent`
 - Expected production branch: `main`
 - Runtime home: `/Users/mh/.hermes`
 - Gateway launch label: `ai.hermes.gateway`
@@ -36,8 +36,8 @@ If you hit a blocker, stop and report the failing check, suspected cause, and sa
 Before any update, run:
 
 ```bash
-cd /Users/mh/ai/agents/hermes-agent
-/Users/mh/ai/agents/hermes-agent/.venv/bin/python scripts/hermes_update_guard.py --pre
+cd /Users/mh/ai/hermes-agent
+/Users/mh/ai/hermes-agent/.venv/bin/python scripts/hermes_update_guard.py --pre
 ```
 
 If the guard fails, stop and fix the blocker before pulling, merging, rebasing,
@@ -47,15 +47,15 @@ dirty tree, not as permission to update through unreviewed changes.
 After any update and gateway restart, run:
 
 ```bash
-cd /Users/mh/ai/agents/hermes-agent
-/Users/mh/ai/agents/hermes-agent/.venv/bin/python scripts/hermes_update_guard.py --post
+cd /Users/mh/ai/hermes-agent
+/Users/mh/ai/hermes-agent/.venv/bin/python scripts/hermes_update_guard.py --post
 ```
 
 For the focused Hermes/Open Brain conformance suite, run:
 
 ```bash
-cd /Users/mh/ai/agents/hermes-agent
-/Users/mh/ai/agents/hermes-agent/.venv/bin/python scripts/openbrain_conformance_smoke.py
+cd /Users/mh/ai/hermes-agent
+/Users/mh/ai/hermes-agent/.venv/bin/python scripts/openbrain_conformance_smoke.py
 ```
 
 This box runs 24/7 with network access, so `--live-smoke` is the default
@@ -63,13 +63,13 @@ post-update expectation. Only drop it when running offline or in a sandbox that
 cannot reach Open Brain:
 
 ```bash
-/Users/mh/ai/agents/hermes-agent/.venv/bin/python scripts/hermes_update_guard.py --post --live-smoke
+/Users/mh/ai/hermes-agent/.venv/bin/python scripts/hermes_update_guard.py --post --live-smoke
 ```
 
 For machine-readable output:
 
 ```bash
-/Users/mh/ai/agents/hermes-agent/.venv/bin/python scripts/hermes_update_guard.py --post --json
+/Users/mh/ai/hermes-agent/.venv/bin/python scripts/hermes_update_guard.py --post --json
 ```
 
 ## Pre-Update Checklist
@@ -176,7 +176,7 @@ Remotes:
    `docs/rca-ssl-cacert-post-git-pull.md`:
 
    ```bash
-   /Users/mh/ai/agents/hermes-agent/.venv/bin/python -m pip install --force-reinstall certifi openai httpx
+   /Users/mh/ai/hermes-agent/.venv/bin/python -m pip install --force-reinstall certifi openai httpx
    ```
 
 6. Open a PR from the sync branch into `main` and let CI pass before merging
@@ -235,10 +235,10 @@ If the post-update guard fails or Telegram/Open Brain behavior regresses:
 Example:
 
 ```bash
-cd /Users/mh/ai/agents/hermes-agent
+cd /Users/mh/ai/hermes-agent
 git checkout <known-good-sha-or-tag>
 HERMES_HOME=/Users/mh/.hermes hermes gateway restart
-/Users/mh/ai/agents/hermes-agent/.venv/bin/python scripts/hermes_update_guard.py --post
+/Users/mh/ai/hermes-agent/.venv/bin/python scripts/hermes_update_guard.py --post
 ```
 
 Do not force-push `main` unless the explicit goal is to undo the public sync.

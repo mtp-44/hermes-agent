@@ -33,6 +33,19 @@
 
 Upstream pulls under policy 1 (security fixes only). Newest first.
 
+### 2026-09-24 — PR #8 `sync/security-2026-09-24` merged into `main`
+
+30 upstream security fixes authored after the 2026-07-22 sync point: GitSpawn
+RCE (GHSA-7x36-8jrh-v4pw), secret redaction across gateway/terminal/config
+reads/MCP OAuth, owner-only `state.db` and snapshots, credential-store
+write-deny, child-process env scrubbing, shared-shell-snapshot session
+isolation, unattended-webhook approval deny, SSRF guards, and removal of the
+hijacked `blender-mcp` skill. Upstream drift meant 25 of them were hand-ported
+by behaviour rather than cherry-picked. Sync gate passed; full suite 0 new
+failures vs `main`. Deployed to the gateway and PWA; **the dashboard runs a
+stray upstream clone and did not receive it.** Full account: ADR
+[`HA-0006`](decisions/0006-security-sync-2026-09-24.md).
+
 ### 2026-07-30 — PR #7 `sync/security-2026-07-22` merged into the live branch
 
 13 commits (12 non-merge + the PR merge), authored 2026-07-22, sat unmerged in
