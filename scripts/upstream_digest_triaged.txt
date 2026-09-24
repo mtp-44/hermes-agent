@@ -34,7 +34,6 @@ c26f75baab out of scope: profile exports into Docker images / CI
 5eeafc8d25 out of scope: OSV preflight caching is a performance change
 37e42808e7 out of scope: httplib2 pin in the google-workspace optional skill (no dependency changes)
 8fdda828a8 out of scope: npm nanoid override (desktop/web deps; no dependency changes)
-fc83fb42d3 out of scope: tornado bump (GHSA-5w76-955r-9v8r); no dependency changes this sync
 fe66596df3 deferred: new protected-instruction-file approval feature, not a fix
 
 # 2026-09-24 triage of the 32 the fixed digest surfaced (HA-0006). The 13 to PORT
