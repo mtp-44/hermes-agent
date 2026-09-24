@@ -95,13 +95,13 @@ class ScanResult:
 
 THREAT_PATTERNS = [
     # ── Exfiltration: shell commands leaking secrets ──
-    (r'curl\s+[^\n]*\$\{?\w*(KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|API)',
+    (r'curl\s+[^\n]*\$\{?\w*(?:KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL)S?\b',
      "env_exfil_curl", "critical", "exfiltration",
      "curl command interpolating secret environment variable"),
-    (r'wget\s+[^\n]*\$\{?\w*(KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|API)',
+    (r'wget\s+[^\n]*\$\{?\w*(?:KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL)S?\b',
      "env_exfil_wget", "critical", "exfiltration",
      "wget command interpolating secret environment variable"),
-    (r'fetch\s*\([^\n]*\$\{?\w*(KEY|TOKEN|SECRET|PASSWORD|API)',
+    (r'fetch\s*\([^\n]*\$\{?\w*(?:KEY|TOKEN|SECRET|PASSWORD)S?\b',
      "env_exfil_fetch", "critical", "exfiltration",
      "fetch() call interpolating secret environment variable"),
     (r'httpx?\.(get|post|put|patch)\s*\([^\n]*(KEY|TOKEN|SECRET|PASSWORD)',

