@@ -2205,16 +2205,33 @@ def _read_permanent_allowlist() -> set:
     return set() if parsed is _MALFORMED_ALLOWLIST else parsed
 
 
+# What ``command_allowlist`` held the last time this process synchronised with
+# the file. Everything in ``_permanent_approved`` beyond it is an approval THIS
+# process made, and is the only thing a save is entitled to add: the difference
+# separates "the operator granted this here" from "this was on disk when we
+# started, and may since have been revoked". Two live processes share one
+# config.yaml (the messaging gateway and the dashboard tui_gateway), so each
+# keeps its own baseline and merges instead of overwriting.
+_permanent_baseline: set = set()
+
+
 def load_permanent_allowlist() -> set:
     """Load permanently allowed command patterns from config.
 
     Also syncs them into the approval module so is_approved() works for
-    patterns added via 'always' in a previous session.
+    patterns added via 'always' in a previous session. A re-load (tui_gateway
+    runs one per session init) drops entries the operator removed on disk
+    since the last sync, and keeps approvals this process made that are not on
+    disk yet.
     """
+    global _permanent_baseline
     try:
         patterns = _read_permanent_allowlist()
-        if patterns:
-            load_permanent(patterns)
+        with _lock:
+            own = _permanent_approved - _permanent_baseline
+            _permanent_approved.clear()
+            _permanent_approved.update(patterns | own)
+            _permanent_baseline = set(patterns)
         return patterns
     except Exception as e:
         logger.warning("Failed to load permanent allowlist: %s", e)
@@ -2222,12 +2239,38 @@ def load_permanent_allowlist() -> set:
 
 
 def save_permanent_allowlist(patterns: set):
-    """Save permanently allowed command patterns to config."""
+    """Save permanently allowed command patterns to config, reconciling with the file.
+
+    ``command_allowlist`` is a file an operator edits by hand; removing an entry
+    there is the documented way to withdraw a standing approval. Writing the
+    in-memory set straight back deleted entries added on disk since the last
+    load and resurrected the ones removed (and let the gateway and the
+    tui_gateway overwrite each other). The result written is ``what is on disk
+    now`` plus ``what this process approved since its own baseline``; revoked
+    entries are also dropped from ``_permanent_approved`` so ``is_approved()``
+    stops honouring them. ``patterns`` can only ADD. Nothing re-reads the file
+    on the approval hot path, so a revocation takes effect on the next load or
+    save. A malformed on-disk value is left alone (the approval still holds for
+    this process) rather than replaced.
+    """
+    global _permanent_baseline
     try:
         from hermes_cli.config import load_config, save_config
         config = load_config()
-        config["command_allowlist"] = list(patterns)
-        save_config(config)
+        on_disk = _parse_command_allowlist(config.get("command_allowlist"))
+        if on_disk is _MALFORMED_ALLOWLIST:
+            logger.warning(
+                "Not saving command_allowlist: the value in config.yaml is not a "
+                "list of strings; fix it with `hermes config edit`."
+            )
+            return
+        with _lock:
+            merged = on_disk | (set(patterns) - _permanent_baseline)
+            config["command_allowlist"] = sorted(merged)
+            save_config(config)
+            _permanent_baseline = set(merged)
+            _permanent_approved.clear()
+            _permanent_approved.update(merged)
     except Exception as e:
         logger.warning("Could not save allowlist: %s", e)
 

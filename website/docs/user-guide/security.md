@@ -237,6 +237,12 @@ string such as `hermes config set command_allowlist "ls *"` writes) are ignored
 with a warning; they never become per-character approvals. Loading does not
 rewrite your configuration file.
 
+You can edit `command_allowlist` by hand while Hermes is running. Saving an
+"always" choice merges with the file instead of overwriting it: entries you
+added are kept, entries you removed are not written back and stop being honoured
+by that process from its next save or session load. Two live processes (the
+messaging gateway and the dashboard) merge the same way.
+
 :::tip
 Use `hermes config edit` to review or remove patterns from your permanent allowlist.
 :::
