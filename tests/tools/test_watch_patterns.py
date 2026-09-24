@@ -90,6 +90,17 @@ class TestCheckWatchPatterns:
         assert "disk full" in evt["output"]
         assert evt["session_id"] == "proc_test_watch"
 
+    def test_match_redacts_secrets(self, registry, monkeypatch):
+        """watch_match notifications are redacted before reaching the LLM."""
+        monkeypatch.setattr("agent.redact._REDACT_ENABLED", True)
+        secret = "ghp_" + "B" * 36
+        session = _make_session(watch_patterns=["ERROR"])
+        registry._check_watch_patterns(session, f"ERROR: bad token {secret}\n")
+        evt = registry.completion_queue.get_nowait()
+        assert evt["type"] == "watch_match"
+        assert secret not in evt["output"]
+        assert "ERROR" in evt["output"]
+
     def test_match_carries_session_key_and_watcher_routing_metadata(self, registry):
         session = _make_session(watch_patterns=["ERROR"])
         session.session_key = "agent:main:telegram:group:-100:42"
