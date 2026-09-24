@@ -2084,6 +2084,7 @@ export const en: Translations = {
     approval: {
       gatewayDisconnected: 'Hermes gateway is not connected',
       sendFailed: 'Could not send approval response',
+      noLongerPending: 'This approval is no longer pending (expired or already answered) — nothing was run.',
       run: 'Run',
       command: 'Command',
       moreOptions: 'More approval options',

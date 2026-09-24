@@ -2124,6 +2124,7 @@ export const zhHant = defineLocale({
     approval: {
       gatewayDisconnected: 'Hermes 閘道未連線',
       sendFailed: '無法傳送核准回應',
+      noLongerPending: '此核准已不再等待(已逾期或已回覆),未執行任何操作。',
       run: '執行',
       command: '指令',
       moreOptions: '更多核准選項',

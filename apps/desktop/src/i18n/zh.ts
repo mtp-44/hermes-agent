@@ -2250,6 +2250,7 @@ export const zh: Translations = {
     approval: {
       gatewayDisconnected: 'Hermes 网关未连接',
       sendFailed: '无法发送审批响应',
+      noLongerPending: '此审批已不再等待(已过期或已答复),未执行任何操作。',
       run: '运行',
       command: '命令',
       moreOptions: '更多审批选项',
