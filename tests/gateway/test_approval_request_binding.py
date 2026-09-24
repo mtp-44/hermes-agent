@@ -357,3 +357,31 @@ class TestTelegramBinding:
         assert _exec_approval_request_kwargs(_make_adapter(), {"request_id": "r"}) == {"request_id": "r"}
         assert _exec_approval_request_kwargs(_Legacy(), {"request_id": "r"}) == {}
         assert _exec_approval_request_kwargs(_make_adapter(), {}) == {}
+
+
+# ---------------------------------------------------------------------------
+# Text fallback (Signal etc.) — say which prompt /approve targets
+# ---------------------------------------------------------------------------
+
+class TestTextPromptQueueNote:
+    def test_no_note_with_a_single_pending_approval(self, monkeypatch):
+        from gateway.run import _approval_text_queue_note
+
+        _set_timeout(monkeypatch, 30)
+        a = _Waiter("rm -rf /a").start()
+        assert _approval_text_queue_note(SESSION) == ""
+        mod.resolve_gateway_approval(SESSION, "deny", resolve_all=True)
+        a.join()
+
+    def test_note_names_oldest_first_when_several_pending(self, monkeypatch):
+        from gateway.run import _approval_text_queue_note
+
+        _set_timeout(monkeypatch, 30)
+        ws = [_Waiter("rm -rf /a").start(), _Waiter("rm -rf /b").start()]
+        note = _approval_text_queue_note(SESSION, "!")
+        assert "2 approvals are pending" in note
+        assert "OLDEST" in note
+        assert "`!approve all`" in note
+        mod.resolve_gateway_approval(SESSION, "deny", resolve_all=True)
+        for w in ws:
+            w.join()

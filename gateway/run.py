@@ -376,6 +376,29 @@ def _exec_approval_request_kwargs(adapter: Any, approval_data: dict) -> dict:
     return {"request_id": str(request_id)}
 
 
+def _approval_text_queue_note(session_key: str, prefix: str = "/") -> str:
+    """Suffix for the text approval prompt when several approvals are queued.
+
+    Text ``/approve`` / ``/deny`` carry no request id and answer the OLDEST
+    pending approval, which is not the prompt just sent once more than one is
+    waiting — say so, so the user is not approving a command they did not
+    read.  Empty when at most one approval is pending.
+    """
+    try:
+        from tools.approval import pending_gateway_approval_count
+        pending = pending_gateway_approval_count(session_key)
+    except Exception:
+        return ""
+    if pending <= 1:
+        return ""
+    return (
+        f"\n\n⚠️ {pending} approvals are pending in this chat. "
+        f"`{prefix}approve` / `{prefix}deny` answer the OLDEST pending one "
+        f"first — not necessarily this one. `{prefix}approve all` / "
+        f"`{prefix}deny all` answer all of them."
+    )
+
+
 def _gateway_provider_error_reply(text: str) -> str:
     """Map raw provider/API errors to a short user-safe Telegram reply."""
     if _GATEWAY_AUTH_ERROR_RE.search(text):
@@ -18119,7 +18142,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     f"Reason: {desc}\n\n"
                     f"Reply `{_p}approve` to execute, `{_p}approve session` to approve this pattern "
                     f"for the session, `{_p}approve always` to approve permanently, or `{_p}deny` to cancel."
-                )
+                ) + _approval_text_queue_note(_approval_session_key, _p)
                 try:
                     _approval_send_fut = safe_schedule_threadsafe(
                         _status_adapter.send(
