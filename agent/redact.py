@@ -12,6 +12,8 @@ import os
 import re
 import shlex
 
+from agent.file_safety import _BLOCKED_PROJECT_ENV_BASENAMES as _ENV_FILE_BASENAMES
+
 logger = logging.getLogger(__name__)
 
 # Sensitive query-string parameter names (case-insensitive exact match).
@@ -683,6 +685,37 @@ def redact_sensitive_text(
 # fixtures, ``postgresql://{user}`` f-string templates). See issue #43025.
 _ENV_DUMP_COMMANDS = frozenset({"env", "printenv", "set", "export", "declare"})
 
+# Commands that read file contents to stdout. A ``.env`` target is a credential
+# dump (per AGENTS.md ``.env`` holds only secrets), so the ENV pass must run.
+_FILE_READ_COMMANDS = frozenset({
+    "cat", "head", "tail", "type", "bat", "less", "more", "nl",
+    "zcat", "tac", "view", "batcat",
+})
+
+
+def _command_segments(command: str) -> list[str]:
+    """Pipeline/sequence segments of a shell command, stripped, empties dropped."""
+    return [seg.strip() for seg in re.split(r"[|;&]+", command) if seg.strip()]
+
+
+def _command_reads_env_file(command: str | None) -> bool:
+    """True if ``command`` reads a ``.env``-style file (by basename) to stdout.
+    Defense-in-depth, not a boundary: indirect reads (``sudo cat .env``, ``$(cat
+    .env)``, ``sed``/``awk``) are not detected, matching ``is_env_dump_command``."""
+    if not command:
+        return False
+    for seg in _command_segments(command):
+        tokens = seg.split()  # not shlex: it mangles Windows paths (``C:\Users\...\.env``)
+        if not tokens or tokens[0] not in _FILE_READ_COMMANDS:
+            continue
+        for arg in tokens[1:]:
+            if arg.startswith("-"):
+                continue
+            basename = arg.strip("\"'").rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+            if basename.lower() in _ENV_FILE_BASENAMES:
+                return True
+    return False
+
 
 def is_env_dump_command(command: str | None) -> bool:
     """Return True if ``command`` dumps environment variables to stdout.
@@ -722,6 +755,8 @@ def redact_terminal_output(
 
     - env-dump command (``env``/``printenv``/``set``/``export``/``declare``)
       → ``code_file=False`` so the ENV-assignment pass masks opaque tokens.
+    - file-read command targeting a ``.env`` file (``cat .env``,
+      ``head .env.local``, etc.) → ``code_file=False`` for the same reason.
     - anything else (or unknown command) → ``code_file=True`` to avoid
       false positives on source/config dumps.
 
@@ -730,7 +765,7 @@ def redact_terminal_output(
     """
     if not output:
         return output
-    code_file = not is_env_dump_command(command or "")
+    code_file = not (is_env_dump_command(command or "") or _command_reads_env_file(command))
     return redact_sensitive_text(output, force=force, code_file=code_file)
 
 
