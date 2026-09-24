@@ -1750,6 +1750,43 @@ class TestLaunchctlGatewayLifecycle:
         dangerous, _, _ = detect_dangerous_command(cmd)
         assert dangerous is False
 
+    def test_label_built_before_verb_detected(self):
+        """Upstream 2026-08-02 incident: the label was defined in a shell
+        for-loop BEFORE the `launchctl bootout` call, referenced only via a
+        `$label` variable at the point of the verb. The old sequential regex
+        required "hermes"/"ai.hermes" to appear AFTER the verb and missed
+        this entirely, restarting 4 gateways with zero approval."""
+        cmd = (
+            "uid=$(id -u); for item in 'ai.hermes.gateway-apollo:/a.plist' "
+            "'ai.hermes.gateway:/Users/botuser/Library/LaunchAgents/ai.hermes.gateway.plist'; "
+            "do label=${item%%:*}; plist=${item#*:}; "
+            'launchctl bootout "gui/$uid/$label"; '
+            'launchctl bootstrap "gui/$uid" "$plist"; done'
+        )
+        dangerous, _, desc = detect_dangerous_command(cmd)
+        assert dangerous is True, cmd
+        assert "launchd" in desc.lower()
+
+    @pytest.mark.parametrize("cmd", [
+        "L=ai.hermes.gateway; launchctl kill TERM gui/501/$L",
+        "L=ai.hermes.gateway\nlaunchctl bootout gui/501/$L",
+        "export SVC=ai.hermes.gateway && launchctl stop \"$SVC\"",
+        "label=hermes; launchctl disable gui/501/ai.$label.gateway",
+    ])
+    def test_label_variable_before_verb_detected(self, cmd):
+        dangerous, _, desc = detect_dangerous_command(cmd)
+        assert dangerous is True, cmd
+        assert "launchd" in desc.lower()
+
+    @pytest.mark.parametrize("cmd", [
+        "launchctl list",
+        "launchctl list | grep hermes",
+        "launchctl print gui/501/ai.hermes.gateway",
+        "L=ai.hermes.gateway; launchctl print gui/501/$L",
+    ])
+    def test_read_only_launchctl_with_hermes_label_not_flagged(self, cmd):
+        assert detect_dangerous_command(cmd) == (False, None, None)
+
 
 class TestGitDestructiveOps:
     """git reset --hard, push --force, clean -f, branch -D can destroy

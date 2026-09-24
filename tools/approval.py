@@ -702,7 +702,17 @@ DANGEROUS_PATTERNS = [
     # the `hermes gateway stop|restart` pattern above by driving launchd
     # directly against the service label (commonly `ai.hermes.gateway`).
     # Catch the operations that stop, restart, or unload it.
-    (r'\blaunchctl\s+(stop|kickstart|bootout|unload|kill|disable|remove)\b.*\b(hermes|ai\.hermes)\b', "stop/restart hermes launchd service (kills running agents)"),
+    #
+    # Order-independent: a sequential `verb .* hermes` match misses a label
+    # built BEFORE the verb (`L=ai.hermes.gateway; launchctl kill TERM
+    # gui/501/$L`, or a for-loop over labels ending in `launchctl bootout
+    # "gui/$uid/$label"`), which took down a 4-profile gateway fleet upstream
+    # with zero approval. Two lookaheads instead: the verb and the label must
+    # both appear somewhere, in either order. Deliberately broad -- an extra
+    # prompt is cheap, a missed one is not. The \A anchor keeps re.search
+    # from re-running both lookaheads at every offset of a long
+    # non-matching command (quadratic, holds the GIL and starves the gateway).
+    (r'\A(?=[\s\S]*\blaunchctl\s+(?:stop|kickstart|bootout|unload|kill|disable|remove)\b)(?=[\s\S]*\b(?:hermes|ai\.hermes)\b)', "stop/restart hermes launchd service (kills running agents)"),
     # File copy/move/edit into sensitive system paths (/etc/ and macOS
     # /private/etc/ mirror).
     (rf'\b(cp|mv|install)\b.*\s{_SYSTEM_CONFIG_PATH}', "copy/move file into system config path"),
