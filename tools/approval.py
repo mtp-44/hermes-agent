@@ -799,7 +799,11 @@ DANGEROUS_PATTERNS = [
     # ~/.ssh/authorized_keys` cannot silently plant login commands or keys.
     (rf'\bsed\s+-[^\s]*i.*(?:{_USER_SENSITIVE_WRITE_TARGET})[^\s"\']*', "in-place edit of sensitive credential/SSH/shell-rc path"),
     (rf'\bsed\s+--in-place\b.*(?:{_USER_SENSITIVE_WRITE_TARGET})[^\s"\']*', "in-place edit of sensitive credential/SSH/shell-rc path (long flag)"),
-    (rf'\b(?:perl|ruby)\b.*(?:^|\s)-[^\s]*i\b.*(?:{_USER_SENSITIVE_WRITE_TARGET})[^\s"\']*', "in-place edit of sensitive credential/SSH/shell-rc path (perl/ruby)"),
+    # The first ``-i`` flag is committed atomically: if any in-place flag precedes
+    # the target, the first one does, so the match set is unchanged, but a run of
+    # thousands of ``-I`` options no longer backtracks through every flag and
+    # rescans for the target each time (quadratic: 5,000 ``-I`` took ~1.2 s).
+    (rf'\b(?:perl|ruby)\b(?>.*?(?:^|\s)-[^\s]*i\b).*(?:{_USER_SENSITIVE_WRITE_TARGET})[^\s"\']*', "in-place edit of sensitive credential/SSH/shell-rc path (perl/ruby)"),
     (rf'\bsed\s+-[^\s]*i.*\s{_SYSTEM_CONFIG_PATH}', "in-place edit of system config"),
     (rf'\bsed\s+--in-place\b.*\s{_SYSTEM_CONFIG_PATH}', "in-place edit of system config (long flag)"),
     # In-place edit of a Hermes-managed security file (~/.hermes/config.yaml or
@@ -816,7 +820,7 @@ DANGEROUS_PATTERNS = [
     # backup suffix (`perl -i.bak`). Match any flag token containing `i`
     # anywhere in the args, not just the first token — `perl -e '...'` (code
     # eval, no -i) does not trip because it has no `-...i` flag token.
-    (rf'\b(?:perl|ruby)\b.*(?:^|\s)-[^\s]*i\b.*(?:{_HERMES_CONFIG_PATH}|{_HERMES_ENV_PATH})', "in-place edit of Hermes config/env (perl/ruby)"),
+    (rf'\b(?:perl|ruby)\b(?>.*?(?:^|\s)-[^\s]*i\b).*(?:{_HERMES_CONFIG_PATH}|{_HERMES_ENV_PATH})', "in-place edit of Hermes config/env (perl/ruby)"),
     # Local widening of the "script execution via -e/-c flag" rule (behaviour
     # subset of upstream b90dbac1d6, which unifies execution-bearing options
     # with a parser this fork does not have). Listed after the in-place edit

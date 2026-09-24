@@ -312,7 +312,9 @@ class TestPipeToLaunchedShell:
         start = time.perf_counter()
         detect_dangerous_command("curl x | sudo " + "-a " * 20000 + "cat")
         detect_dangerous_command("curl x | env " + "A=b " * 20000 + "cat")
-        assert time.perf_counter() - start < 2.0
+        # ~0.3 s locally, ~2 s on a shared CI runner: both inputs are 60-80 KB, so
+        # a quadratic regression would take minutes, well past this bound.
+        assert time.perf_counter() - start < 6.0
 
 
 class TestDetectSqlPatterns:

@@ -100,3 +100,17 @@ for cmd in cases:
 assert time.perf_counter() - start < 3.0
 '''
     subprocess.run([sys.executable, "-c", code], check=True, timeout=15)
+
+
+def test_perl_in_place_rules_stay_linear_on_option_runs():
+    # The perl/ruby in-place-edit rules used to backtrack through every -I flag
+    # and rescan for the target each time: 5,000 flags took ~1.2 s locally.
+    code = '''
+import time
+from tools.approval import detect_dangerous_command
+start = time.perf_counter()
+detect_dangerous_command("perl " + "-I " * 20000 + "x")
+detect_dangerous_command("ruby " + "-i " * 20000 + "~/.ssh/config")
+assert time.perf_counter() - start < 3.0, time.perf_counter() - start
+'''
+    subprocess.run([sys.executable, "-c", code], check=True, timeout=30)
