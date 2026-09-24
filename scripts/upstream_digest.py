@@ -28,6 +28,7 @@ for the sync itself.
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import subprocess
 import sys
@@ -102,16 +103,21 @@ def matches_any(sha: str, prefixes: set[str] | dict[str, str]) -> bool:
     return any(sha.startswith(p) or p.startswith(sha) for p in prefixes)
 
 
-def parse_log(log: str) -> list[tuple[str, str, list[str]]]:
-    """Parse `git log --name-only --pretty=format:%x00%H%x09%s` output."""
+LOG_FORMAT = "%x00%H%x09%cs%x09%s"
+
+
+def parse_log(log: str) -> list[tuple[str, str, str, list[str]]]:
+    """Parse `git log --name-only --pretty=format:<LOG_FORMAT>` output into
+    (sha, commit date, subject, files)."""
     commits = []
     for record in log.split("\x00"):
         lines = record.strip("\n").splitlines()
         if not lines:
             continue
-        sha, _, subject = lines[0].partition("\t")
+        sha, _, rest = lines[0].partition("\t")
+        day, _, subject = rest.partition("\t")
         files = [line for line in lines[1:] if line.strip()]
-        commits.append((sha, subject, files))
+        commits.append((sha, day, subject, files))
     return commits
 
 
@@ -125,6 +131,11 @@ def main() -> int:
     parser.add_argument(
         "--no-fetch", action="store_true", help="skip `git fetch` before diffing"
     )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="print the report as JSON (used by the estate reviewer)",
+    )
     args = parser.parse_args()
 
     if not args.no_fetch:
@@ -134,11 +145,9 @@ def main() -> int:
     range_spec = f"{args.local_branch}..{upstream_ref}"
     # One git call for every commit's files: a `git show` per commit took
     # minutes once upstream was tens of thousands of commits ahead.
-    commits = parse_log(
-        run("log", "--name-only", "--pretty=format:%x00%H%x09%s", range_spec)
-    )
+    commits = parse_log(run("log", "--name-only", f"--pretty=format:{LOG_FORMAT}", range_spec))
 
-    if not commits:
+    if not commits and not args.json:
         print(f"No new commits on {upstream_ref} since {args.local_branch}.")
         return 0
 
@@ -148,20 +157,20 @@ def main() -> int:
     triaged = load_triaged()
 
     delta_prefixes = tuple(LOCAL_DELTA_PATHS)
-    security: list[tuple[str, str]] = []
+    security: list[tuple[str, str, str]] = []
     landed_count = 0
     triaged_count = 0
     delta_risk: list[tuple[str, str, list[str]]] = []
     type_counts: Counter[str] = Counter()
 
-    for sha, subject, files in commits:
+    for sha, day, subject, files in commits:
         if is_security(subject):
             if matches_any(sha, landed):
                 landed_count += 1
             elif matches_any(sha, triaged):
                 triaged_count += 1
             else:
-                security.append((sha, subject))
+                security.append((sha, day, subject))
             continue
         hits = [f for f in files if f.startswith(delta_prefixes)]
         if hits:
@@ -170,13 +179,30 @@ def main() -> int:
         type_counts[commit_type(subject)] += 1
 
     handled = landed_count + triaged_count
+    other_total = len(commits) - len(security) - handled - len(delta_risk)
+    if args.json:
+        print(json.dumps({
+            "upstream_ref": upstream_ref,
+            "local_branch": args.local_branch,
+            "new_commits": len(commits),
+            "security": [
+                {"sha": sha, "date": day, "subject": subject}
+                for sha, day, subject in security
+            ],
+            "security_landed": landed_count,
+            "security_triaged": triaged_count,
+            "touches_local_delta": len(delta_risk),
+            "other": other_total,
+        }, indent=2))
+        return 0
+
     print(f"# Upstream digest: {upstream_ref} vs {args.local_branch}")
     print(f"{len(commits)} new commit(s).\n")
 
     print(f"## Security — needs a decision ({len(security)})")
     if security:
-        for sha, subject in security:
-            print(f"- {sha[:10]} {subject}")
+        for sha, day, subject in security:
+            print(f"- {sha[:10]} {day} {subject}")
     else:
         print("- none")
     print(
@@ -195,7 +221,6 @@ def main() -> int:
     print()
 
     print("## Everything else, by type")
-    other_total = len(commits) - len(security) - handled - len(delta_risk)
     for ctype, count in type_counts.most_common():
         print(f"- {ctype}: {count}")
     print(f"\n{other_total} commit(s) need no special attention before the next sync.")
