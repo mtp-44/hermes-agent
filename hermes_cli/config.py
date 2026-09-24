@@ -2403,10 +2403,18 @@ DEFAULT_CONFIG = {
     # cron_mode — what to do when a cron job hits a dangerous command:
     #   deny    — block the command and let the agent find another way (default, safe)
     #   approve — auto-approve all dangerous commands in cron jobs
+    #
+    # unattended_mode — what to do when a session on an unattended
+    # programmatic platform (webhook, msgraph_webhook) hits a dangerous
+    # command. Those adapters have no /approve channel, so a pending approval
+    # would just block for the full timeout with nobody to answer:
+    #   deny    — block the command instantly (default, safe; mirrors cron_mode)
+    #   approve — auto-approve all dangerous commands on unattended platforms
     "approvals": {
         "mode": "manual",
         "timeout": 60,
         "cron_mode": "deny",
+        "unattended_mode": "deny",
         # When true, /reload-mcp asks the user to confirm before rebuilding
         # the MCP tool set for the active session.  Reloading invalidates
         # the provider prompt cache (tool schemas are baked into the system
