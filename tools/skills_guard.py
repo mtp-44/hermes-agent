@@ -97,6 +97,14 @@ class ScanResult:
 # below flags the same set (the narrower `(ba)?sh` let `curl url | zsh`
 # through while bash/sh were caught).
 _SHELL_NAMES_RE = r'(?:bash|sh|zsh|ksh|dash)'
+# Local addition (not upstream): the download-and-execute patterns also accept
+# fish/csh/tcsh and a sudo/doas/env launcher (with options / VAR=value) in
+# front of the shell, so `curl url | sudo bash` and `curl url | env zsh` are
+# flagged as supply-chain pipes rather than only as generic sudo usage.
+_PIPE_SHELL_RE = (
+    r'(?:(?:[/\w]*/)?(?:sudo|doas|env)(?:\s+(?:-[^\s|;&]+|[A-Za-z_]\w*=[^\s|;&]*))*\s+)?'
+    r'(?:[/\w]*/)?(?:bash|sh|zsh|ksh|dash|fish|csh|tcsh)'
+)
 
 THREAT_PATTERNS = [
     # ── Exfiltration: shell commands leaking secrets ──
@@ -401,10 +409,10 @@ THREAT_PATTERNS = [
      "possible cryptocurrency mining indicators"),
 
     # ── Supply chain: curl/wget pipe to shell ──
-    (rf'curl\s+[^\n]*\|\s*{_SHELL_NAMES_RE}',
+    (rf'curl\s+[^\n]*\|\s*{_PIPE_SHELL_RE}',
      "curl_pipe_shell", "critical", "supply_chain",
      "curl piped to shell (download-and-execute)"),
-    (rf'wget\s+[^\n]*-O\s*-\s*\|\s*{_SHELL_NAMES_RE}',
+    (rf'wget\s+[^\n]*-O\s*-\s*\|\s*{_PIPE_SHELL_RE}',
      "wget_pipe_shell", "critical", "supply_chain",
      "wget piped to shell (download-and-execute)"),
     (r'curl\s+[^\n]*\|\s*python',

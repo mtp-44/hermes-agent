@@ -579,6 +579,18 @@ def _sudo_stdin_block_result(description: str) -> dict:
 # `dash -c ...` and `dash <<EOF` through while bash/sh were flagged).
 _SHELL_NAMES = ("bash", "sh", "zsh", "ksh", "dash")
 _SHELL_NAMES_RE = "|".join(_SHELL_NAMES)
+# Local addition (not upstream): the pipe-remote rule also accepts the
+# non-POSIX shells fish/csh/tcsh and up to two launcher words in front of the
+# shell (`curl x | sudo bash`, `| sudo -u root sh`, `| env bash`,
+# `| /usr/bin/env -i zsh`). Each launcher word may carry option / VAR=value
+# tokens; the atomic group keeps `sudo -u <user>` from re-reading the user
+# name as the shell, and the token classes are disjoint (`-...`, `NAME=...`)
+# so the repetition cannot backtrack catastrophically. (Python >= 3.11.)
+_PIPE_SHELL_NAMES_RE = _SHELL_NAMES_RE + "|fish|csh|tcsh"
+_PIPE_SHELL_LAUNCHER_RE = (
+    r'(?:(?:[/\w]*/)?(?:sudo|doas|env|command|exec|nohup|time)'
+    r'(?:\s+(?>-[ugCh]\s+[^\s|;&]+|-[^\s|;&]+|[A-Za-z_]\w*=[^\s|;&]*))*\s+){0,2}'
+)
 
 DANGEROUS_PATTERNS = [
     (r'\brm\s+(-[^\s]*\s+)*/', "delete in root path"),
@@ -623,7 +635,7 @@ DANGEROUS_PATTERNS = [
     # Any shell invocation via -c or combined flags like -lc, -ic, etc.
     (rf'\b(?:{_SHELL_NAMES_RE})\s+-[^\s]*c(\s+|$)', "shell command via -c/-lc flag"),
     (r'\b(python[23]?|perl|ruby|node)\s+-[ec]\s+', "script execution via -e/-c flag"),
-    (rf'\b(curl|wget)\b.*\|\s*(?:[/\w]*/)?(?:{_SHELL_NAMES_RE})(?:\s|$|-c)', "pipe remote content to shell"),
+    (rf'\b(curl|wget)\b.*\|\s*{_PIPE_SHELL_LAUNCHER_RE}(?:[/\w]*/)?(?:{_PIPE_SHELL_NAMES_RE})(?:\s|$|-c)', "pipe remote content to shell"),
     (rf'\b(?:{_SHELL_NAMES_RE})\s+<\s*<?\s*\(\s*(curl|wget)\b', "execute remote script via process substitution"),
     # Remote content executed via command substitution: eval/source/. $(curl ...)
     # or `wget ...`. Equivalent to piping remote content to a shell.
