@@ -6,17 +6,20 @@
          desktop client speaks), bound to the tailnet address with the auth gate
          on; credentials come from ~/.hermes/.env (HERMES_DASHBOARD_BASIC_AUTH_*).
 
-         MUST run via the repo .venv python — the ~/.local/bin/hermes shim
-         re-execs into the separate ~/.hermes/hermes-agent upstream install, which
-         is how this service ran unpatched upstream code until 2026-09-24 (HA-0006).
+         MUST run via the repo .venv python. Until 2026-09-24 this ran the
+         ~/.local/bin/hermes shim, which then exec'd the separate
+         ~/.hermes/hermes-agent upstream install, so the dashboard ran unpatched
+         upstream code (HA-0006).
 
-         --skip-build + HERMES_WEB_DIST / HERMES_TUI_DIR point at a prebuilt
-         release so the dashboard never runs npm/esbuild inside the production
-         checkout. Releases live in ~/state/releases/hermes-dashboard/releases/
-         <UTC stamp>-<sha>/{web_dist,ui-tui/dist/entry.js}; `current` is the live
-         one. Rebuild from a clean `git archive` export of the deployed sha
-         (npm ci --workspace web && npm run build -w web; npm install
-         --workspace ui-tui && npm run build -w ui-tui), never in the repo.
+         The skip-build flag plus HERMES_WEB_DIST / HERMES_TUI_DIR point at a
+         prebuilt release, so the dashboard never runs npm or esbuild inside the
+         production checkout. Releases live in
+         ~/state/releases/hermes-dashboard/releases/STAMP-SHA/ holding web_dist/
+         and ui-tui/dist/entry.js; `current` is the live one. Rebuild from a clean
+         `git archive` export of the deployed sha (npm ci and npm run build for
+         the web workspace, npm install and npm run build for ui-tui), never
+         in the repo. No double hyphens in this comment: XML forbids them and
+         Python plistlib refuses the file.
 
          Install: cp launchd/com.mh.hermes-dashboard.plist ~/Library/LaunchAgents/ -->
     <key>Label</key>
