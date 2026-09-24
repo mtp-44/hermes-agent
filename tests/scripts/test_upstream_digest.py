@@ -105,10 +105,48 @@ def test_shipped_triaged_file_parses_with_a_reason_per_entry():
 
 def test_parse_log_splits_records_and_files():
     log = (
-        "\x00aaa111\tfix(security): one\ngateway/run.py\ntools/x.py\n"
-        "\n\x00bbb222\tmerge commit with no files\n"
+        "\x00aaa111\t2026-09-02\tfix(security): one\tstill the subject\n"
+        "gateway/run.py\ntools/x.py\n"
+        "\n\x00bbb222\t2026-09-03\tmerge commit with no files\n"
     )
     assert parse_log(log) == [
-        ("aaa111", "fix(security): one", ["gateway/run.py", "tools/x.py"]),
-        ("bbb222", "merge commit with no files", []),
+        ("aaa111", "2026-09-02", "fix(security): one\tstill the subject",
+         ["gateway/run.py", "tools/x.py"]),
+        ("bbb222", "2026-09-03", "merge commit with no files", []),
     ]
+
+
+def test_json_report_lists_only_undecided_security(monkeypatch, capsys):
+    """The estate reviewer consumes --json; pin its shape and the filtering."""
+    import json
+    import sys
+
+    import scripts.upstream_digest as digest
+
+    upstream_log = (
+        "\x00" + "a" * 40 + "\t2026-09-02\tfix(security): undecided\ntools/x.py\n"
+        "\x00" + "b" * 40 + "\t2026-09-03\tfix(security): ported already\ntools/y.py\n"
+        "\x00" + "c" * 40 + "\t2026-09-04\tfix(sec): triaged away\n"
+        "\x00" + "d" * 40 + "\t2026-09-05\tfeat(web): a feature\nweb/app.ts\n"
+    )
+    ours = "security: port\n\nPorted from upstream " + "b" * 40 + " (adapted)\n"
+
+    def fake_run(*args):
+        if args[0] == "log" and "--name-only" in args:
+            return upstream_log
+        if args[0] == "log":
+            return ours
+        raise AssertionError(args)
+
+    monkeypatch.setattr(digest, "run", fake_run)
+    monkeypatch.setattr(digest, "load_triaged", lambda: {"c" * 10: "out of scope"})
+    monkeypatch.setattr(sys, "argv", ["upstream_digest.py", "--no-fetch", "--json"])
+    assert digest.main() == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["security"] == [
+        {"sha": "a" * 40, "date": "2026-09-02", "subject": "fix(security): undecided"}
+    ]
+    assert report["security_landed"] == 1
+    assert report["security_triaged"] == 1
+    assert report["new_commits"] == 4
+    assert report["other"] == 1
