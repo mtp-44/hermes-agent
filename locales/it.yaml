@@ -7,6 +7,8 @@ approval:
   choose_short:    "      [o]una volta  |  [s]essione  |  [d]nega"
   prompt_long:     "      Scelta [o/s/a/D]: "
   prompt_short:    "      Scelta [o/s/D]: "
+  choose_once_only: "      [o]una volta  |  [d]nega"
+  prompt_once_only: "      Scelta [o/D]: "
   timeout:         "      ⏱ Tempo scaduto — comando negato"
   allowed_once:    "      ✓ Consentito una volta"
   allowed_session: "      ✓ Consentito per questa sessione"

@@ -376,6 +376,69 @@ def _exec_approval_request_kwargs(adapter: Any, approval_data: dict) -> dict:
     return {"request_id": str(request_id)}
 
 
+_EXEC_APPROVAL_SCOPE_FLAGS = ("allow_permanent", "allow_session")
+
+
+def _exec_approval_scope_kwargs(adapter: Any, approval_data: dict) -> dict:
+    """Scope flags (``allow_permanent`` / ``allow_session``) for a button prompt.
+
+    ``tools.approval`` marks what a prompt may grant: a pure-tirith finding
+    is session-max (``allow_permanent=False``) and the protected
+    agent-instruction gate grants one operation (both False). An adapter
+    whose ``send_exec_approval`` accepts a flag (by name or ``**kwargs``)
+    gets it and renders only those buttons; one that does not is called
+    exactly as before. Missing flags mean allowed. Module-level so the wiring
+    is unit-testable.
+    """
+    method = getattr(type(adapter), "send_exec_approval", None)
+    if method is None:
+        return {}
+    try:
+        params = inspect.signature(method).parameters
+    except (TypeError, ValueError):
+        return {}
+    var_kw = any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
+    data = approval_data or {}
+    return {
+        flag: bool(data.get(flag, True))
+        for flag in _EXEC_APPROVAL_SCOPE_FLAGS
+        if var_kw or flag in params
+    }
+
+
+def _format_exec_approval_fallback(
+    command: str,
+    description: str,
+    command_prefix: str,
+    *,
+    allow_permanent: bool = True,
+    allow_session: bool = True,
+) -> str:
+    """Render the plain-text approval prompt from the approval's scope flags.
+
+    Used by adapters without buttons (Signal) and whenever a button send
+    fails. It must list only the replies the prompt can grant: a
+    protected-file prompt offers approve/deny, a tirith-only prompt no
+    ``always``. ``command_prefix`` is the adapter's typed prefix (``!`` on
+    Slack/Matrix).
+    """
+    p = command_prefix
+    cmd_preview = command[:200] + "..." if len(command) > 200 else command
+    if allow_session:
+        choices = f"Reply `{p}approve` to execute, `{p}approve session` to approve this pattern for the session, "
+        if allow_permanent:
+            choices += f"`{p}approve always` to approve permanently, "
+        choices += f"or `{p}deny` to cancel."
+    else:
+        choices = f"Reply `{p}approve` to execute this one operation, or `{p}deny` to cancel."
+    return (
+        f"⚠️ **Dangerous command requires approval:**\n"
+        f"```\n{cmd_preview}\n```\n"
+        f"Reason: {description}\n\n"
+        f"{choices}"
+    )
+
+
 def _approval_text_queue_note(session_key: str, prefix: str = "/") -> str:
     """Suffix for the text approval prompt when several approvals are queued.
 
@@ -1724,8 +1787,10 @@ except Exception as _bootstrap_exc:
 # Gateway runs in quiet mode - suppress debug output and use cwd directly (no temp dirs)
 os.environ["HERMES_QUIET"] = "1"
 
-# Enable interactive exec approval for dangerous commands on messaging platforms
-os.environ["HERMES_EXEC_ASK"] = "1"
+# HERMES_EXEC_ASK is set in start_gateway(), not at import time. Importing this
+# module from CLI tools (e.g. send_message -> _gateway_runner_ref) must not flip
+# interactive CLI sessions into ask-mode, or Dangerous Command prompts become
+# silent pending_approval with no Approve/Deny UI.
 
 # Set terminal working directory for messaging platforms.
 # config.yaml terminal.cwd is the canonical source (bridged to TERMINAL_CWD
@@ -18111,6 +18176,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                                 **_exec_approval_request_kwargs(
                                     _status_adapter, approval_data
                                 ),
+                                **_exec_approval_scope_kwargs(
+                                    _status_adapter, approval_data
+                                ),
                             ),
                             _loop_for_step,
                             logger=logger,
@@ -18134,14 +18202,15 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 # typed prefix so Slack/Matrix users are told the form they
                 # can actually type (`!approve`) — typed "/" is blocked in
                 # Slack threads and reserved by Matrix clients.
+                # List only the replies this prompt can grant (a protected
+                # file is once/deny, a tirith-only finding has no "always").
                 _p = getattr(_status_adapter, "typed_command_prefix", "/")
-                cmd_preview = cmd[:200] + "..." if len(cmd) > 200 else cmd
-                msg = (
-                    f"⚠️ **Dangerous command requires approval:**\n"
-                    f"```\n{cmd_preview}\n```\n"
-                    f"Reason: {desc}\n\n"
-                    f"Reply `{_p}approve` to execute, `{_p}approve session` to approve this pattern "
-                    f"for the session, `{_p}approve always` to approve permanently, or `{_p}deny` to cancel."
+                msg = _format_exec_approval_fallback(
+                    cmd,
+                    desc,
+                    _p,
+                    allow_permanent=bool(approval_data.get("allow_permanent", True)),
+                    allow_session=bool(approval_data.get("allow_session", True)),
                 ) + _approval_text_queue_note(_approval_session_key, _p)
                 try:
                     _approval_send_fut = safe_schedule_threadsafe(
@@ -19865,6 +19934,11 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
                  Useful for systemd services to avoid restart-loop deadlocks
                  when the previous process hasn't fully exited yet.
     """
+    # Enable interactive exec approval for dangerous commands on messaging
+    # platforms. Set here (not at module import) so incidental imports of
+    # gateway.run from CLI/tool code do not poison HERMES_EXEC_ASK.
+    os.environ["HERMES_EXEC_ASK"] = "1"
+
     # Snapshot the checkout revision now, while sys.modules still matches disk,
     # so a later `git pull` under this long-lived process can be detected (and
     # risky work like model switching refused) instead of crashing on a stale

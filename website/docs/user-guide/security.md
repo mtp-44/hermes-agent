@@ -234,6 +234,19 @@ command_allowlist:
 
 These patterns are loaded at startup and silently approved in all future sessions.
 
+The setting must be a list of strings. Legacy installs that stored a list as a
+quoted YAML/JSON string recover that list at load time and log a warning to
+re-save it with `hermes config edit`. Other malformed values (including a plain
+string such as `hermes config set command_allowlist "ls *"` writes) are ignored
+with a warning; they never become per-character approvals. Loading does not
+rewrite your configuration file.
+
+You can edit `command_allowlist` by hand while Hermes is running. Saving an
+"always" choice merges with the file instead of overwriting it: entries you
+added are kept, entries you removed are not written back and stop being honoured
+by that process from its next save or session load. Two live processes (the
+messaging gateway and the dashboard) merge the same way.
+
 :::tip
 Use `hermes config edit` to review or remove patterns from your permanent allowlist.
 :::

@@ -4477,6 +4477,8 @@ class TelegramAdapter(BasePlatformAdapter):
         description: str = "dangerous command",
         metadata: Optional[Dict[str, Any]] = None,
         request_id: Optional[str] = None,
+        allow_permanent: bool = True,
+        allow_session: bool = True,
     ) -> SendResult:
         """Send an inline-keyboard approval prompt with interactive buttons.
 
@@ -4485,6 +4487,11 @@ class TelegramAdapter(BasePlatformAdapter):
         *request_id* (the queue entry's id from ``tools.approval``) is given,
         a tap resolves exactly that entry; a tap after it expired resolves
         nothing.
+
+        Only the scopes the prompt can grant are rendered: *allow_session*
+        False (the protected agent-instruction gate, one operation) leaves
+        Allow Once + Deny; *allow_permanent* False (a tirith-only finding)
+        drops Always.
         """
         if not self._bot:
             return SendResult(success=False, error="Not connected")
@@ -4508,16 +4515,23 @@ class TelegramAdapter(BasePlatformAdapter):
                 self._approval_counter = itertools.count(1)
             approval_id = next(self._approval_counter)
 
-            keyboard = InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton("✅ Allow Once", callback_data=f"ea:once:{approval_id}"),
-                    InlineKeyboardButton("✅ Session", callback_data=f"ea:session:{approval_id}"),
-                ],
-                [
-                    InlineKeyboardButton("✅ Always", callback_data=f"ea:always:{approval_id}"),
-                    InlineKeyboardButton("❌ Deny", callback_data=f"ea:deny:{approval_id}"),
-                ],
-            ])
+            buttons = [
+                InlineKeyboardButton("✅ Allow Once", callback_data=f"ea:once:{approval_id}"),
+            ]
+            if allow_session:
+                buttons.append(
+                    InlineKeyboardButton("✅ Session", callback_data=f"ea:session:{approval_id}")
+                )
+                if allow_permanent:
+                    buttons.append(
+                        InlineKeyboardButton("✅ Always", callback_data=f"ea:always:{approval_id}")
+                    )
+            buttons.append(
+                InlineKeyboardButton("❌ Deny", callback_data=f"ea:deny:{approval_id}")
+            )
+            keyboard = InlineKeyboardMarkup(
+                [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
+            )
 
             kwargs: Dict[str, Any] = {
                 "chat_id": normalize_telegram_chat_id(chat_id),
