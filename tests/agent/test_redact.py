@@ -498,6 +498,58 @@ class TestApiKeyHeaders:
         assert "anotherOpaqueSecret" not in result
 
 
+class TestXKeyHeaderNames:
+    """``x-<name>-key`` custom API-key headers (local: ``x-brain-key`` is the Open
+    Brain MCP header, and its line in config.yaml leaked on every surface)."""
+
+    V = "fakeBrainKeyValue0123456789abcdef"
+
+    @pytest.mark.parametrize("template", [
+        "x-brain-key: {v}",
+        "      x-brain-key: {v}",            # config.yaml mcp_servers.<x>.headers
+        "X-Brain-Key: {v}",
+        'x-brain-key: "{v}"',
+        "x-functions-key: {v}",
+        'curl -H "x-brain-key: {v}" http://127.0.0.1:8000/mcp',
+        '{{"x-brain-key": "{v}"}}',
+        "headers={{'x-brain-key': '{v}'}}",
+    ])
+    def test_x_key_header_masked(self, template):
+        result = redact_sensitive_text(template.format(v=self.V), force=True)
+        assert self.V not in result
+        assert "brain-key" in result.lower() or "functions-key" in result
+
+    def test_x_brain_key_masked_in_code_file_terminal_output(self):
+        # ``curl -v`` / source-preserving terminal output: the header rule runs
+        # even on the code_file path.
+        from agent.redact import redact_terminal_output
+
+        out = f"> x-brain-key: {self.V}\n< HTTP/1.1 200 OK"
+        assert self.V not in redact_terminal_output(out, "curl -v http://127.0.0.1:8000/mcp")
+
+    def test_x_brain_key_file_read_uses_sentinel_and_keeps_quotes(self):
+        out = redact_sensitive_text(f'5|      x-brain-key: "{self.V}"', force=True, file_read=True)
+        assert out == '5|      x-brain-key: "«redacted-secret»"'
+
+    def test_short_header_value_keeps_closing_quote(self):
+        text = 'curl -H "x-brain-key: short123" http://127.0.0.1:8000/mcp'
+        assert redact_sensitive_text(text, force=True) == (
+            'curl -H "x-brain-key: ***" http://127.0.0.1:8000/mcp')
+
+    @pytest.mark.parametrize("text", [
+        "x-monkey: banana",
+        "x-keyboard: us",
+        "x-request-id: 1234567890abcdef",
+        "inbox-key: meeting notes",
+        "primary-key: id",
+        "sort-key: name",
+        "the api-key-rotation-key: guide",
+        "hot-key: ctrl-k",
+    ])
+    def test_other_dash_key_words_unchanged(self, text):
+        assert redact_sensitive_text(text, force=True) == text
+
+
 class TestTelegramTokens:
     def test_bot_token(self):
         text = "bot123456789:ABCDEfghij-KLMNopqrst_UVWXyz12345"

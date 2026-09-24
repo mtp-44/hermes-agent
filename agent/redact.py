@@ -324,7 +324,14 @@ def _key_has_secret_keyword(key: str) -> bool:
 
 
 # JSON field patterns: "apiKey": "value", "token": "value", etc.
-_JSON_KEY_NAMES = r"(?:api_?[Kk]ey|token|secret|password|access_token|refresh_token|auth_token|bearer|secret_value|raw_secret|secret_input|key_material)"
+# ``x-<name>-key`` custom API-key header names (``x-brain-key`` — the Open Brain
+# MCP header in config.yaml — ``x-functions-key``, ``x-api-key``). Each
+# dash-separated segment is whole, so ``x-monkey`` / ``x-keyboard`` /
+# ``inbox-key`` / prose ``*-key`` words do not match; the lookbehind keeps it
+# from starting mid-word. Used by the header, JSON and Python-repr rules.
+_X_KEY_HEADER_NAME = r"(?<![A-Za-z0-9_\-])x-(?:[a-z0-9]+-)*key"
+_X_KEY_HEADER_NAME_RE = re.compile(_X_KEY_HEADER_NAME, re.IGNORECASE)
+_JSON_KEY_NAMES = rf"(?:api_?[Kk]ey|token|secret|password|access_token|refresh_token|auth_token|bearer|secret_value|raw_secret|secret_input|key_material|{_X_KEY_HEADER_NAME})"
 _JSON_FIELD_RE = re.compile(
     rf'("{_JSON_KEY_NAMES}")\s*:\s*"([^"]+)"',
     re.IGNORECASE,
@@ -423,7 +430,8 @@ _AUTH_HEADER_RE = re.compile(
 # a known vendor prefix (custom/local backends) would otherwise leak when a
 # request or curl command is logged or echoed into tool output / transcripts.
 _SECRET_HEADER_NAMES = (
-    r"(?:x-api-key|x-goog-api-key|api-key|apikey|x-api-token|x-auth-token|x-access-token)"
+    r"(?:x-api-key|x-goog-api-key|api-key|apikey|x-api-token|x-auth-token|x-access-token"
+    rf"|{_X_KEY_HEADER_NAME})"
 )
 _SECRET_HEADER_RE = re.compile(
     rf"({_SECRET_HEADER_NAMES}\s*:\s*)(\S+)",
@@ -579,6 +587,9 @@ def _is_python_repr_secret_key(key: str) -> bool:
     if folded in _PYTHON_REPR_SECRET_KEYS:
         return True
     if key.isupper() and key.endswith(_PYTHON_REPR_ENV_SUFFIXES):
+        return True
+    # Header-dict keys: ``{'x-brain-key': '…'}``, ``{'X-Api-Key': '…'}``.
+    if _X_KEY_HEADER_NAME_RE.fullmatch(key):
         return True
     # Mixed/camel-case keys ending in a credential word (``UserPassword``,
     # ``sessionToken``, ``clientApiKey``). Suffix-only matching keeps metadata
@@ -953,10 +964,23 @@ def redact_sensitive_text(
     # API-key style headers (x-api-key, api-key, …). Header values are
     # colon-separated, so gate on ":" — the regex itself is the precise filter.
     if ":" in text:
-        text = _SECRET_HEADER_RE.sub(
-            lambda m: m.group(1) + _mask_token(m.group(2)),
-            text,
-        )
+        def _redact_secret_header(m):
+            value = m.group(2)
+            # Keep quotes outside the mask: a quoted YAML scalar keeps both,
+            # and a header flush against a closing quote (``-H "x-api-key: v"``)
+            # keeps that quote, so masking never breaks the command's syntax.
+            lead = trail = ""
+            if len(value) >= 2 and value[0] in "'\"" and value[-1] == value[0]:
+                lead, trail, value = value[0], value[-1], value[1:-1]
+            elif len(value) >= 2 and value[-1] in "'\"":
+                trail, value = value[-1], value[:-1]
+            if value == "***" or value.startswith("«redacted"):
+                return m.group(0)
+            # File reads get the non-reusable sentinel, like every other pass:
+            # a head/tail mask of ``x-brain-key: …`` in config.yaml looks like a
+            # truncated real key and could be written back (#35519).
+            return f"{m.group(1)}{lead}{_assign_mask(value)}{trail}"
+        text = _SECRET_HEADER_RE.sub(_redact_secret_header, text)
 
     # Telegram bot tokens — pattern requires ":<token>" with digits prefix
     if ":" in text:
