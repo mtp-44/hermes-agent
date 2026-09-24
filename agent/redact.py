@@ -156,10 +156,29 @@ _ENV_ASSIGN_RE = re.compile(
 # The colon-form URL guard (skip when ``://`` present) lives at the call site.
 _SECRET_CFG_NAMES = r"(?:api[ _.\-]?key|token|secret|passwd|password|credential|auth)"
 _CFG_VALUE = r"(['\"]?)([^\s&]+?)\2(?=[\s&]|$)"
+# Linear pre-gate for the _CFG_*_RE subs below: a text with no secret keyword
+# can never match either pattern, so the (potentially backtrack-heavy) subs
+# are skipped entirely for such text. See the call site in
+# redact_sensitive_text().
+_CFG_SECRET_WORD_RE = re.compile(_SECRET_CFG_NAMES, re.IGNORECASE)
 # Namespaced (dotted) key: the secret word may sit anywhere in a dotted path.
+# NOTE(perf): possessive quantifiers (py3.11+) replace the nested quantifier
+# ``(?:[A-Za-z0-9_\-]+\.)+`` (exponential backtracking on long dotted runs).
+# The ``*`` runs bordering {_SECRET_CFG_NAMES} must stay backtrackable
+# (secret words are matchable by the class, e.g. ``app.api.key=…``).
+# The lookbehind anchors each attempt to the start of a key run: without it,
+# ``re.sub`` retries the backtrackable ``*`` prefix at every byte of a long
+# non-matching dotted run, making the sub quadratic whenever the text contains
+# a secret keyword anywhere (the ``_CFG_SECRET_WORD_RE`` pre-gate only skips
+# secret-free text). Match set is unchanged — any match starting mid-run
+# implies a leftmost match starting at the run start. The leading ``\.*+``
+# keeps that true for runs that open with a dot (``.app.password=…``): the
+# pre-lookbehind pattern matched those from the first segment, and without it
+# the anchored form would skip them.
 _CFG_DOTTED_RE = re.compile(
-    rf"((?:[A-Za-z0-9_\-]+\.)+[A-Za-z0-9_.\-]*{_SECRET_CFG_NAMES}[A-Za-z0-9_.\-]*"
-    rf"|[A-Za-z0-9_.\-]*{_SECRET_CFG_NAMES}[A-Za-z0-9_.\-]*\.[A-Za-z0-9_.\-]+)"
+    rf"(?<![A-Za-z0-9_.\-])"
+    rf"(\.*+[A-Za-z0-9_\-]++\.[A-Za-z0-9_.\-]*{_SECRET_CFG_NAMES}[A-Za-z0-9_.\-]*+"
+    rf"|[A-Za-z0-9_.\-]*{_SECRET_CFG_NAMES}[A-Za-z0-9_.\-]*\.[A-Za-z0-9_.\-]++)"
     rf"={_CFG_VALUE}",
     re.IGNORECASE,
 )
@@ -178,8 +197,10 @@ _CFG_ANCHORED_RE = re.compile(
 # is masked by _AUTH_HEADER_RE); ``auth_token``/``auth-token`` still match via
 # the ``token`` keyword. Quoted values defer to _JSON_FIELD_RE via the lookahead.
 _YAML_CFG_NAMES = r"(?:api[ _.\-]?key|token|secret|passwd|password|credential)"
+# NOTE(perf): possessive quantifiers wherever the successor is disjoint; the
+# leading ``[A-Za-z0-9_.\-]*`` stays backtrackable (see _CFG_DOTTED_RE note).
 _YAML_ASSIGN_RE = re.compile(
-    rf"(^[ \t]*[A-Za-z0-9_.\-]*{_YAML_CFG_NAMES}[A-Za-z0-9_.\-]*)(:[ \t]*)(?!['\"])([^\s&]+)",
+    rf"(^[ \t]*+[A-Za-z0-9_.\-]*{_YAML_CFG_NAMES}[A-Za-z0-9_.\-]*+)(:[ \t]*+)(?!['\"])([^\s&]++)",
     re.IGNORECASE | re.MULTILINE,
 )
 
@@ -566,7 +587,14 @@ def redact_sensitive_text(
             # web-URL query params are intentionally passed through (see note
             # near the bottom of this function); _DB_CONNSTR_RE still guards
             # connection-string passwords.
-            if "://" not in text:
+            #
+            # Extra gate: every _CFG_*_RE match requires a secret keyword in
+            # the key, so a text without any secret keyword cannot match —
+            # skipping is exact. This matters because _CFG_DOTTED_RE
+            # backtracks on long unbroken [A-Za-z0-9_.\-] runs (e.g.
+            # base64/hex blobs in compaction payloads); the linear keyword
+            # scan prevents that pathological path on secret-free text.
+            if "://" not in text and _CFG_SECRET_WORD_RE.search(text):
                 text = _CFG_DOTTED_RE.sub(_redact_env, text)
                 text = _CFG_ANCHORED_RE.sub(_redact_env, text)
 

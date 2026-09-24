@@ -716,6 +716,111 @@ class TestLowercaseDottedConfigKeys:
         assert redact_sensitive_text(text) == text
 
 
+class TestConfigKeyRedosResistance:
+    """The dotted-key patterns must not backtrack exponentially (ReDoS).
+
+    Before the possessive-quantifier rewrite, a non-matching run of ~40
+    dotted segments took ~30ms and doubled every ~4 segments; 100 segments
+    would effectively hang the redactor (it runs on every log line and every
+    outbound gateway message). Timing bounds are deliberately generous (2 s)
+    so a loaded box does not flake them; the pre-fix times are 7-100+ s.
+    """
+
+    def test_long_dotted_run_completes_fast(self):
+        import time
+
+        # 100 dotted segments with no '=' — worst case for the old pattern.
+        text = ".".join(["segment"] * 100) + " end"
+        t0 = time.perf_counter()
+        assert redact_sensitive_text(text) == text
+        assert time.perf_counter() - t0 < 2.0
+
+    def test_long_dotted_run_with_keyword_completes_fast(self):
+        """Includes a keyword so the regex runs past the keyword pre-gate."""
+        import time
+
+        text = ".".join(["segment"] * 100) + ".token end"
+        t0 = time.perf_counter()
+        assert redact_sensitive_text(text) == text
+        assert time.perf_counter() - t0 < 2.0
+
+    def test_long_dotted_secret_still_redacted(self):
+        # Possessive quantifiers must not change matching behavior.
+        text = ".".join(["seg"] * 50) + ".password=Sup3rS3cret!"
+        result = redact_sensitive_text(text)
+        assert "Sup3rS3cret!" not in result
+        assert ".password=" in result
+
+    def test_long_opaque_assignment_run_completes_fast(self):
+        """A long opaque blob followed by '=' (no secret keyword) stays fast.
+
+        The keyword pre-gate skips the dotted/anchored config passes for
+        secret-free text; HEAD before the port took ~7.7 s here.
+        """
+        import time
+
+        text = "a" * 20_000 + "=value"
+        t0 = time.perf_counter()
+        assert redact_sensitive_text(text, force=True) == text
+        assert time.perf_counter() - t0 < 2.0
+
+    def test_repeated_keyword_run_completes_fast(self):
+        """A 5 KB run of repeated secret keywords must not stall the redactor.
+
+        Every byte of the run is a potential key start and every ``token`` a
+        potential keyword split; HEAD before the port took ~21 s here.
+        """
+        import time
+
+        text = "token" * 1000 + " = x"
+        t0 = time.perf_counter()
+        assert redact_sensitive_text(text, force=True) == text
+        assert time.perf_counter() - t0 < 2.0
+
+    def test_dotted_cfg_scan_stays_linear_with_keyword_elsewhere(self):
+        """_CFG_DOTTED_RE must stay linear once the pre-gate passes.
+
+        The ``_CFG_SECRET_WORD_RE`` pre-gate only skips secret-FREE text, so a
+        payload that contains a real secret assignment AND a long opaque
+        dotted run still reaches the backtrackable ``*`` prefix. Without the
+        run-start lookbehind the sub retries that prefix from every byte of
+        the run (quadratic while holding the GIL).
+        """
+        import time
+
+        text = "password=hunter2\n" + "a." * 15_000 + "=value"
+        t0 = time.perf_counter()
+        result = redact_sensitive_text(text, force=True)
+        assert "hunter2" not in result
+        assert time.perf_counter() - t0 < 2.0
+
+    def test_leading_dot_dotted_key_still_redacted(self):
+        # The run-start lookbehind must not drop keys whose run opens with a
+        # dot (the pre-rewrite pattern matched them from the first segment).
+        result = redact_sensitive_text(".app.password=Sup3rS3cret!")
+        assert "Sup3rS3cret!" not in result
+        assert result.startswith(".app.password=")
+
+    def test_yaml_assign_redos_resistance(self):
+        """_YAML_ASSIGN_RE must not backtrack excessively on long inputs."""
+        import time
+
+        # 100 lines of a long dotted key with a secret keyword but no
+        # matching colon-value form — stresses the regex without matching.
+        line = "a." * 50 + "token not_an_assignment"
+        text = "\n".join([line] * 100)
+        t0 = time.perf_counter()
+        redact_sensitive_text(text)
+        assert time.perf_counter() - t0 < 2.0
+
+    def test_yaml_assign_secret_still_redacted(self):
+        # Possessive quantifiers must not change YAML matching behavior.
+        text = "spring.datasource.password: hunter2"
+        result = redact_sensitive_text(text)
+        assert "hunter2" not in result
+        assert "password:" in result
+
+
 class TestXaiToken:
     KEY = "xai-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefghijklmnopqrstu"
 
