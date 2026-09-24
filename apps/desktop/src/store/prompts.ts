@@ -65,14 +65,17 @@ function keyedPromptStore<T extends KeyedPrompt>(): PromptStore<T> {
   }
 }
 
-// Approval is session-keyed on the backend (one in-flight approval per session,
-// resolved via approval.respond {choice, session_id}). It carries no request_id,
-// unlike sudo/secret which are _block()-style request/response.
+// Approval is session-keyed on the backend and resolved via approval.respond
+// {choice, session_id, request_id}. The backend stamps every queued approval
+// with a request_id; sending it back resolves exactly the prompt on screen
+// (never the session's oldest pending one), and `resolved: 0` means it is no
+// longer pending. Older backends omit it, so it stays optional (FIFO fallback).
 export interface ApprovalRequest extends KeyedPrompt {
   // false when the backend won't honor a permanent allow (tirith warning) → hide "Always allow".
   allowPermanent?: boolean
   command: string
   description: string
+  requestId?: string
 }
 
 export interface SudoRequest extends KeyedPrompt {

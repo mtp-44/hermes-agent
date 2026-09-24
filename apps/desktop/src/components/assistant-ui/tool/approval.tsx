@@ -18,7 +18,7 @@ import { triggerHaptic } from '@/lib/haptics'
 import { AlertCircle, ChevronDown, Loader2 } from '@/lib/icons'
 import { cn } from '@/lib/utils'
 import { $gateway } from '@/store/gateway'
-import { notifyError } from '@/store/notifications'
+import { notify, notifyError } from '@/store/notifications'
 import {
   $approvalInlineVisible,
   $approvalRequest,
@@ -129,18 +129,35 @@ const ApprovalBar: FC<{ request: ApprovalRequest; surface: 'floating' | 'inline'
       setSubmitting(choice)
 
       try {
-        await gateway.request<{ resolved?: boolean }>('approval.respond', {
+        const result = await gateway.request<{ resolved?: boolean | number }>('approval.respond', {
           choice,
+          ...(request.requestId ? { request_id: request.requestId } : {}),
           session_id: request.sessionId ?? undefined
         })
-        triggerHaptic(choice === 'deny' ? 'cancel' : 'submit')
-        clearApprovalRequest(request.sessionId)
+
+        // With a request_id the backend resolves only this prompt; 0 means it
+        // had already expired or been answered, so nothing ran on this tap.
+        if (request.requestId && result && !result.resolved) {
+          notify({ kind: 'warning', message: copy.noLongerPending })
+        } else {
+          triggerHaptic(choice === 'deny' ? 'cancel' : 'submit')
+        }
+
+        clearApprovalRequest(request.sessionId, request.requestId)
       } catch (error) {
         notifyError(error, copy.sendFailed)
         setSubmitting(null)
       }
     },
-    [busy, copy.gatewayDisconnected, copy.sendFailed, gateway, request.sessionId]
+    [
+      busy,
+      copy.gatewayDisconnected,
+      copy.noLongerPending,
+      copy.sendFailed,
+      gateway,
+      request.requestId,
+      request.sessionId
+    ]
   )
 
   // ⌘/Ctrl+Enter → Run, Esc → Reject.

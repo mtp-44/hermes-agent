@@ -2190,6 +2190,7 @@ export const ja = defineLocale({
     approval: {
       gatewayDisconnected: 'Hermes ゲートウェイが接続されていません',
       sendFailed: '承認応答を送信できませんでした',
+      noLongerPending: 'この承認はすでに保留中ではありません(期限切れまたは回答済み)。何も実行されていません。',
       run: '実行',
       command: 'コマンド',
       moreOptions: 'その他の承認オプション',

@@ -3,6 +3,7 @@ import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 
 import type { HermesGateway } from '@/hermes'
 import { $gateway } from '@/store/gateway'
+import { $notifications } from '@/store/notifications'
 import { $approvalRequest, clearAllPrompts, setApprovalRequest } from '@/store/prompts'
 import { $activeSessionId } from '@/store/session'
 
@@ -163,5 +164,64 @@ describe('PendingToolApproval', () => {
       expect(container.querySelector('[data-slot="tool-approval-inline"]')).not.toBeNull()
       expect(container.querySelector('[data-slot="tool-approval-fallback"]')).toBeNull()
     })
+  })
+})
+
+describe('PendingToolApproval request binding', () => {
+  function setBoundRequest(requestId: string, command = 'rm -rf /tmp/x') {
+    $activeSessionId.set('sess-1')
+    setApprovalRequest({ command, description: 'dangerous command', requestId, sessionId: 'sess-1' })
+  }
+
+  it('sends the request_id of the prompt on screen', async () => {
+    const request = mockGateway()
+    setBoundRequest('req-abc')
+    render(<PendingToolApproval part={part('terminal')} />)
+
+    fireEvent.click(screen.getByRole('button', { name: /Run/ }))
+
+    await waitFor(() => {
+      expect(request).toHaveBeenCalledWith('approval.respond', {
+        choice: 'once',
+        request_id: 'req-abc',
+        session_id: 'sess-1'
+      })
+    })
+    expect($approvalRequest.get()).toBeNull()
+  })
+
+  it('warns instead of confirming when the prompt is no longer pending', async () => {
+    const request = vi.fn().mockResolvedValue({ resolved: 0 })
+    $gateway.set({ request } as unknown as HermesGateway)
+    $notifications.set([])
+    setBoundRequest('req-expired')
+    render(<PendingToolApproval part={part('terminal')} />)
+
+    fireEvent.click(screen.getByRole('button', { name: /Run/ }))
+
+    await waitFor(() => {
+      expect($notifications.get().some(n => n.kind === 'warning' && /no longer pending/.test(n.message))).toBe(true)
+    })
+    expect($approvalRequest.get()).toBeNull()
+  })
+
+  it('a stale answer does not clear a newer prompt that replaced it', async () => {
+    let resolveFirst: (value: unknown) => void = () => undefined
+    const request = vi.fn().mockImplementation(() => new Promise(r => (resolveFirst = r)))
+    $gateway.set({ request } as unknown as HermesGateway)
+    setBoundRequest('req-old', 'echo old')
+    render(<PendingToolApproval part={part('terminal')} />)
+
+    fireEvent.click(screen.getByRole('button', { name: /Run/ }))
+    await waitFor(() => expect(request).toHaveBeenCalled())
+
+    // A newer approval replaces the parked one before the first answer returns.
+    setBoundRequest('req-new', 'echo new')
+    resolveFirst({ resolved: 1 })
+    // Let the first answer's continuation (and its clear) run before asserting.
+    await new Promise(resolve => setTimeout(resolve, 0))
+    await new Promise(resolve => setTimeout(resolve, 0))
+
+    expect($approvalRequest.get()?.requestId).toBe('req-new')
   })
 })
