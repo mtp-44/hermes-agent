@@ -93,6 +93,19 @@ class ScanResult:
 # Threat patterns — (regex, pattern_id, severity, category, description)
 # ---------------------------------------------------------------------------
 
+# POSIX shell names as one shared alternation, so every pipe-to-shell pattern
+# below flags the same set (the narrower `(ba)?sh` let `curl url | zsh`
+# through while bash/sh were caught).
+_SHELL_NAMES_RE = r'(?:bash|sh|zsh|ksh|dash)'
+# Local addition (not upstream): the download-and-execute patterns also accept
+# fish/csh/tcsh and a sudo/doas/env launcher (with options / VAR=value) in
+# front of the shell, so `curl url | sudo bash` and `curl url | env zsh` are
+# flagged as supply-chain pipes rather than only as generic sudo usage.
+_PIPE_SHELL_RE = (
+    r'(?:(?:[/\w]*/)?(?:sudo|doas|env)(?:\s+(?:-[^\s|;&]+|[A-Za-z_]\w*=[^\s|;&]*))*\s+)?'
+    r'(?:[/\w]*/)?(?:bash|sh|zsh|ksh|dash|fish|csh|tcsh)'
+)
+
 THREAT_PATTERNS = [
     # ── Exfiltration: shell commands leaking secrets ──
     (r'curl\s+[^\n]*\$\{?\w*(?:KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL)S?\b',
@@ -290,7 +303,7 @@ THREAT_PATTERNS = [
     (r'0\.0\.0\.0:\d+|INADDR_ANY',
      "bind_all_interfaces", "high", "network",
      "binds to all network interfaces"),
-    (r'/bin/(ba)?sh\s+-i\s+.*>/dev/tcp/',
+    (rf'/bin/{_SHELL_NAMES_RE}\s+-i\s+.*>/dev/tcp/',
      "bash_reverse_shell", "critical", "network",
      "bash interactive reverse shell via /dev/tcp"),
     (r'python[23]?\s+-c\s+["\']import\s+socket',
@@ -319,7 +332,7 @@ THREAT_PATTERNS = [
     (r'\bexec\s*\(\s*["\']',
      "exec_string", "high", "obfuscation",
      "exec() with string argument"),
-    (r'echo\s+[^\n]*\|\s*(bash|sh|python|perl|ruby|node)',
+    (rf'echo\s+[^\n]*\|\s*(?:{_SHELL_NAMES_RE}|python|perl|ruby|node)',
      "echo_pipe_exec", "critical", "obfuscation",
      "echo piped to interpreter for execution"),
     (r'compile\s*\(\s*[^\)]+,\s*["\'].*["\']\s*,\s*["\']exec["\']\s*\)',
@@ -396,10 +409,10 @@ THREAT_PATTERNS = [
      "possible cryptocurrency mining indicators"),
 
     # ── Supply chain: curl/wget pipe to shell ──
-    (r'curl\s+[^\n]*\|\s*(ba)?sh',
+    (rf'curl\s+[^\n]*\|\s*{_PIPE_SHELL_RE}',
      "curl_pipe_shell", "critical", "supply_chain",
      "curl piped to shell (download-and-execute)"),
-    (r'wget\s+[^\n]*-O\s*-\s*\|\s*(ba)?sh',
+    (rf'wget\s+[^\n]*-O\s*-\s*\|\s*{_PIPE_SHELL_RE}',
      "wget_pipe_shell", "critical", "supply_chain",
      "wget piped to shell (download-and-execute)"),
     (r'curl\s+[^\n]*\|\s*python',
