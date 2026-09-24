@@ -1373,6 +1373,194 @@ class TestFileReadNonReusableRedaction:
         assert self.SK not in out
 
 
+class TestSecretFileAssignmentRedaction:
+    """Upstream #110567: the file-read half of the secret-bearing-file gate.
+
+    ``read_file`` / ``search_files`` pass ``file_read=True``, which folded into
+    ``code_file=True`` and skipped the ENV/JSON/YAML assignment passes — so an
+    opaque, prefix-less credential under a credential-shaped key reached the
+    model in cleartext from a secret-bearing file, while the terminal read of
+    the same file masked it. Callers now classify the resolved path with
+    ``is_secret_file_path`` and pass ``secret_file=True``.
+    """
+
+    SYNTH = "3JcQ1UqZ8mNp4Rt6vWx2Yb9Ad0Ef7Gh5Ij2kS"  # 40-char opaque, no vendor prefix
+
+    @pytest.mark.parametrize("template", [
+        "ADS_API_TOKEN: {tok}",           # YAML assignment
+        "  api_key: {tok}",               # indented YAML (config.yaml provider block)
+        "  password: {tok}",
+        "  secret: {tok}",
+        "export FOO_TOKEN='{tok}'",       # shell rc / profile
+        "FOO_API_KEY={tok}",              # dotenv
+        '{{"api_key": "{tok}"}}',         # JSON field
+        '  api_key: "{tok}"',             # quoted YAML scalar (local addition)
+        "  password: '{tok}'",
+    ])
+    def test_opaque_assignment_masked_in_secret_file(self, template):
+        out = redact_sensitive_text(
+            template.format(tok=self.SYNTH), force=True, file_read=True, secret_file=True)
+        assert self.SYNTH not in out
+        assert "«redacted" in out
+
+    def test_opaque_mask_is_non_reusable(self):
+        """No head/tail characters: the value must not look like a truncated-but-real key (#35519)."""
+        out = redact_sensitive_text(
+            f"ADS_API_TOKEN: {self.SYNTH}", force=True, file_read=True, secret_file=True)
+        assert out.split(": ", 1)[1].strip() == "«redacted-secret»"
+
+    def test_quoted_yaml_keeps_quotes(self):
+        out = redact_sensitive_text(
+            f'  api_key: "{self.SYNTH}"', force=True, file_read=True, secret_file=True)
+        assert out == '  api_key: "«redacted-secret»"'
+
+    def test_vendor_prefix_label_survives(self):
+        """The assignment pass must not re-mask what the prefix pass already masked; re-masking
+        erases the vendor label the sentinel deliberately keeps."""
+        token = "ghp_S1abcdefghijklmnopqrstuvwxyz0Pn2T"
+        out = redact_sensitive_text(
+            f"GITHUB_TOKEN: {token}", force=True, file_read=True, secret_file=True)
+        assert token not in out
+        assert "«redacted:ghp_…»" in out
+
+    def test_unclassified_read_keeps_code_file_behaviour(self):
+        """``secret_file`` defaults off: a read the classifier did not flag is byte-identical to
+        the pre-fix behaviour, so source dumps and fixtures are never mangled."""
+        for text in ("MAX_TOKENS: 100", '{"apiKey": "test"}', "api_key: test",
+                     f"5|ADS_API_TOKEN: {self.SYNTH}", f'  api_key: "{self.SYNTH}"'):
+            assert redact_sensitive_text(text, force=True, file_read=True) == text
+
+    @pytest.mark.parametrize("gutter", ["5|", "108:", "  7|  ", "12: ", "     8\t", "9-"])
+    def test_rendered_line_number_gutter_does_not_block_masking(self, gutter):
+        """read_file renders ``5|line``, grep -n ``6:line``, grep -C ``7-line`` and cat -n
+        ``     8<TAB>line``. The assignment passes anchor at line start, so without gutter
+        tolerance the rendered read of a secret-bearing file leaked what the raw text masked."""
+        text = f"{gutter}      ADS_API_TOKEN: {self.SYNTH}"
+        out = redact_sensitive_text(text, force=True, file_read=True, secret_file=True)
+        assert self.SYNTH not in out
+        assert out.startswith(gutter), "the rendered gutter must survive redaction"
+
+    def test_rendered_gutter_bare_key_equals_form(self):
+        out = redact_sensitive_text(
+            f"5|password={self.SYNTH}", force=True, file_read=True, secret_file=True)
+        assert self.SYNTH not in out
+        assert out.startswith("5|password=")
+
+    def test_rendered_gutter_keeps_non_secret_scalars(self):
+        text = "5|MAX_TOKENS: 100"
+        assert redact_sensitive_text(text, force=True, file_read=True, secret_file=True) == text
+
+    def test_secret_file_is_authoritative_over_code_file(self):
+        """A caller that sets both must not be silently fail-open on a security flag."""
+        text = f"ADS_API_TOKEN: {self.SYNTH}"
+        assert self.SYNTH not in redact_sensitive_text(
+            text, force=True, code_file=True, secret_file=True)
+        assert self.SYNTH not in redact_sensitive_text(
+            text, force=True, code_file=True, file_read=True, secret_file=True)
+
+    def test_secret_file_keeps_non_secret_scalars(self):
+        text = (f"ADS_API_TOKEN: {self.SYNTH}\nMAX_TOKENS: 100\n"
+                "  redact_secrets: true\n  show_token_analytics: false\n  max_tokens: 4096\n")
+        out = redact_sensitive_text(text, force=True, file_read=True, secret_file=True)
+        assert self.SYNTH not in out
+        for line in ("MAX_TOKENS: 100", "redact_secrets: true",
+                     "show_token_analytics: false", "max_tokens: 4096"):
+            assert line in out
+
+    def test_url_elsewhere_in_secret_file_does_not_disable_masking(self):
+        """Every Hermes config.yaml has a ``base_url``. The whole-text ``://`` skip
+        switched the YAML / anchored passes off for the entire file, so neither
+        read_file nor ``cat ~/.hermes/config.yaml`` masked an opaque ``api_key``."""
+        from agent.redact import redact_terminal_output
+
+        text = (f"model:\n  base_url: http://localhost:11434/v1\n  api_key: {self.SYNTH}\n"
+                f"  token_url: https://auth.example.com/oauth/token\npassword={self.SYNTH}\n")
+        for out in (
+            redact_sensitive_text(text, force=True, file_read=True, secret_file=True),
+            redact_terminal_output(text, "cat ~/.hermes/config.yaml", force=True),
+        ):
+            assert self.SYNTH not in out
+            assert "base_url: http://localhost:11434/v1" in out
+            assert "token_url: https://auth.example.com/oauth/token" in out  # URL value kept
+
+    def test_url_skip_unchanged_outside_secret_files(self):
+        # Ordinary text keeps the documented web-URL passthrough.
+        text = "token: opaqueValue1234567890\nsee https://example.com/cb?code=x"
+        assert redact_sensitive_text(text, force=True) == text
+
+    def test_numeric_password_still_masked(self):
+        out = redact_sensitive_text("  password: 123456", force=True, file_read=True, secret_file=True)
+        assert "123456" not in out
+
+    def test_gutter_scan_stays_linear(self):
+        """The gutter is the ONLY optional group after the one leading whitespace run
+        (upstream 979576d938: stacking two runs was 2 s per 5k spaces)."""
+        import time
+
+        text = " " * 20_000 + "token not_an_assignment"
+        t0 = time.perf_counter()
+        redact_sensitive_text(text, force=True, file_read=True, secret_file=True)
+        redact_sensitive_text(text, force=True)
+        assert time.perf_counter() - t0 < 2.0
+
+
+class TestSecretFilePathClassification:
+    """``is_secret_file_path`` must recognise the files the file tools read.
+
+    Includes the resolved-home arm: a resolved path never spells
+    ``$HERMES_HOME``, and a Hermes home outside ``~/.hermes`` has no ``.hermes``
+    segment, so the literal-segment test alone would classify its
+    ``config.yaml`` as ordinary YAML (both the file-read and the terminal half).
+    """
+
+    @pytest.fixture
+    def hermes_home(self, tmp_path, monkeypatch):
+        import agent.file_safety as file_safety
+
+        home = tmp_path / "hermes"  # no ".hermes" segment
+        monkeypatch.setattr(file_safety, "_hermes_home_path", lambda: home)
+        monkeypatch.setattr(file_safety, "_hermes_root_path", lambda: home)
+        return home
+
+    def test_resolved_home_config_is_secret_bearing(self, hermes_home):
+        from agent.redact import is_secret_file_path
+
+        assert is_secret_file_path(str(hermes_home / "config.yaml"))
+        assert is_secret_file_path(str(hermes_home / "profiles" / "coder" / "config.yaml"))
+        assert is_secret_file_path(
+            str(hermes_home / "backups" / "config" / "config.yaml.good.20260914-184559"))
+        assert is_secret_file_path(str(hermes_home / "config.yaml.bak-2026-07-24"))
+        assert is_secret_file_path(str(hermes_home / ".env"))
+
+    def test_literal_hermes_segment_and_rc_files(self):
+        from agent.redact import is_secret_file_path
+
+        assert is_secret_file_path("/Users/u/.hermes/config.yaml")
+        assert is_secret_file_path("/home/u/.zshrc")
+        assert is_secret_file_path("/srv/proj/.env.local")
+
+    def test_ordinary_files_are_not_secret_bearing(self, hermes_home, tmp_path):
+        from agent.redact import is_secret_file_path
+
+        assert not is_secret_file_path(str(tmp_path / "proj" / "config.yaml"))
+        assert not is_secret_file_path(str(tmp_path / "proj" / "config.yaml.bak"))
+        assert not is_secret_file_path(str(tmp_path / "proj" / "src" / "app.py"))
+        assert not is_secret_file_path(str(hermes_home / "skills" / "notes.md"))
+        assert not is_secret_file_path("config.yaml")  # relative, not resolvable to the home
+        assert not is_secret_file_path("")
+        assert not is_secret_file_path(None)
+
+    def test_terminal_read_of_resolved_home_masks_opaque_token(self, hermes_home):
+        from agent.redact import _command_reads_secret_bearing_file, redact_terminal_output
+
+        config = hermes_home / "config.yaml"
+        if " " in str(config):
+            pytest.skip("paths with spaces are not tokenizable by the command scanner")
+        syn = "3JcQ1UqZ8mNp4Rt6vWx2Yb9Ad0Ef7Gh5Ij2kS"
+        assert _command_reads_secret_bearing_file(f"type {config}")
+        assert syn not in redact_terminal_output(f"ADS_API_TOKEN: {syn}", f"type {config}")
+
+
 class TestFireworksToken:
     KEY = "fw_" + "A" * 40
 

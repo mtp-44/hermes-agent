@@ -16,7 +16,7 @@ from tools.file_operations import (
     normalize_search_pagination,
 )
 from tools import file_state
-from agent.redact import redact_sensitive_text
+from agent.redact import is_secret_file_path, redact_sensitive_text
 
 logger = logging.getLogger(__name__)
 
@@ -441,6 +441,17 @@ def _search_result_read_block_error(path: str, task_id: str = "default") -> str 
     except (OSError, ValueError, RuntimeError):
         return get_read_block_error(path)
     return get_read_block_error(str(resolved))
+
+
+def _resolved_match_path(path: str, task_id: str) -> str:
+    """Best-effort task-cwd resolution of a search hit's path (for classifying
+    it as secret-bearing). An unresolvable path is used as-is."""
+    if not path:
+        return ""
+    try:
+        return str(_resolve_path_for_task(path, task_id))
+    except (OSError, ValueError, RuntimeError):
+        return path
 
 
 def _filter_read_blocked_search_results(result, task_id: str = "default") -> int:
@@ -1361,7 +1372,9 @@ def read_file_tool(path: str, offset: int = 1, limit: int = 500, task_id: str = 
                         "file_size": result_dict["file_size"],
                     }, ensure_ascii=False)
                 if result_dict["content"]:
-                    result_dict["content"] = redact_sensitive_text(result_dict["content"], file_read=True)
+                    result_dict["content"] = redact_sensitive_text(
+                        result_dict["content"], file_read=True,
+                        secret_file=is_secret_file_path(_resolved))
                 return json.dumps(result_dict, ensure_ascii=False)
 
         # ── Binary file guard ─────────────────────────────────────────
@@ -1477,7 +1490,12 @@ def read_file_tool(path: str, offset: int = 1, limit: int = 500, task_id: str = 
 
         # ── Redact secrets (after guard check to skip oversized content) ──
         if result.content:
-            result.content = redact_sensitive_text(result.content, file_read=True)
+            # Secret-bearing sources (Hermes config.yaml + backups, rc files)
+            # also get the assignment passes, so an opaque credential under a
+            # credential-shaped key is masked, not returned in cleartext.
+            result.content = redact_sensitive_text(
+                result.content, file_read=True,
+                secret_file=is_secret_file_path(resolved_str))
             result_dict["content"] = result.content
 
         # Large-file hint: if the file is big and the caller didn't ask
@@ -2075,7 +2093,10 @@ def search_tool(pattern: str, target: str = "content", path: str = ".",
         if hasattr(result, 'matches'):
             for m in result.matches:
                 if hasattr(m, 'content') and m.content:
-                    m.content = redact_sensitive_text(m.content, file_read=True)
+                    m.content = redact_sensitive_text(
+                        m.content, file_read=True,
+                        secret_file=is_secret_file_path(
+                            _resolved_match_path(getattr(m, "path", ""), task_id)))
         result_dict = result.to_dict(densify=True)
 
         if omitted:

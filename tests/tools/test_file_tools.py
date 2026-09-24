@@ -851,3 +851,110 @@ class TestSilentFileMisplacementE2E:
             "file silently misplaced into config default (the #26211 bug)"
 
         ft._last_known_cwd.pop(task_id, None)
+
+
+class TestSecretFileReadRedaction:
+    """Upstream #110567: read_file / search_files must classify the RESOLVED path
+    and run the assignment passes for a secret-bearing file, instead of returning
+    an opaque prefix-less credential in cleartext. Same classifier the terminal
+    side uses, so the two surfaces cannot drift."""
+
+    SYNTH = "3JcQ1UqZ8mNp4Rt6vWx2Yb9Ad0Ef7Gh5Ij2kS"  # 40-char opaque, no vendor prefix
+
+    class _Match:
+        def __init__(self, path, content):
+            self.path = path
+            self.content = content
+
+    class _SearchResult:
+        def __init__(self, matches):
+            self.matches = matches
+            self.files = []
+            self.counts = {}
+
+        def to_dict(self, densify=False):
+            return {
+                "total_count": len(self.matches),
+                "matches": [{"path": m.path, "content": m.content} for m in self.matches],
+            }
+
+    @staticmethod
+    def _hermes_home(tmp_path, monkeypatch, name="hermes"):
+        import agent.file_safety as file_safety
+
+        home = tmp_path / name
+        home.mkdir()
+        monkeypatch.setattr(file_safety, "_hermes_home_path", lambda: home)
+        monkeypatch.setattr(file_safety, "_hermes_root_path", lambda: home)
+        return home
+
+    @staticmethod
+    def _read_ops(body):
+        ops = MagicMock()
+        result_obj = MagicMock()
+        result_obj.content = body
+        result_obj.to_dict.return_value = {"content": body, "total_lines": body.count("\n")}
+        ops.read_file.return_value = result_obj
+        return ops
+
+    def _body(self):
+        # read_file renders line-numbered content ("4|      api_key: …"); the gutter is part
+        # of the text the redactor sees, so the fixture must carry it.
+        return (f"1|model:\n2|  provider: custom\n3|  base_url: http://localhost:11434/v1\n"
+                f"4|  api_key: {self.SYNTH}\n5|MAX_TOKENS: 100\n"
+                f"6|mcp_servers:\n7|  brain:\n8|    headers:\n"
+                f"9|      password: '{self.SYNTH[::-1]}'\n")
+
+    @patch("tools.file_tools._get_file_ops")
+    def test_read_file_of_hermes_config_masks_opaque_token(self, mock_get, tmp_path, monkeypatch):
+        home = self._hermes_home(tmp_path, monkeypatch)
+        mock_get.return_value = self._read_ops(self._body())
+
+        from tools.file_tools import read_file_tool
+        out = json.loads(read_file_tool(str(home / "config.yaml"), task_id="secret-read"))
+
+        assert self.SYNTH not in out["content"]
+        assert self.SYNTH[::-1] not in out["content"]
+        assert "«redacted" in out["content"]
+        assert "5|MAX_TOKENS: 100" in out["content"]  # gutter + non-secret scalar survive
+
+    @patch("tools.file_tools._get_file_ops")
+    def test_read_file_of_dot_hermes_config_backup_masks(self, mock_get, tmp_path, monkeypatch):
+        # Literal ``.hermes`` segment (the POSIX default) and a backup copy's basename.
+        self._hermes_home(tmp_path, monkeypatch, name="elsewhere")
+        backups = tmp_path / ".hermes" / "backups" / "config"
+        backups.mkdir(parents=True)
+        mock_get.return_value = self._read_ops(self._body())
+
+        from tools.file_tools import read_file_tool
+        out = json.loads(read_file_tool(
+            str(backups / "config.yaml.good.20260924-120437"), task_id="backup-read"))
+
+        assert self.SYNTH not in out["content"]
+
+    @patch("tools.file_tools._get_file_ops")
+    def test_project_config_read_stays_raw(self, mock_get, tmp_path, monkeypatch):
+        """A project's own config.yaml is NOT secret-bearing: source dumps are never mangled."""
+        self._hermes_home(tmp_path, monkeypatch)
+        body = f"4|      ADS_API_TOKEN: {self.SYNTH}\n"
+        mock_get.return_value = self._read_ops(body)
+
+        from tools.file_tools import read_file_tool
+        out = json.loads(read_file_tool(str(tmp_path / "proj-config.yaml"), task_id="plain-read"))
+
+        assert self.SYNTH in out["content"]
+
+    @patch("tools.file_tools._get_file_ops")
+    def test_search_in_hermes_home_masks_opaque_token(self, mock_get, tmp_path, monkeypatch):
+        home = self._hermes_home(tmp_path, monkeypatch)
+        config = home / "config.yaml"
+        ops = MagicMock()
+        ops.search.return_value = self._SearchResult(
+            [self._Match(str(config), f"      ADS_API_TOKEN: {self.SYNTH}")])
+        mock_get.return_value = ops
+
+        from tools.file_tools import search_tool
+        raw = search_tool(pattern="ADS_API_TOKEN", path=str(home), task_id="secret-search")
+
+        assert self.SYNTH not in raw
+        assert "«redacted" in raw
