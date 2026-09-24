@@ -17,6 +17,7 @@ Key design decisions:
 import asyncio
 import json
 import logging
+import os
 import random
 import re
 import sqlite3
@@ -202,6 +203,42 @@ def get_last_init_error() -> Optional[str]:
     successfully (or hasn't been attempted).
     """
     return _last_init_error
+
+
+def _secure_state_db_files(db_path: Path, *, create_main: bool = False) -> None:
+    """Create/tighten a writable state database and its sidecars to 0600.
+
+    SQLite otherwise creates ``state.db``, ``-wal``, and ``-shm`` according to
+    the process umask (commonly 0644 under 0022). Use file descriptors so a
+    missing main database is private from its first byte and O_NOFOLLOW can
+    refuse a planted symlink. Read-only SessionDB attachments never call this
+    helper and remain observational.
+    """
+    if os.name == "nt":
+        return
+
+    for index, path in enumerate(
+        (
+            db_path,
+            db_path.with_name(db_path.name + "-wal"),
+            db_path.with_name(db_path.name + "-shm"),
+        )
+    ):
+        flags = os.O_RDONLY
+        if index == 0 and create_main:
+            flags = os.O_WRONLY | os.O_CREAT
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        if hasattr(os, "O_CLOEXEC"):
+            flags |= os.O_CLOEXEC
+        try:
+            fd = os.open(path, flags, 0o600)
+        except FileNotFoundError:
+            continue
+        try:
+            os.fchmod(fd, 0o600)
+        finally:
+            os.close(fd)
 
 
 # Distinctive opening shared by both background-review harness prompts
@@ -921,6 +958,9 @@ class SessionDB:
             self.db_path.parent.mkdir(parents=True, exist_ok=True)
 
             def _connect_and_init():
+                # Create/tighten the main database before sqlite3.connect() so a
+                # permissive process umask can never expose a fresh profile store.
+                _secure_state_db_files(self.db_path, create_main=True)
                 self._conn = sqlite3.connect(
                     str(self.db_path),
                     check_same_thread=False,
@@ -935,6 +975,9 @@ class SessionDB:
                 )
                 self._conn.row_factory = sqlite3.Row
                 apply_wal_with_fallback(self._conn, db_label="state.db")
+                # Existing WAL/SHM files may predate the main-file hardening;
+                # normalize any sidecars that became visible during WAL setup.
+                _secure_state_db_files(self.db_path)
                 self._conn.execute("PRAGMA foreign_keys=ON")
                 self._init_schema()
 
