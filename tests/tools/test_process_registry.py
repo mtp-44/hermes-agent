@@ -1819,6 +1819,34 @@ class TestHandleProcessRedaction:
         assert "abc123randomopaquetokenvalue999" not in out["output"]
         assert "HOME=/home/u" in out["output"]
 
+    def test_list_redacts_command_and_output(self, monkeypatch):
+        """`process(action=list)` redacts command + output_preview (upstream #77484).
+
+        The list branch returned raw ``command[:200]`` and
+        ``output_preview[-200:]`` with no redaction wrap, leaking inline
+        secrets (unlike poll/log/wait/kill).
+        """
+        pr, sess = self._setup(
+            monkeypatch, "curl -H 'Authorization: Bearer sk-abc123def456ghi789jkl012345'",
+            "opaque token sk-proj-AAAABBBBCCCCDDDDEEEEFFFFGGGG output",
+        )
+        out = json.loads(pr._handle_process({"action": "list"}))
+        assert len(out["processes"]) >= 1
+        entry = out["processes"][0]
+        assert "sk-abc123def456ghi789jkl012345" not in entry["command"]
+        assert "sk-proj-AAAABBBBCCCCDDDDEEEEFFFFGGGG" not in entry["output_preview"]
+        assert "curl" in entry["command"]
+
+    def test_list_env_dump_masks_opaque_token(self, monkeypatch):
+        pr, sess = self._setup(
+            monkeypatch, "printenv",
+            "HOME=/home/u\nMY_SERVICE_TOKEN=abc123randomopaquetokenvalue999",
+        )
+        out = json.loads(pr._handle_process({"action": "list"}))
+        entry = out["processes"][0]
+        assert "abc123randomopaquetokenvalue999" not in entry["output_preview"]
+        assert "HOME=/home/u" in entry["output_preview"]
+
     def test_poll_redacts_prefix_key(self, monkeypatch):
         pr, sess = self._setup(
             monkeypatch, "python app.py",

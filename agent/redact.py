@@ -132,7 +132,13 @@ _PREFIX_PATTERNS = [
 # ENV assignment patterns: KEY=value where KEY contains a secret-like name.
 # Uppercase keys tolerate spaces around "=" (e.g. ``FOO_SECRET = bar``) because
 # an all-caps key is almost never prose/code.
-_SECRET_ENV_NAMES = r"(?:API_?KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTH)"
+# Bare ``KEY`` / ``PASS`` / ``PW`` suffixes are included (``MCP_ACCESS_KEY=…``,
+# ``FAL_KEY=…``, ``MYSQL_PASS=…``, ``DB_PW=…``). Those three are short enough
+# to sit inside ordinary words (``KEYBOARD``, ``PASSAGE``, ``PWD``), so a match
+# that rests on one of them alone must be word-bounded — see
+# _key_has_secret_keyword. The legacy names keep embedded matching
+# (``MYTOKEN=…``).
+_SECRET_ENV_NAMES = r"(?:API_?KEY|KEY|TOKEN|SECRET|PASSWORD|PASSWD|PASS|PW|CREDENTIAL|AUTH)"
 _ENV_ASSIGN_RE = re.compile(
     rf"([A-Z0-9_]{{0,50}}{_SECRET_ENV_NAMES}[A-Z0-9_]{{0,50}})\s*=\s*(['\"]?)(\S+)\2",
 )
@@ -155,17 +161,46 @@ _ENV_ASSIGN_RE = re.compile(
 #      mid-sentence is left alone.
 # The colon-form URL guard (skip when ``://`` present) lives at the call site.
 _SECRET_CFG_NAMES = r"(?:api[ _.\-]?key|token|secret|passwd|password|credential|auth)"
+# Rendered line-number prefix: ``5|line`` (read_file), ``6:line`` (grep -n),
+# ``7-line`` (grep -A/-B/-C context lines) and ``     8\tline`` (cat -n / nl:
+# right-aligned number + TAB). Callers put the ONLY leading ``[ \t]*`` in front
+# of it — stacking a second whitespace run around an optional gutter made the
+# anchored passes quadratic on long indented lines (upstream 979576d938).
+_LINE_NUMBER_GUTTER = r"(?:[0-9]+(?:[|:\-]|\t)[ \t]*)?"
 _CFG_VALUE = r"(['\"]?)([^\s&]+?)\2(?=[\s&]|$)"
+# Linear pre-gate for the _CFG_*_RE subs below: a text with no secret keyword
+# can never match either pattern, so the (potentially backtrack-heavy) subs
+# are skipped entirely for such text. See the call site in
+# redact_sensitive_text().
+_CFG_SECRET_WORD_RE = re.compile(_SECRET_CFG_NAMES, re.IGNORECASE)
 # Namespaced (dotted) key: the secret word may sit anywhere in a dotted path.
+# NOTE(perf): possessive quantifiers (py3.11+) replace the nested quantifier
+# ``(?:[A-Za-z0-9_\-]+\.)+`` (exponential backtracking on long dotted runs).
+# The ``*`` runs bordering {_SECRET_CFG_NAMES} must stay backtrackable
+# (secret words are matchable by the class, e.g. ``app.api.key=…``).
+# The lookbehind anchors each attempt to the start of a key run: without it,
+# ``re.sub`` retries the backtrackable ``*`` prefix at every byte of a long
+# non-matching dotted run, making the sub quadratic whenever the text contains
+# a secret keyword anywhere (the ``_CFG_SECRET_WORD_RE`` pre-gate only skips
+# secret-free text). Match set is unchanged — any match starting mid-run
+# implies a leftmost match starting at the run start. The leading ``\.*+``
+# keeps that true for runs that open with a dot (``.app.password=…``): the
+# pre-lookbehind pattern matched those from the first segment, and without it
+# the anchored form would skip them.
 _CFG_DOTTED_RE = re.compile(
-    rf"((?:[A-Za-z0-9_\-]+\.)+[A-Za-z0-9_.\-]*{_SECRET_CFG_NAMES}[A-Za-z0-9_.\-]*"
-    rf"|[A-Za-z0-9_.\-]*{_SECRET_CFG_NAMES}[A-Za-z0-9_.\-]*\.[A-Za-z0-9_.\-]+)"
+    rf"(?<![A-Za-z0-9_.\-])"
+    rf"(\.*+[A-Za-z0-9_\-]++\.[A-Za-z0-9_.\-]*{_SECRET_CFG_NAMES}[A-Za-z0-9_.\-]*+"
+    rf"|[A-Za-z0-9_.\-]*{_SECRET_CFG_NAMES}[A-Za-z0-9_.\-]*\.[A-Za-z0-9_.\-]++)"
     rf"={_CFG_VALUE}",
     re.IGNORECASE,
 )
 # Line-anchored bare key: ``password=…`` / ``export api_key=…`` at start of line.
+# ``{_LINE_NUMBER_GUTTER}``: line-numbered dumps put the key behind a rendered
+# gutter (``5|password=…`` from read_file, ``6:password=…`` from grep -n).
+# Anchored at ``^`` without it, the rendered read of a secret-bearing file
+# leaked what the raw text masked.
 _CFG_ANCHORED_RE = re.compile(
-    rf"(^[ \t]*(?:export[ \t]+)?[A-Za-z0-9_\-]*{_SECRET_CFG_NAMES}[A-Za-z0-9_\-]*)={_CFG_VALUE}",
+    rf"(^[ \t]*{_LINE_NUMBER_GUTTER}(?:export[ \t]+)?[A-Za-z0-9_\-]*{_SECRET_CFG_NAMES}[A-Za-z0-9_\-]*)={_CFG_VALUE}",
     re.IGNORECASE | re.MULTILINE,
 )
 
@@ -178,16 +213,199 @@ _CFG_ANCHORED_RE = re.compile(
 # is masked by _AUTH_HEADER_RE); ``auth_token``/``auth-token`` still match via
 # the ``token`` keyword. Quoted values defer to _JSON_FIELD_RE via the lookahead.
 _YAML_CFG_NAMES = r"(?:api[ _.\-]?key|token|secret|passwd|password|credential)"
+# NOTE(perf): possessive quantifiers wherever the successor is disjoint; the
+# leading ``[A-Za-z0-9_.\-]*`` stays backtrackable (see _CFG_DOTTED_RE note).
 _YAML_ASSIGN_RE = re.compile(
-    rf"(^[ \t]*[A-Za-z0-9_.\-]*{_YAML_CFG_NAMES}[A-Za-z0-9_.\-]*)(:[ \t]*)(?!['\"])([^\s&]+)",
+    rf"(^[ \t]*+{_LINE_NUMBER_GUTTER}[A-Za-z0-9_.\-]*{_YAML_CFG_NAMES}[A-Za-z0-9_.\-]*+)(:[ \t]*+)(?!['\"])([^\s&]++)",
+    re.IGNORECASE | re.MULTILINE,
+)
+# Quoted YAML scalar (``api_key: "value"`` / ``password: 'value'``). The
+# unquoted rule above defers quoted values to _JSON_FIELD_RE, which only
+# handles a quoted KEY, so a YAML line with a quoted value was never masked.
+# Only run for secret-bearing files (``secret_file=True``): elsewhere a quoted
+# value next to a keyword is as likely to be code or prose.
+_YAML_QUOTED_ASSIGN_RE = re.compile(
+    rf"(^[ \t]*+{_LINE_NUMBER_GUTTER}[A-Za-z0-9_.\-]*{_YAML_CFG_NAMES}[A-Za-z0-9_.\-]*+)(:[ \t]*+)(['\"])([^'\"\n]+)\3",
     re.IGNORECASE | re.MULTILINE,
 )
 
+# Values in a secret-bearing file that are configuration, not credentials:
+# YAML booleans/null and short numbers (``max_tokens: 4096``,
+# ``redact_secrets: true``). Masking them buys nothing and hides settings the
+# agent legitimately edits. Numbers under a password-class key stay masked.
+_NON_SECRET_SCALARS = frozenset({"true", "false", "yes", "no", "on", "off", "null", "none", "~"})
+_SHORT_NUMBER_RE = re.compile(r"-?[0-9]{1,11}(?:\.[0-9]+)?")
+_PASSWORD_KEY_RE = re.compile(r"passwd|password|pass|pw", re.IGNORECASE)
+
+
+def _is_config_scalar(key: str, value: str) -> bool:
+    """True for a secret-file value that is plainly a setting (see above)."""
+    v = value.strip().lower()
+    if v in _NON_SECRET_SCALARS:
+        return True
+    return bool(_SHORT_NUMBER_RE.fullmatch(v)) and not _PASSWORD_KEY_RE.search(key)
+
+# Word-boundary validation for the assignment passes above.
+#
+# The key classes allow arbitrary affixes around the secret keyword so real key
+# names (``client_secret``, ``clientSecret``, ``s3.secret-key``, ``dbpassword``)
+# match. The side effect: ordinary document words that merely CONTAIN a keyword
+# matched too — ``Secretary: J.Smith``, ``tokenizer: cl100k_base``,
+# ``author=Smith`` — and had their values mangled (ported from upstream,
+# nearai/ironclaw#6129).
+#
+# Mixed/lowercase keys: a keyword occurrence counts only when it ENDS a word —
+# at the key's edge, before a non-letter (``_ - . 3``), at a camelCase
+# transition (``secretKey``) or before a plural ``s`` (``secrets:``). Unlike
+# upstream, the START of the keyword is not checked, so concatenated compounds
+# (``dbpassword``, ``clientsecret``, ``mytoken``) stay masked; only the
+# keyword-as-word-prefix prose shape (``secretary``, ``tokenizer``,
+# ``authored``, ``credentialing``, ``passwordless``) is let through.
+#
+# ALL-CAPS keys (the _ENV_ASSIGN_RE shape) keep legacy embedded matching for
+# the long names (``MYTOKEN=…``) — an all-caps key is almost never prose. The
+# short bare ``KEY``/``PASS``/``PW`` names must be word-bounded on BOTH sides,
+# so ``MCP_ACCESS_KEY`` / ``DB_PW`` match and ``KEYBOARD`` / ``PASSAGE`` /
+# ``PWD`` / ``OLDPWD`` / ``BYPASS`` do not.
+_KEY_KEYWORD_RE = re.compile(
+    r"(?:api|auth|access|refresh|session|secret)[ _.\-]?(?:key|token)"
+    r"|token|secret|passwd|password|credential|auth",
+    re.IGNORECASE,
+)
+_UPPER_LEGACY_KEYWORD_RE = re.compile(r"API_?KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTH")
+_UPPER_BARE_KEYWORD_RE = re.compile(r"KEY|PASS|PW")
+
+
+def _is_word_start(s: str, i: int) -> bool:
+    """True if position ``i`` in ``s`` begins a word (not mid-word)."""
+    if i == 0:
+        return True
+    prev, cur = s[i - 1], s[i]
+    if not prev.isalpha():
+        return True
+    if cur.isupper() and prev.islower():
+        return True  # camelCase: clientSecret
+    # Acronym run ending: APIToken — the 'T' begins a new word when it is
+    # followed by lowercase while the preceding run is uppercase.
+    if cur.isupper() and prev.isupper() and i + 1 < len(s) and s[i + 1].islower():
+        return True
+    return False
+
+
+def _is_word_end(s: str, j: int, *, allow_plural: bool = True) -> bool:
+    """True if position ``j`` (exclusive end) in ``s`` ends a word."""
+    if j >= len(s):
+        return True
+    cur = s[j]
+    if not cur.isalpha():
+        return True
+    if cur.isupper() and s[j - 1].islower():
+        return True  # camelCase continuation: secretKey
+    if allow_plural and cur in "sS":
+        return _is_word_end(s, j + 1, allow_plural=False)
+    return False
+
+
+def _key_has_secret_keyword(key: str) -> bool:
+    """Post-match validator for the ENV / config / YAML assignment passes.
+
+    Rejects keys whose only keyword is embedded in a larger word (see the
+    comment above _KEY_KEYWORD_RE for the exact rule per key shape).
+    """
+    letters = [c for c in key if c.isalpha()]
+    if letters and all(c.isupper() for c in letters):
+        if _UPPER_LEGACY_KEYWORD_RE.search(key):
+            return True
+        return any(
+            _is_word_start(key, m.start()) and _is_word_end(key, m.end())
+            for m in _UPPER_BARE_KEYWORD_RE.finditer(key)
+        )
+    return any(_is_word_end(key, m.end()) for m in _KEY_KEYWORD_RE.finditer(key))
+
+
 # JSON field patterns: "apiKey": "value", "token": "value", etc.
-_JSON_KEY_NAMES = r"(?:api_?[Kk]ey|token|secret|password|access_token|refresh_token|auth_token|bearer|secret_value|raw_secret|secret_input|key_material)"
+# ``x-<name>-key`` custom API-key header names (``x-brain-key`` — the Open Brain
+# MCP header in config.yaml — ``x-functions-key``, ``x-api-key``). Each
+# dash-separated segment is whole, so ``x-monkey`` / ``x-keyboard`` /
+# ``inbox-key`` / prose ``*-key`` words do not match; the lookbehind keeps it
+# from starting mid-word. Used by the header, JSON and Python-repr rules.
+_X_KEY_HEADER_NAME = r"(?<![A-Za-z0-9_\-])x-(?:[a-z0-9]+-)*key"
+_X_KEY_HEADER_NAME_RE = re.compile(_X_KEY_HEADER_NAME, re.IGNORECASE)
+_JSON_KEY_NAMES = rf"(?:api_?[Kk]ey|token|secret|password|access_token|refresh_token|auth_token|bearer|secret_value|raw_secret|secret_input|key_material|{_X_KEY_HEADER_NAME})"
 _JSON_FIELD_RE = re.compile(
     rf'("{_JSON_KEY_NAMES}")\s*:\s*"([^"]+)"',
     re.IGNORECASE,
+)
+
+# Python ``repr`` uses single-quoted mapping fields, so opaque credentials in
+# tracebacks, logged kwargs and pytest failure introspection bypass the
+# double-quoted JSON rule above: ``{'BRAVE_API_KEY': 'opaque-value'}``,
+# ``headers={'Authorization': 'Bearer …'}`` (the ``Authorization:`` header rule
+# never sees the quote-split form). Capture identifier-shaped keys here, then
+# apply the key policy in the callback.
+_PYTHON_REPR_SECRET_KEYS = frozenset({
+    "access_token",
+    "refresh_token",
+    "id_token",
+    "auth_token",
+    "token",
+    "api_key",
+    "apikey",
+    "client_secret",
+    "secret",
+    "password",
+    "passwd",
+    "private_key",
+    "credential",
+    "credentials",
+    "authorization",
+    "proxy-authorization",
+    "bearer",
+    "secret_value",
+    "raw_secret",
+    "secret_input",
+    "key_material",
+})
+_PYTHON_REPR_ENV_SUFFIXES = (
+    "_API_KEY",
+    "_TOKEN",
+    "_SECRET",
+    "_PASSWORD",
+    "_PASSWD",
+    "_CREDENTIAL",
+    "_CREDENTIALS",
+)
+# Casefolded credential suffixes for mixed/camel-case key names
+# (``UserPassword``, ``sessionToken``, ``clientApiKey``). Suffix-only so
+# ``token_count`` / ``password_policy`` metadata keys never match.
+_PYTHON_REPR_CREDENTIAL_SUFFIXES = (
+    "apikey",
+    "api_key",
+    "token",
+    "secret",
+    "password",
+    "passwd",
+    "credential",
+    "credentials",
+)
+_PYTHON_REPR_FIELD_RE = re.compile(
+    r"'(?P<key>[A-Za-z_][A-Za-z0-9_\-]*)'(?P<sep>\s*:\s*)"
+    r"(?:"
+    r"(?P<single_prefix>[bB]?)'(?P<single_value>(?:\\.|[^'\\])+)'"
+    r"|(?P<double_prefix>[bB]?)\"(?P<double_value>(?:\\.|[^\"\\])+)\""
+    r")"
+)
+# Programmatic env lookups (``os.getenv(...)``, ``process.env.X``) as a repr
+# VALUE name a variable; they are not a leaked secret.
+_ENV_LOOKUP_VALUE_RE = re.compile(r"^(?:os\.(?:getenv|environ)|process\.env|\$ENV\{)")
+
+# Terminal/process output normally uses ``code_file=True`` to preserve source.
+# Add repr masking only to high-confidence diagnostic lines: pytest assertion
+# introspection (``E       ...``) and final Python exception lines.
+_PYTEST_DIAGNOSTIC_LINE_RE = re.compile(r"^(?P<prefix>[ \t]*E[ \t]{2,})(?P<body>.*)$")
+_PYTHON_EXCEPTION_LINE_RE = re.compile(
+    r"^(?P<prefix>(?:[A-Za-z_]\w*\.)*[A-Za-z_]\w*"
+    r"(?:Error|Exception|Warning):[ \t]*)(?P<body>.*)$"
 )
 
 # Authorization headers — any scheme (Bearer, Basic, Token, Digest, …) plus the
@@ -212,7 +430,8 @@ _AUTH_HEADER_RE = re.compile(
 # a known vendor prefix (custom/local backends) would otherwise leak when a
 # request or curl command is logged or echoed into tool output / transcripts.
 _SECRET_HEADER_NAMES = (
-    r"(?:x-api-key|x-goog-api-key|api-key|apikey|x-api-token|x-auth-token|x-access-token)"
+    r"(?:x-api-key|x-goog-api-key|api-key|apikey|x-api-token|x-auth-token|x-access-token"
+    rf"|{_X_KEY_HEADER_NAME})"
 )
 _SECRET_HEADER_RE = re.compile(
     rf"({_SECRET_HEADER_NAMES}\s*:\s*)(\S+)",
@@ -362,6 +581,79 @@ def mask_secret(
     return f"{value[:head]}...{value[-tail:]}"
 
 
+def _is_python_repr_secret_key(key: str) -> bool:
+    """Return True for exact secret keys or credential-suffixed key names."""
+    folded = key.casefold()
+    if folded in _PYTHON_REPR_SECRET_KEYS:
+        return True
+    if key.isupper() and key.endswith(_PYTHON_REPR_ENV_SUFFIXES):
+        return True
+    # Header-dict keys: ``{'x-brain-key': '…'}``, ``{'X-Api-Key': '…'}``.
+    if _X_KEY_HEADER_NAME_RE.fullmatch(key):
+        return True
+    # Mixed/camel-case keys ending in a credential word (``UserPassword``,
+    # ``sessionToken``, ``clientApiKey``). Suffix-only matching keeps metadata
+    # names like ``TOKEN_COUNT`` / ``PASSWORD_POLICY`` / ``SECRET_NAME`` intact.
+    return folded.endswith(_PYTHON_REPR_CREDENTIAL_SUFFIXES)
+
+
+def _redact_python_repr_fields(text: str) -> str:
+    """Fully mask credential fields in Python mapping ``repr`` output."""
+    def _sub(match: re.Match) -> str:
+        key = match.group("key")
+        if not _is_python_repr_secret_key(key):
+            return match.group(0)
+
+        single_value = match.group("single_value")
+        if single_value is not None:
+            prefix = match.group("single_prefix") or ""
+            quote = "'"
+            value = single_value
+        else:
+            prefix = match.group("double_prefix") or ""
+            quote = '"'
+            value = match.group("double_value")
+
+        # Mapping repr can contain code-shaped fixture values too. Preserve
+        # programmatic env lookups.
+        if _ENV_LOOKUP_VALUE_RE.match(value):
+            return match.group(0)
+        # An earlier pass already masked this value; re-masking would erase
+        # what it deliberately kept (``'Authorization': 'Digest ***'`` → ``'***'``,
+        # or the vendor label of ``«redacted:ghp_…»``).
+        if "***" in value or value.startswith("«redacted"):
+            return match.group(0)
+        # Do not retain head/tail characters here: escaped repr atoms can cross
+        # a slicing boundary and leave an unescaped quote behind. A full mask is
+        # parseable for both str and bytes values and leaks no opaque bytes.
+        return f"'{key}'{match.group('sep')}{prefix}{quote}***{quote}"
+
+    return _PYTHON_REPR_FIELD_RE.sub(_sub, text)
+
+
+def _redact_python_diagnostic_repr_fields(text: str) -> str:
+    """Mask repr fields only on pytest/error lines in source-preserving output."""
+    lines = text.splitlines(keepends=True)
+    for index, line in enumerate(lines):
+        ending = ""
+        body_line = line
+        if line.endswith("\r\n"):
+            body_line, ending = line[:-2], "\r\n"
+        elif line.endswith("\n") or line.endswith("\r"):
+            body_line, ending = line[:-1], line[-1:]
+
+        match = _PYTEST_DIAGNOSTIC_LINE_RE.match(body_line)
+        if match is None:
+            match = _PYTHON_EXCEPTION_LINE_RE.match(body_line)
+        if match is not None:
+            lines[index] = (
+                match.group("prefix")
+                + _redact_python_repr_fields(match.group("body"))
+                + ending
+            )
+    return "".join(lines)
+
+
 def _mask_token(token: str) -> str:
     """Mask a log token — conservative 18-char floor, preserves 6 prefix / 4 suffix."""
     # Empty input: historically this returned "***" rather than "". Preserve.
@@ -503,6 +795,7 @@ def redact_sensitive_text(
     force: bool = False,
     code_file: bool = False,
     file_read: bool = False,
+    secret_file: bool = False,
 ) -> str:
     """Apply all redaction patterns to a block of text.
 
@@ -525,7 +818,20 @@ def redact_sensitive_text(
     the stored credential into a dead 13-char value → 401 (issue #35519). The
     sentinel is syntactically invalid as a token, so it can't be mistaken for a
     usable key or written back as one. Implies code_file=True (config/data
-    files shouldn't trigger the source-code ENV/JSON false-positive paths).
+    files shouldn't trigger the source-code ENV/JSON false-positive paths)
+    unless ``secret_file`` is set.
+
+    Set ``secret_file=True`` when the caller has classified the SOURCE as
+    secret-bearing (``is_secret_file_path``: Hermes ``config.yaml`` and its
+    backups, ``.env``-style files, shell rc files). It re-enables the
+    ENV/JSON/YAML assignment passes that ``file_read`` / ``code_file`` would
+    skip, so an opaque prefix-less credential under a credential-shaped key
+    (``  api_key: <v>``) is masked instead of returned in cleartext. It is
+    authoritative over ``code_file``, so a caller cannot be fail-open by
+    setting both. With ``file_read=True`` those assignments get the
+    non-reusable sentinel (the #35519 write-back hazard stays closed), quoted
+    YAML values are masked too, and plain settings (booleans, null, short
+    numbers under non-password keys) are left readable.
 
     Performance: each regex pattern is gated behind a cheap substring
     pre-check (e.g. ``"=" in text`` for ENV assignments, ``"://" in text``
@@ -549,6 +855,26 @@ def redact_sensitive_text(
     # paths either (it's config/data, not log lines).
     if file_read:
         code_file = True
+    # ``secret_file`` is authoritative: a caller that classified the source as
+    # secret-bearing must not be fail-open because another flag was also set.
+    if secret_file:
+        code_file = False
+    # File-read content gets the non-reusable sentinel on every pass, so an
+    # agent cannot write a truncated-looking mask back as a credential.
+    _assign_mask = _mask_token_nonreusable if file_read else _mask_token
+
+    def _leave_value(key: str, value: str) -> bool:
+        # An earlier pass already masked this value (``***`` or the
+        # ``«redacted:…»`` sentinel); masking again only erases the vendor
+        # label the sentinel deliberately keeps.
+        if value == "***" or value.startswith("«redacted"):
+            return True
+        if not secret_file:
+            return False
+        # A URL value (``token_url: https://…``) is left to the URL rules:
+        # web URLs pass through by design, DB connection-string passwords
+        # are masked by _DB_CONNSTR_RE, bare userinfo by _URL_BARE_TOKEN_RE.
+        return "://" in value or _is_config_scalar(key, value)
 
     # Known prefixes (sk-, ghp_, etc.) — gate on substring presence
     if _has_known_prefix_substring(text):
@@ -560,31 +886,71 @@ def redact_sensitive_text(
         if "=" in text:
             def _redact_env(m):
                 name, quote, value = m.group(1), m.group(2), m.group(3)
-                return f"{name}={quote}{_mask_token(value)}{quote}"
+                # Keyword must sit at a word boundary within the key —
+                # ``KEYBOARD=…`` / ``author=Smith`` are not credentials.
+                if not _key_has_secret_keyword(name) or _leave_value(name, value):
+                    return m.group(0)
+                return f"{name}={quote}{_assign_mask(value)}{quote}"
             text = _ENV_ASSIGN_RE.sub(_redact_env, text)
             # Lowercase/dotted config keys (issue #16413). Skip URLs entirely —
             # web-URL query params are intentionally passed through (see note
             # near the bottom of this function); _DB_CONNSTR_RE still guards
             # connection-string passwords.
-            if "://" not in text:
-                text = _CFG_DOTTED_RE.sub(_redact_env, text)
-                text = _CFG_ANCHORED_RE.sub(_redact_env, text)
+            #
+            # Extra gate: every _CFG_*_RE match requires a secret keyword in
+            # the key, so a text without any secret keyword cannot match —
+            # skipping is exact. This matters because _CFG_DOTTED_RE
+            # backtracks on long unbroken [A-Za-z0-9_.\-] runs (e.g.
+            # base64/hex blobs in compaction payloads); the linear keyword
+            # scan prevents that pathological path on secret-free text.
+            #
+            # Secret-bearing files: the whole-text ``://`` skip would disable
+            # the line-anchored pass for any config that mentions a URL
+            # anywhere (every Hermes config.yaml has a ``base_url``). There,
+            # the anchored pass runs regardless and only a URL-shaped VALUE is
+            # left alone. The unanchored dotted pass keeps the skip.
+            if _CFG_SECRET_WORD_RE.search(text):
+                if "://" not in text:
+                    text = _CFG_DOTTED_RE.sub(_redact_env, text)
+                if secret_file or "://" not in text:
+                    text = _CFG_ANCHORED_RE.sub(_redact_env, text)
 
         # JSON fields: "apiKey": "***"  (skip for code files — false positives)
         if ":" in text and '"' in text:
             def _redact_json(m):
                 key, value = m.group(1), m.group(2)
-                return f'{key}: "{_mask_token(value)}"'
+                if _leave_value(key, value):
+                    return m.group(0)
+                return f'{key}: "{_assign_mask(value)}"'
             text = _JSON_FIELD_RE.sub(_redact_json, text)
+
+        # Python mapping repr fields ({'API_KEY': '…'}): single-quoted, so the
+        # JSON rule above never sees them — the traceback / logged-kwargs /
+        # pytest-introspection leak shape.
+        if ":" in text and "'" in text:
+            text = _redact_python_repr_fields(text)
 
         # Unquoted YAML / colon config: password: ***  (after JSON so quoted
         # values are handled there; the lookahead in _YAML_ASSIGN_RE skips
         # quotes). Skip URLs — web-URL query params pass through by design.
-        if ":" in text and "://" not in text:
+        # Secret-bearing files run it even with a URL elsewhere in the text
+        # (see the _CFG_ANCHORED_RE note above); URL-shaped values are kept.
+        if ":" in text and (secret_file or "://" not in text):
             def _redact_yaml(m):
                 key, sep, value = m.group(1), m.group(2), m.group(3)
-                return f"{key}{sep}{_mask_token(value)}"
+                # ``Secretary: J.Smith`` / ``tokenizer: cl100k_base`` are
+                # document text, not credentials.
+                if not _key_has_secret_keyword(key) or _leave_value(key, value):
+                    return m.group(0)
+                return f"{key}{sep}{_assign_mask(value)}"
             text = _YAML_ASSIGN_RE.sub(_redact_yaml, text)
+            if secret_file and ("'" in text or '"' in text):
+                def _redact_yaml_quoted(m):
+                    key, sep, quote, value = m.group(1), m.group(2), m.group(3), m.group(4)
+                    if not _key_has_secret_keyword(key) or _leave_value(key, value):
+                        return m.group(0)
+                    return f"{key}{sep}{quote}{_assign_mask(value)}{quote}"
+                text = _YAML_QUOTED_ASSIGN_RE.sub(_redact_yaml_quoted, text)
 
     # Authorization headers — _AUTH_HEADER_RE matches any scheme after
     # "[Proxy-]Authorization:" case-insensitively, so "uthorization" is the
@@ -598,10 +964,23 @@ def redact_sensitive_text(
     # API-key style headers (x-api-key, api-key, …). Header values are
     # colon-separated, so gate on ":" — the regex itself is the precise filter.
     if ":" in text:
-        text = _SECRET_HEADER_RE.sub(
-            lambda m: m.group(1) + _mask_token(m.group(2)),
-            text,
-        )
+        def _redact_secret_header(m):
+            value = m.group(2)
+            # Keep quotes outside the mask: a quoted YAML scalar keeps both,
+            # and a header flush against a closing quote (``-H "x-api-key: v"``)
+            # keeps that quote, so masking never breaks the command's syntax.
+            lead = trail = ""
+            if len(value) >= 2 and value[0] in "'\"" and value[-1] == value[0]:
+                lead, trail, value = value[0], value[-1], value[1:-1]
+            elif len(value) >= 2 and value[-1] in "'\"":
+                trail, value = value[-1], value[:-1]
+            if value == "***" or value.startswith("«redacted"):
+                return m.group(0)
+            # File reads get the non-reusable sentinel, like every other pass:
+            # a head/tail mask of ``x-brain-key: …`` in config.yaml looks like a
+            # truncated real key and could be written back (#35519).
+            return f"{m.group(1)}{lead}{_assign_mask(value)}{trail}"
+        text = _SECRET_HEADER_RE.sub(_redact_secret_header, text)
 
     # Telegram bot tokens — pattern requires ":<token>" with digits prefix
     if ":" in text:
@@ -699,8 +1078,35 @@ _TEXT_FILE_READ_COMMANDS = frozenset({"grep", "awk", "sed"})
 
 
 def _command_segments(command: str) -> list[str]:
-    """Pipeline/sequence segments of a shell command, stripped, empties dropped."""
-    return [seg.strip() for seg in re.split(r"[|;&]+", command) if seg.strip()]
+    """Pipeline/sequence segments, split only on unquoted ``| ; &``.
+
+    Quote-aware so ``awk '{print $1; print $2}'`` / ``grep 'foo|bar'`` stay
+    one segment. Backslash is not an escape (Windows ``C:\\Users\\...``).
+    """
+    segments: list[str] = []
+    buf: list[str] = []
+    quote: str | None = None
+    for ch in command:
+        if quote:
+            buf.append(ch)
+            if ch == quote:
+                quote = None
+            continue
+        if ch in "'\"":
+            quote = ch
+            buf.append(ch)
+            continue
+        if ch in "|;&":
+            seg = "".join(buf).strip()
+            if seg:
+                segments.append(seg)
+            buf = []
+            continue
+        buf.append(ch)
+    seg = "".join(buf).strip()
+    if seg:
+        segments.append(seg)
+    return segments
 
 
 def _command_reads_env_file(command: str | None) -> bool:
@@ -722,9 +1128,61 @@ def _command_reads_env_file(command: str | None) -> bool:
     return False
 
 
+_HERMES_HOME_PREFIXES = ("$HERMES_HOME/", "${HERMES_HOME}/")
+
+
+def _is_hermes_config_basename(name: str) -> bool:
+    """``config.yaml`` plus any ``config.yaml.<suffix>`` copy of it.
+
+    Hermes writes ``backups/config/config.yaml.good.<stamp>`` /
+    ``.corrupt.<stamp>.bak`` snapshots, and hand-made copies
+    (``config.yaml.bak-<date>``, ``config.yaml.pre-<change>``) sit beside the
+    live file — same contents, same secrets. Only consulted for paths already
+    under a Hermes home, so arbitrary project YAML is unaffected.
+    """
+    return name == "config.yaml" or name.startswith("config.yaml.")
+
+
+def _is_under_hermes_home(path: str) -> bool:
+    """True when an absolute path sits under the active Hermes home or root.
+
+    A resolved path (what the file tools hand over) never spells
+    ``$HERMES_HOME``, and a home outside ``~/.hermes`` (``HERMES_HOME=/srv/h``,
+    or a symlinked home that resolves elsewhere) carries no ``.hermes``
+    segment. Compare against the resolved homes instead. Only reached for a
+    ``config.yaml`` basename, so the resolve cost stays off the per-token
+    command scan; relative paths are never resolved (their base is unknown).
+    """
+    from agent.file_safety import _hermes_home_path, _hermes_root_path
+
+    try:
+        expanded = os.path.expanduser(path)
+        if not os.path.isabs(expanded):
+            return False
+        target = os.path.normcase(os.path.realpath(expanded))
+    except (OSError, ValueError):
+        return False
+    for getter in (_hermes_home_path, _hermes_root_path):
+        try:
+            base = os.path.normcase(os.path.realpath(str(getter())))
+        except (OSError, ValueError):
+            continue
+        if target == base or target.startswith(base + os.sep):
+            return True
+    return False
+
+
 def _is_secret_bearing_file_arg(arg: str) -> bool:
-    """Recognize explicit Hermes config and standard shell startup paths."""
+    """Recognize explicit Hermes config (and its backup copies) and standard
+    shell startup paths. ``$HERMES_HOME/…`` / ``${HERMES_HOME}/…`` count as a
+    Hermes home; any other unresolved ``$VAR`` path is not classified."""
     path = arg.strip("\"'").replace("\\", "/")
+    hermes_home = False
+    for prefix in _HERMES_HOME_PREFIXES:
+        if path.startswith(prefix):
+            path = path[len(prefix):]
+            hermes_home = True
+            break
     if "$" in path:
         return False
     parts = [part.lower() for part in path.split("/") if part]
@@ -732,7 +1190,27 @@ def _is_secret_bearing_file_arg(arg: str) -> bool:
         return False
     if parts[-1] in _SECRET_BEARING_FILE_BASENAMES:
         return True
-    return parts[-1] == "config.yaml" and ".hermes" in parts[:-1]
+    if not _is_hermes_config_basename(parts[-1]):
+        return False
+    return hermes_home or ".hermes" in parts[:-1] or _is_under_hermes_home(path)
+
+
+def is_secret_file_path(path: str | os.PathLike | None) -> bool:
+    """Classify a file-tool path (read_file / search_files) as secret-bearing.
+
+    ``.env``-style basenames anywhere, shell rc files, and Hermes
+    ``config.yaml`` (plus its backup copies) under a Hermes home — the same
+    rule the terminal side applies to ``cat``/``grep`` targets, so the two
+    surfaces cannot drift. Callers pass the RESOLVED path and set
+    ``redact_sensitive_text(..., secret_file=True)`` on a hit.
+    """
+    if not path:
+        return False
+    text = str(path).replace("\\", "/")
+    basename = text.rsplit("/", 1)[-1].lower()
+    if basename in _ENV_FILE_BASENAMES:
+        return True
+    return _is_secret_bearing_file_arg(text)
 
 
 def _command_reads_secret_bearing_file(command: str | None) -> bool:
@@ -798,6 +1276,8 @@ def redact_terminal_output(
     - direct read of a secret-bearing config file (``~/.hermes/config.yaml``,
       profile ``config.yaml``, shell startup files like ``~/.bashrc``) via a
       file-read command or ``grep``/``awk``/``sed`` → ``code_file=False``.
+      ``.env`` and secret-bearing reads also set ``secret_file=True`` (same
+      semantics as a ``read_file`` of that file, minus the sentinel mask).
     - anything else (or unknown command) → ``code_file=True`` to avoid
       false positives on source/config dumps.
 
@@ -806,12 +1286,16 @@ def redact_terminal_output(
     """
     if not output:
         return output
-    code_file = not (
-        is_env_dump_command(command or "")
-        or _command_reads_env_file(command)
-        or _command_reads_secret_bearing_file(command)
-    )
-    return redact_sensitive_text(output, force=force, code_file=code_file)
+    secret_file = _command_reads_env_file(command) or _command_reads_secret_bearing_file(command)
+    code_file = not (is_env_dump_command(command or "") or secret_file)
+    redacted = redact_sensitive_text(
+        output, force=force, code_file=code_file, secret_file=secret_file)
+    # Source-preserving output still gets the Python-repr pass on high-confidence
+    # diagnostic lines (pytest ``E   `` introspection, final exception lines): that
+    # is where {'BRAVE_API_KEY': '…'} leaks, not in source dumps.
+    if code_file and (force or _REDACT_ENABLED) and ":" in redacted and "'" in redacted:
+        redacted = _redact_python_diagnostic_repr_fields(redacted)
+    return redacted
 
 
 # Substrings used to gate ``_PREFIX_RE`` execution. If none of these appear in

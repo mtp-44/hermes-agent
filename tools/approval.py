@@ -19,6 +19,7 @@ import sys
 import threading
 import time
 import unicodedata
+import uuid
 from typing import Optional
 from hermes_cli.config import cfg_get
 
@@ -504,7 +505,11 @@ def _match_user_deny_rule(command: str) -> str | None:
     Matching is case-insensitive and runs over the same normalized /
     deobfuscated command variants the dangerous-pattern detector uses, so
     quoting tricks (``r\\m``, ``git st""atus``) can't sidestep a rule any
-    more easily than they sidestep detection. Empty/absent list = no-op.
+    more easily than they sidestep detection. On top of the whole-command
+    variants, each real command position is also tried on its own (executable
+    and basename, unquoted whitespace collapsed, launcher prefixes skipped,
+    ``env -S`` and ``sh -c`` payloads split) -- see ``_deny_command_variants``.
+    Empty/absent list = no-op.
     """
     try:
         deny_patterns = _get_approval_config().get("deny") or []
@@ -516,7 +521,7 @@ def _match_user_deny_rule(command: str) -> str | None:
              if isinstance(p, str) and p.strip()]
     if not globs:
         return None
-    for command_variant in _command_detection_variants(command):
+    for command_variant in _deny_command_variants(command):
         candidate = command_variant.lower().strip()
         for pattern in globs:
             if fnmatch.fnmatchcase(candidate, pattern.lower()):
@@ -573,6 +578,25 @@ def _sudo_stdin_block_result(description: str) -> dict:
 # Dangerous command patterns
 # =========================================================================
 
+# POSIX shell names as one shared alternation, used by every pipe/decode/
+# process-substitution/heredoc pattern and the `-c` rule below, so the list
+# cannot drift between sites again (the drift let `curl url | zsh`,
+# `dash -c ...` and `dash <<EOF` through while bash/sh were flagged).
+_SHELL_NAMES = ("bash", "sh", "zsh", "ksh", "dash")
+_SHELL_NAMES_RE = "|".join(_SHELL_NAMES)
+# Local addition (not upstream): the pipe-remote rule also accepts the
+# non-POSIX shells fish/csh/tcsh and up to two launcher words in front of the
+# shell (`curl x | sudo bash`, `| sudo -u root sh`, `| env bash`,
+# `| /usr/bin/env -i zsh`). Each launcher word may carry option / VAR=value
+# tokens; the atomic group keeps `sudo -u <user>` from re-reading the user
+# name as the shell, and the token classes are disjoint (`-...`, `NAME=...`)
+# so the repetition cannot backtrack catastrophically. (Python >= 3.11.)
+_PIPE_SHELL_NAMES_RE = _SHELL_NAMES_RE + "|fish|csh|tcsh"
+_PIPE_SHELL_LAUNCHER_RE = (
+    r'(?:(?:[/\w]*/)?(?:sudo|doas|env|command|exec|nohup|time)'
+    r'(?:\s+(?>-[ugCh]\s+[^\s|;&]+|-[^\s|;&]+|[A-Za-z_]\w*=[^\s|;&]*))*\s+){0,2}'
+)
+
 DANGEROUS_PATTERNS = [
     (r'\brm\s+(-[^\s]*\s+)*/', "delete in root path"),
     (r'\brm\s+-[^\s]*r', "recursive delete"),
@@ -614,28 +638,28 @@ DANGEROUS_PATTERNS = [
     (r'\bkillall\s+(-[^\s]*\s+)*-r\b', "kill processes by regex (killall -r)"),
     (r':\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:', "fork bomb"),
     # Any shell invocation via -c or combined flags like -lc, -ic, etc.
-    (r'\b(bash|sh|zsh|ksh)\s+-[^\s]*c(\s+|$)', "shell command via -c/-lc flag"),
+    (rf'\b(?:{_SHELL_NAMES_RE})\s+-[^\s]*c(\s+|$)', "shell command via -c/-lc flag"),
     (r'\b(python[23]?|perl|ruby|node)\s+-[ec]\s+', "script execution via -e/-c flag"),
-    (r'\b(curl|wget)\b.*\|\s*(?:[/\w]*/)?(?:ba)?sh(?:\s|$|-c)', "pipe remote content to shell"),
-    (r'\b(bash|sh|zsh|ksh)\s+<\s*<?\s*\(\s*(curl|wget)\b', "execute remote script via process substitution"),
+    (rf'\b(curl|wget)\b.*\|\s*{_PIPE_SHELL_LAUNCHER_RE}(?:[/\w]*/)?(?:{_PIPE_SHELL_NAMES_RE})(?:\s|$|-c)', "pipe remote content to shell"),
+    (rf'\b(?:{_SHELL_NAMES_RE})\s+<\s*<?\s*\(\s*(curl|wget)\b', "execute remote script via process substitution"),
     # Remote content executed via command substitution: eval/source/. $(curl ...)
     # or `wget ...`. Equivalent to piping remote content to a shell.
     (r'(?:\beval\b|\bsource\b|\.)\s*(?:\$\(\s*|`\s*)(?:curl|wget)\b', "execute remote content via command substitution"),
     # Decode-and-execute: encoded/transformed content piped to a shell. Without
     # these, `echo <base64> | base64 -d | bash` silently runs `rm -rf /` or any
     # other command because the raw text carries no dangerous keywords.
-    (r'\b(base64|base32|base16)\s+(?:-[dD]|--decode)\b.*\|\s*\b(bash|sh|zsh|ksh|dash)\b',
+    (rf'\b(base64|base32|base16)\s+(?:-[dD]|--decode)\b.*\|\s*\b(?:{_SHELL_NAMES_RE})\b',
      "pipe decoded content to shell (possible command obfuscation)"),
     # xxd reverse hex dump to shell (xxd uses -r for decode, not -d).
-    (r'\bxxd\s+-r\b.*\|\s*\b(bash|sh|zsh|ksh|dash)\b',
+    (rf'\bxxd\s+-r\b.*\|\s*\b(?:{_SHELL_NAMES_RE})\b',
      "pipe xxd-decoded content to shell (possible command obfuscation)"),
     # Character transformation via tr piped to shell:
     # `echo 'eq -pe v/' | tr 'eqv' 'rmf' | bash` decodes to `rm -rf /`.
-    (r'\becho\b[^|]*\|\s*\btr\b[^|]*\|\s*\b(bash|sh|zsh|ksh|dash)\b',
+    (rf'\becho\b[^|]*\|\s*\btr\b[^|]*\|\s*\b(?:{_SHELL_NAMES_RE})\b',
      "pipe tr-transformed output to shell (possible command obfuscation)"),
     # openssl decode piped to shell:
     # `echo <base64> | openssl base64 -d | bash` decodes arbitrary commands.
-    (r'\bopenssl\b.*\b(?:base64|enc)\b[^|]*\s+-[dD]\b[^|]*\|\s*\b(bash|sh|zsh|ksh|dash)\b',
+    (rf'\bopenssl\b.*\b(?:base64|enc)\b[^|]*\s+-[dD]\b[^|]*\|\s*\b(?:{_SHELL_NAMES_RE})\b',
      "pipe openssl-decoded content to shell (possible command obfuscation)"),
     (rf'\btee\b.*["\']?{_SENSITIVE_WRITE_TARGET}', "overwrite system file via tee"),
     (rf'>>?\s*["\']?{_SENSITIVE_WRITE_TARGET}', "overwrite system file via redirection"),
@@ -679,7 +703,17 @@ DANGEROUS_PATTERNS = [
     # the `hermes gateway stop|restart` pattern above by driving launchd
     # directly against the service label (commonly `ai.hermes.gateway`).
     # Catch the operations that stop, restart, or unload it.
-    (r'\blaunchctl\s+(stop|kickstart|bootout|unload|kill|disable|remove)\b.*\b(hermes|ai\.hermes)\b', "stop/restart hermes launchd service (kills running agents)"),
+    #
+    # Order-independent: a sequential `verb .* hermes` match misses a label
+    # built BEFORE the verb (`L=ai.hermes.gateway; launchctl kill TERM
+    # gui/501/$L`, or a for-loop over labels ending in `launchctl bootout
+    # "gui/$uid/$label"`), which took down a 4-profile gateway fleet upstream
+    # with zero approval. Two lookaheads instead: the verb and the label must
+    # both appear somewhere, in either order. Deliberately broad -- an extra
+    # prompt is cheap, a missed one is not. The \A anchor keeps re.search
+    # from re-running both lookaheads at every offset of a long
+    # non-matching command (quadratic, holds the GIL and starves the gateway).
+    (r'\A(?=[\s\S]*\blaunchctl\s+(?:stop|kickstart|bootout|unload|kill|disable|remove)\b)(?=[\s\S]*\b(?:hermes|ai\.hermes)\b)', "stop/restart hermes launchd service (kills running agents)"),
     # File copy/move/edit into sensitive system paths (/etc/ and macOS
     # /private/etc/ mirror).
     (rf'\b(cp|mv|install)\b.*\s{_SYSTEM_CONFIG_PATH}', "copy/move file into system config path"),
@@ -730,7 +764,7 @@ DANGEROUS_PATTERNS = [
     # inner commands may not individually match any dangerous pattern (e.g.
     # data-exfiltration pipelines using curl/cat) yet are still executed in
     # a full shell context.
-    (r'\b(bash|sh|zsh|ksh)\s+<<', "shell execution via heredoc"),
+    (rf'\b(?:{_SHELL_NAMES_RE})\s+<<', "shell execution via heredoc"),
     # Git destructive operations that can lose uncommitted work or rewrite
     # shared history. Not captured by rm/chmod/etc patterns.
     # `git reset --hard` accepts any unambiguous long-flag prefix (--h,
@@ -1412,6 +1446,386 @@ def _command_detection_variants(command: str):
         yield variant
 
 
+# -------------------------------------------------------------------------
+# approvals.deny: executable-position projections
+# -------------------------------------------------------------------------
+# Adapted from upstream 58faa10134 / 50617d1c75 / 6178e9f4ee (which build on
+# a `_scan_shell` lexer this fork does not have). Deny globs match the whole
+# command, but a tight rule such as `launchctl unload*` or `sudo *` is only
+# as good as the spelling it assumes. These helpers add one candidate per
+# real command position -- the executable (and its basename) followed by the
+# rest of that command with unquoted inter-word whitespace collapsed -- plus
+# the commands carried by literal `env -S` / `--split-string` payloads and
+# shell `-c` payloads. Quoted argument bytes are never promoted to commands.
+
+# Launchers whose operand is another command. Superset of _COMMAND_WRAPPER_WORDS;
+# kept separate so the dangerous-pattern variants are unchanged.
+_DENY_WRAPPER_WORDS = _COMMAND_WRAPPER_WORDS | {
+    "nice", "timeout", "stdbuf", "ionice", "chrt", "taskset", "chroot",
+}
+# Option operands are data, not executable positions. Option spelling stays
+# case-sensitive (env -C vs sudo -c).
+_DENY_WRAPPER_OPTIONS_WITH_ARG = {
+    "chroot": {"--groups", "--userspec"},
+    "sudo": _SUDO_OPTIONS_WITH_ARG,
+    "env": {"-a", "--argv0", "-C", "--chdir", "-S", "--split-string", "-u", "--unset"},
+    "exec": {"-a"},
+    "nice": {"-n", "--adjustment"},
+    "time": {"-f", "--format", "-o", "--output"},
+    "timeout": {"-k", "--kill-after", "-s", "--signal"},
+    "stdbuf": {"-e", "--error", "-i", "--input", "-o", "--output"},
+    "ionice": {"-c", "--class", "-n", "--classdata"},
+}
+# Options that turn the launcher into a query: the next word is not executed.
+_DENY_WRAPPER_NON_EXECUTING_OPTIONS = {
+    "command": {"-v", "-V"}, "chrt": {"-p", "--pid"},
+    "ionice": {"-p", "--pid", "--pgid", "--uid"}, "taskset": {"-p", "--pid"},
+}
+_DENY_WRAPPER_POSITIONAL_ARGS = {"chroot": 1, "chrt": 1, "taskset": 1, "timeout": 1}
+# Reserved words after which the next word is again a command position.
+_SHELL_COMMAND_TRANSITIONS = {"if", "then", "else", "elif", "do", "while", "until", "!"}
+_SHELL_REDIRECTION_RE = re.compile(r"[0-9]*(?:>>|<<|<>|>&|<&|>\||[<>])")
+# Shell options that consume the following word (so it is not the script / -c payload).
+_SHELL_OPTIONS_WITH_ARG = {"-o", "+o", "-O", "+O", "--rcfile", "--init-file"}
+
+
+def _is_shell_comment_start(command: str, index: int) -> bool:
+    return command[index] == "#" and (
+        index == 0 or command[index - 1].isspace() or command[index - 1] in ";&|()<>"
+    )
+
+
+def _strip_unquoted_shell_comments(command: str) -> str:
+    """Drop ``# ...`` comments (to end of line) that sit outside quotes.
+
+    Unlike ``_strip_shell_comments`` (per-line, used for the LLM prompt) this
+    keeps quote state across newlines and only treats ``#`` at a word start as
+    a comment, the way the shell does -- so ``echo ok # ; sudo x`` exposes no
+    ``sudo`` command while ``echo 'a\\n# b'`` and ``a#b`` are left intact.
+    """
+    out: list[str] = []
+    quote: str | None = None
+    i, n = 0, len(command)
+    while i < n:
+        ch = command[i]
+        if quote == "'":
+            if ch == "'":
+                quote = None
+        elif quote == '"':
+            if ch == "\\" and i + 1 < n:
+                out.append(command[i:i + 2])
+                i += 2
+                continue
+            if ch == '"':
+                quote = None
+        elif ch in ("'", '"'):
+            quote = ch
+        elif ch == "\\" and i + 1 < n:
+            out.append(command[i:i + 2])
+            i += 2
+            continue
+        elif _is_shell_comment_start(command, i):
+            end = command.find("\n", i)
+            if end < 0:
+                break
+            i = end
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def _deny_command_segment(command: str, start: int) -> str:
+    """Bound a candidate to its own command, preserving quoted argument bytes."""
+    quote: str | None = None
+    i, n = start, len(command)
+    while i < n:
+        ch = command[i]
+        if quote == "'":
+            if ch == "'":
+                quote = None
+            i += 1
+            continue
+        if ch == "\\" and i + 1 < n:
+            i += 2
+            continue
+        if command.startswith("$(", i):
+            end = _scan_dollar_paren_end(command, i)
+            i = end if end is not None else i + 2
+            continue
+        if ch == "`":
+            end = _scan_backtick_end(command, i)
+            if end is None and quote is None:
+                break
+            i = end if end is not None else i + 1
+            continue
+        if quote == '"':
+            if ch == '"':
+                quote = None
+            i += 1
+            continue
+        if ch in ("'", '"'):
+            quote = ch
+            i += 1
+            continue
+        if ch in ";&|\n)":
+            break
+        i += 1
+    return command[start:i].strip()
+
+
+def _collapse_unquoted_whitespace(text: str) -> str:
+    """Collapse runs of unquoted whitespace to one space; quoted prose is data."""
+    out: list[str] = []
+    quote: str | None = None
+    last_space = False
+    i, n = 0, len(text)
+    while i < n:
+        ch = text[i]
+        if quote is None and ch.isspace():
+            if not last_space:
+                out.append(" ")
+            last_space = True
+            i += 1
+            continue
+        last_space = False
+        if ch == "\\" and quote != "'" and i + 1 < n:
+            out.append(text[i:i + 2])
+            i += 2
+            continue
+        if quote is None and ch in ("'", '"'):
+            quote = ch
+        elif ch == quote:
+            quote = None
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def _iter_deny_command_word_spans(command: str):
+    """Yield executable-position words, looking through launchers and prefixes.
+
+    Skips leading assignments and redirections, launcher options and their
+    operands, and reserved words such as ``then``/``do``. ``command -v`` style
+    queries and ``env -S`` (handled by ``_deny_env_split_payload``) end the walk.
+    """
+    for pos in _iter_shell_command_starts(command):
+        wrapper: str | None = None
+        options, skip_arg, positionals = True, False, 0
+        for _ in range(32):
+            word_start, word_end, word = _read_shell_word(command, pos)
+            if word_start == word_end:
+                break
+            pos = word_end
+            redirect = _SHELL_REDIRECTION_RE.match(word)
+            if redirect:
+                if redirect.end() == len(word):
+                    _, pos, _ = _read_shell_word(command, pos)
+                continue
+            deobfuscated = _deobfuscate_shell_word_for_detection(word)
+            name = os.path.basename(deobfuscated).lower()
+            if skip_arg:
+                skip_arg = False
+                continue
+            if wrapper and options and deobfuscated == "--":
+                options = False
+                continue
+            if wrapper and options and deobfuscated.startswith("-"):
+                option = deobfuscated.split("=", 1)[0]
+                if wrapper == "env" and (option == "--split-string" or deobfuscated.startswith("-S")):
+                    break
+                queries = _DENY_WRAPPER_NON_EXECUTING_OPTIONS.get(wrapper, set())
+                if option in queries or (
+                    wrapper == "command" and not option.startswith("--")
+                    and set(option[1:]) & {"v", "V"}
+                ):
+                    break
+                skip_arg = (
+                    "=" not in deobfuscated
+                    and option in _DENY_WRAPPER_OPTIONS_WITH_ARG.get(wrapper, set())
+                )
+                continue
+            if positionals:
+                positionals -= 1
+                continue
+            if _ENV_ASSIGNMENT_RE.fullmatch(word):
+                continue
+            if wrapper is None and name in _SHELL_COMMAND_TRANSITIONS:
+                continue
+            yield (word_start, word_end, word)
+            if name not in _DENY_WRAPPER_WORDS:
+                break
+            wrapper, options = name, True
+            positionals = _DENY_WRAPPER_POSITIONAL_ARGS.get(name, 0)
+
+
+def _split_env_string(payload: str) -> list[str] | None:
+    r"""Project an ``env -S`` string into argv the way env does, not a shell.
+
+    GNU and BSD/macOS env both split on unquoted whitespace and honour
+    ``\_`` as a separator; ``\c`` ends the string and an unquoted ``#`` at a
+    word start begins a comment. ``${NAME}`` expansion is deliberately not
+    evaluated (the backend's environment need not be ours): return None.
+    """
+    escapes = {"f": "\f", "n": "\n", "r": "\r", "t": "\t", "v": "\v",
+               "#": "#", "$": "$", "\"": "\"", "'": "'", "\\": "\\"}
+    args: list[str] = []
+    word: list[str] = []
+    quote: str | None = None
+    started, index = False, 0
+    while index < len(payload):
+        char = payload[index]
+        index += 1
+        if char == "\\":
+            if index == len(payload):
+                return None
+            escaped = payload[index]
+            if quote == "'" and escaped not in ("'", "\\"):
+                word.append(char)
+                started = True
+                continue
+            index += 1
+            if escaped == "c":
+                if quote:
+                    return None
+                break
+            if escaped == "_" and quote is None:
+                if started:
+                    args.append("".join(word))
+                word, started = [], False
+                continue
+            if escaped not in escapes and escaped != "_":
+                return None
+            word.append(" " if escaped == "_" else escapes[escaped])
+            started = True
+            continue
+        if char in ("'", '"') and (quote is None or char == quote):
+            quote = char if quote is None else None
+            started = True
+            continue
+        if quote is None and char in " \t\n\r\v\f":
+            if started:
+                args.append("".join(word))
+            word, started = [], False
+            continue
+        if quote is None and char == "#" and not started:
+            break
+        if char == "$" and quote != "'":
+            return None
+        word.append(char)
+        started = True
+    if quote:
+        return None
+    if started:
+        args.append("".join(word))
+    return args
+
+
+def _deny_env_split_payload(tokens: list[str]) -> str | None:
+    """Return the command an ``env -S``/``--split-string`` invocation runs."""
+    index = 1
+    while index < len(tokens):
+        token = tokens[index]
+        if token == "--" or not token.startswith("-"):
+            return None
+        option, equals, value = token.partition("=")
+        if option == "--split-string" or token.startswith("-S"):
+            attached = bool(equals) if option == "--split-string" else len(token) > 2
+            if not attached:
+                index += 1
+            if attached:
+                payload = value if option == "--split-string" else token[2:]
+            else:
+                payload = tokens[index] if index < len(tokens) else ""
+            args = _split_env_string(payload)
+            # Quote the argv back so literal separators stay data when the
+            # command-position scanner reads it; only a real shell -c carrier
+            # may turn these bytes into code.
+            return shlex.join(args + tokens[index + 1:]) if args is not None else None
+        index += 2 if not equals and option in _DENY_WRAPPER_OPTIONS_WITH_ARG["env"] else 1
+    return None
+
+
+def _deny_shell_c_payload(tokens: list[str]) -> str | None:
+    """Return the ``-c`` payload of ``bash -c``/``sh -lc``/``zsh -c ...``."""
+    if not tokens or os.path.basename(tokens[0]).lower() not in _SHELL_NAMES:
+        return None
+    saw_c, index = False, 1
+    while index < len(tokens):
+        token = tokens[index]
+        if token == "--":
+            index += 1
+            break
+        if token in _SHELL_OPTIONS_WITH_ARG:
+            index += 2
+            continue
+        if token.startswith("--"):
+            index += 1
+            continue
+        if len(token) > 1 and token[0] in "-+":
+            saw_c = saw_c or (token[0] == "-" and "c" in token[1:])
+            index += 1
+            continue
+        break
+    if saw_c and index < len(tokens):
+        return tokens[index]
+    return None
+
+
+def _normalize_for_deny_projection(command: str) -> str:
+    """The quote-preserving subset of ``_normalize_command_for_detection``."""
+    from tools.ansi_strip import strip_ansi
+
+    command = unicodedata.normalize("NFKC", strip_ansi(command).replace("\x00", ""))
+    command = re.sub(r"\\\r?\n", "", command)
+    return re.sub(r"\$\{IFS\b[^}]*\}|\$IFS\b", " ", command)
+
+
+def _deny_command_variants(command: str):
+    """Candidates for ``approvals.deny``: detection variants + command projections.
+
+    Whole-input variants are kept so existing globs (``*launchctl*unload*``)
+    behave exactly as before. The projections parse the original quote state
+    and fold only the executable to its basename, never argument paths, so a
+    path-specific rule such as ``/usr/bin/sudo *`` stays path-specific.
+    """
+    yield from _command_detection_variants(command)
+    pending = [command]
+    normalized = _normalize_for_deny_projection(command)
+    if normalized != command:
+        pending.append(normalized)
+    seen: set[str] = set()
+    while pending:
+        source = _strip_unquoted_shell_comments(pending.pop())
+        if source in seen:
+            continue
+        seen.add(source)
+        for start, end, word in _iter_deny_command_word_spans(source):
+            segment = _deny_command_segment(source, start)
+            executable = _deobfuscate_shell_word_for_detection(word)
+            tail = _collapse_unquoted_whitespace(segment[end - start:])
+            for name in dict.fromkeys((executable, os.path.basename(executable))):
+                candidate = name + tail
+                yield candidate
+                # Existing text normalization applies only AFTER the command
+                # positions are located; its rewritten quotes are never reparsed.
+                yield _normalize_command_for_detection(candidate)
+            try:
+                tokens = shlex.split(segment, posix=True)
+            except ValueError:
+                continue
+            if not tokens:
+                continue
+            base = os.path.basename(tokens[0]).lower()
+            payload = None
+            if base == "env":
+                payload = _deny_env_split_payload(tokens)
+            elif base in _SHELL_NAMES:
+                payload = _deny_shell_c_payload(tokens)
+            if payload:
+                pending.append(payload)
+
+
 def detect_dangerous_command(command: str) -> tuple:
     """Check if a command matches any dangerous patterns.
 
@@ -1447,12 +1861,22 @@ _permanent_approved: set = set()
 
 
 class _ApprovalEntry:
-    """One pending dangerous-command approval inside a gateway session."""
+    """One pending dangerous-command approval inside a gateway session.
+
+    Every entry carries a unique ``request_id`` (stored in ``data`` so the
+    notify callback — and through it the adapter / TUI event — sees it).  A
+    surface that renders one prompt per request (Telegram buttons, the PWA
+    card) resolves by that id, so a tap answers exactly the command on
+    screen; text ``/approve`` without an id stays FIFO.
+    """
     __slots__ = ("event", "data", "result", "reason")
 
     def __init__(self, data: dict):
         self.event = threading.Event()
-        self.data = data          # command, description, pattern_keys, …
+        # Same dict object as the caller's approval_data (not a copy), so the
+        # id assigned here reaches notify_cb(approval_data) unchanged.
+        data.setdefault("request_id", uuid.uuid4().hex)
+        self.data = data          # command, description, pattern_keys, request_id, …
         self.result: Optional[str] = None  # "once"|"session"|"always"|"deny"
         # Optional free-text reason supplied with an explicit deny
         # (``/deny <reason>``) so the agent can adapt instead of only
@@ -1484,20 +1908,27 @@ def unregister_gateway_notify(session_key: str) -> None:
     """
     with _lock:
         _gateway_notify_cbs.pop(session_key, None)
-        entries = _gateway_queues.pop(session_key, [])
-    for entry in entries:
-        entry.event.set()
+        for entry in _gateway_queues.pop(session_key, []):
+            entry.event.set()
 
 
 def resolve_gateway_approval(session_key: str, choice: str,
                              resolve_all: bool = False,
-                             reason: Optional[str] = None) -> int:
+                             reason: Optional[str] = None,
+                             request_id: Optional[str] = None) -> int:
     """Called by the gateway's /approve or /deny handler to unblock
     waiting agent thread(s).
 
-    When *resolve_all* is True every pending approval in the session is
-    resolved at once (``/approve all``).  Otherwise only the oldest one
-    is resolved (FIFO).
+    When *request_id* is given, ONLY the pending entry with that id is
+    resolved; if it is no longer pending (timed out, withdrawn, already
+    answered) nothing is resolved and 0 is returned — never a different,
+    newer prompt.  Button surfaces must pass it: the prompt the user tapped
+    is the only one they consented to.
+
+    Otherwise, when *resolve_all* is True every pending approval in the
+    session is resolved at once (``/approve all``); else only the oldest one
+    is resolved (FIFO — text ``/approve`` where no specific prompt is
+    pointed at).
 
     *reason* is an optional free-text explanation attached to an explicit
     deny (``/deny <reason>``).  It is relayed back to the agent in the
@@ -1509,20 +1940,45 @@ def resolve_gateway_approval(session_key: str, choice: str,
         queue = _gateway_queues.get(session_key)
         if not queue:
             return 0
-        if resolve_all:
+        if request_id:
+            targets = [e for e in queue if e.data.get("request_id") == request_id]
+            if not targets:
+                return 0
+            queue[:] = [e for e in queue if e not in targets]
+        elif resolve_all:
             targets = list(queue)
             queue.clear()
         else:
             targets = [queue.pop(0)]
         if not queue:
             _gateway_queues.pop(session_key, None)
-
-    for entry in targets:
-        entry.result = choice
-        if reason:
-            entry.reason = reason
-        entry.event.set()
+        # Popping the entry and committing its outcome are ONE critical
+        # section: the waiter drops its entry and reads ``entry.result``
+        # under this same lock after its deadline check, so a choice counted
+        # (and acked to the user) here can never be lost as a timeout.
+        for entry in targets:
+            entry.result = choice
+            if reason:
+                entry.reason = reason
+            entry.event.set()
     return len(targets)
+
+
+def is_gateway_approval_pending(session_key: str, request_id: str) -> bool:
+    """True while the approval *request_id* is still waiting in *session_key*."""
+    if not request_id:
+        return False
+    with _lock:
+        return any(
+            e.data.get("request_id") == request_id
+            for e in _gateway_queues.get(session_key) or ()
+        )
+
+
+def pending_gateway_approval_count(session_key: str) -> int:
+    """Number of blocking gateway approvals waiting in *session_key*."""
+    with _lock:
+        return len(_gateway_queues.get(session_key) or ())
 
 
 def has_blocking_approval(session_key: str) -> bool:
@@ -1567,12 +2023,12 @@ def clear_session(session_key: str) -> None:
         _session_approved.pop(session_key, None)
         _session_yolo.discard(session_key)
         _pending.pop(session_key, None)
-        entries = _gateway_queues.pop(session_key, [])
-    for entry in entries:
         # Session-boundary cleanup should cancel any blocked approval waits
-        # immediately so the old run can unwind instead of idling until timeout.
-        entry.result = "deny"
-        entry.event.set()
+        # immediately so the old run can unwind instead of idling until
+        # timeout.  Committed under the lock like every other resolver.
+        for entry in _gateway_queues.pop(session_key, []):
+            entry.result = "deny"
+            entry.event.set()
 
 
 def is_session_yolo_enabled(session_key: str) -> bool:
@@ -2256,13 +2712,23 @@ def _await_gateway_decision(session_key: str, notify_cb, approval_data: dict,
     with _lock:
         _gateway_queues.setdefault(session_key, []).append(entry)
 
-    def _drop_entry() -> None:
+    def _drop_entry() -> Optional[str]:
+        """Leave the queue and return the choice committed so far.
+
+        Removing the entry and reading ``entry.result`` are one critical
+        section under ``_lock`` — the same lock ``resolve_gateway_approval``
+        commits under.  So a choice that landed after the deadline check but
+        before this removal is honoured, and one arriving later finds no
+        entry (the surface is told nothing was pending instead of being
+        acked while the agent reports a timeout).
+        """
         with _lock:
             queue = _gateway_queues.get(session_key, [])
             if entry in queue:
                 queue.remove(entry)
             if not queue:
                 _gateway_queues.pop(session_key, None)
+            return entry.result
 
     # Notify plugins that an approval is being requested. Fires before the
     # gateway notify callback so observers get the event in real time.
@@ -2303,6 +2769,7 @@ def _await_gateway_decision(session_key: str, notify_cb, approval_data: dict,
     _deadline = _now + max(timeout, 0)
     _activity_state = {"last_touch": _now, "start": _now}
     resolved = False
+    interrupted = False
     while True:
         # Respect interrupt signals (e.g. /stop, /new, or an inactivity
         # timeout from the gateway) so a pending approval doesn't keep the
@@ -2317,8 +2784,7 @@ def _await_gateway_decision(session_key: str, notify_cb, approval_data: dict,
                 "returning deny for session %s",
                 session_key,
             )
-            entry.result = "deny"
-            entry.event.set()
+            interrupted = True
             resolved = True
             break
         _remaining = _deadline - time.monotonic()
@@ -2330,9 +2796,17 @@ def _await_gateway_decision(session_key: str, notify_cb, approval_data: dict,
         if touch_activity_if_due is not None:
             touch_activity_if_due(_activity_state, "waiting for user approval")
 
-    _drop_entry()
-
-    choice = entry.result
+    choice = _drop_entry()
+    if interrupted:
+        # Fail closed: an interrupted wait is a deny even if a tap raced in.
+        choice = "deny"
+        entry.result = "deny"
+        entry.event.set()
+    elif choice is not None:
+        # A choice committed in the gap between the deadline check and
+        # leaving the queue is an answer, not a timeout — the resolver has
+        # already counted it (and the user has been told it was applied).
+        resolved = True
     # Normalize outcome for the post hook. Unresolved (timeout) and None both
     # mean the user never responded; report that explicitly so plugins can
     # distinguish timeout from explicit deny.

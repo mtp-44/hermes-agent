@@ -33,6 +33,22 @@
 
 Upstream pulls under policy 1 (security fixes only). Newest first.
 
+### 2026-09-24 (evening) — `sec/p1-2026-09-24`: HA-0008's P1 batch
+
+This is the high-priority batch from the triage of 85 approval/redaction
+commits. It covers:
+
+- a redactor ReDoS (a 5 KB crafted string stalled every log line and
+  outbound message for 21 s);
+- secret shapes that leaked, including `MCP_ACCESS_KEY`, `api_key` in
+  `config.yaml` reads and `x-brain-key`;
+- pipe-to-shell detection for zsh/dash/fish, and `approvals.deny` spacing and
+  `env -S` bypasses;
+- a local fix binding every Telegram/PWA approval tap to its own request.
+
+Full account: ADR
+[`HA-0009`](decisions/0009-security-p1-port-2026-09-24.md).
+
 ### 2026-09-24 (later) — `sync/security-2026-09-24b`: approval-gate hardening
 
 Three upstream `feat`-typed gates taken as security under policy 1:
