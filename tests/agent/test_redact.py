@@ -1096,6 +1096,42 @@ class TestTerminalOutputRedaction:
                 "profileSecret456",
             ),
             ("sed -n '1,20p' ~/.zprofile", "api_key: zprofileSecret789", "zprofileSecret789"),
+            (
+                'cat "$HERMES_HOME/config.yaml"',
+                "SERVICE_TOKEN=variablePathSecret123456789",
+                "variablePathSecret123456789",
+            ),
+            (
+                'cat "${HERMES_HOME}/config.yaml"',
+                "SERVICE_TOKEN=variablePathSecret123456789",
+                "variablePathSecret123456789",
+            ),
+            (
+                "awk '{print $1; print $2}' ~/.bashrc",
+                "export SERVICE_TOKEN=awkQuotedSecret123",
+                "awkQuotedSecret123",
+            ),
+            (
+                "grep 'foo|bar' ~/.hermes/config.yaml",
+                "SERVICE_TOKEN=grepQuotedSecret456",
+                "grepQuotedSecret456",
+            ),
+            # Backup copies of config.yaml carry the same secrets.
+            (
+                "cat ~/.hermes/backups/config/config.yaml.good.20260914-184559",
+                "api_key: backupGoodSecret123",
+                "backupGoodSecret123",
+            ),
+            (
+                'cat "$HERMES_HOME/backups/config/config.yaml.corrupt.20260701-161906.bak"',
+                "provider.token=backupCorruptSecret456",
+                "backupCorruptSecret456",
+            ),
+            (
+                "grep -n token ~/.hermes/config.yaml.bak-2026-07-24",
+                "api_key: handBackupSecret789",
+                "handBackupSecret789",
+            ),
         ],
     )
     def test_secret_bearing_file_commands_mask_assignments(self, command, output, secret):
@@ -1111,7 +1147,8 @@ class TestTerminalOutputRedaction:
             "cat ~/.hermes/config.example.yaml",
             "cat ~/.hermes/config.template.yaml",
             "cat ~/.bashrc.example",
-            'cat "$HERMES_HOME/config.yaml"',
+            'cat "$OTHER/config.yaml"',
+            "cat /project/config.yaml.bak",
             "grep TOKEN app.py",
             "awk '/TOKEN/' settings.yaml",
             "sed -n '1,20p' template.yaml",
@@ -1125,6 +1162,16 @@ class TestTerminalOutputRedaction:
         assert "realEnvSecret123" not in redact_terminal_output(
             "SERVICE_TOKEN=realEnvSecret123", "cat .env"
         )
+
+    def test_command_segments_split_only_on_unquoted_separators(self):
+        from agent.redact import _command_segments
+
+        assert _command_segments("awk '{print $1; print $2}' ~/.bashrc") == [
+            "awk '{print $1; print $2}' ~/.bashrc"
+        ]
+        assert _command_segments('grep "a|b" f | head -n1; cat x && ls') == [
+            'grep "a|b" f', "head -n1", "cat x", "ls"
+        ]
 
     def test_disabled_passes_through(self, monkeypatch):
         from agent.redact import redact_terminal_output

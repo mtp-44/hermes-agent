@@ -727,8 +727,35 @@ _TEXT_FILE_READ_COMMANDS = frozenset({"grep", "awk", "sed"})
 
 
 def _command_segments(command: str) -> list[str]:
-    """Pipeline/sequence segments of a shell command, stripped, empties dropped."""
-    return [seg.strip() for seg in re.split(r"[|;&]+", command) if seg.strip()]
+    """Pipeline/sequence segments, split only on unquoted ``| ; &``.
+
+    Quote-aware so ``awk '{print $1; print $2}'`` / ``grep 'foo|bar'`` stay
+    one segment. Backslash is not an escape (Windows ``C:\\Users\\...``).
+    """
+    segments: list[str] = []
+    buf: list[str] = []
+    quote: str | None = None
+    for ch in command:
+        if quote:
+            buf.append(ch)
+            if ch == quote:
+                quote = None
+            continue
+        if ch in "'\"":
+            quote = ch
+            buf.append(ch)
+            continue
+        if ch in "|;&":
+            seg = "".join(buf).strip()
+            if seg:
+                segments.append(seg)
+            buf = []
+            continue
+        buf.append(ch)
+    seg = "".join(buf).strip()
+    if seg:
+        segments.append(seg)
+    return segments
 
 
 def _command_reads_env_file(command: str | None) -> bool:
@@ -750,9 +777,32 @@ def _command_reads_env_file(command: str | None) -> bool:
     return False
 
 
+_HERMES_HOME_PREFIXES = ("$HERMES_HOME/", "${HERMES_HOME}/")
+
+
+def _is_hermes_config_basename(name: str) -> bool:
+    """``config.yaml`` plus any ``config.yaml.<suffix>`` copy of it.
+
+    Hermes writes ``backups/config/config.yaml.good.<stamp>`` /
+    ``.corrupt.<stamp>.bak`` snapshots, and hand-made copies
+    (``config.yaml.bak-<date>``, ``config.yaml.pre-<change>``) sit beside the
+    live file — same contents, same secrets. Only consulted for paths already
+    under a Hermes home, so arbitrary project YAML is unaffected.
+    """
+    return name == "config.yaml" or name.startswith("config.yaml.")
+
+
 def _is_secret_bearing_file_arg(arg: str) -> bool:
-    """Recognize explicit Hermes config and standard shell startup paths."""
+    """Recognize explicit Hermes config (and its backup copies) and standard
+    shell startup paths. ``$HERMES_HOME/…`` / ``${HERMES_HOME}/…`` count as a
+    Hermes home; any other unresolved ``$VAR`` path is not classified."""
     path = arg.strip("\"'").replace("\\", "/")
+    hermes_home = False
+    for prefix in _HERMES_HOME_PREFIXES:
+        if path.startswith(prefix):
+            path = path[len(prefix):]
+            hermes_home = True
+            break
     if "$" in path:
         return False
     parts = [part.lower() for part in path.split("/") if part]
@@ -760,7 +810,9 @@ def _is_secret_bearing_file_arg(arg: str) -> bool:
         return False
     if parts[-1] in _SECRET_BEARING_FILE_BASENAMES:
         return True
-    return parts[-1] == "config.yaml" and ".hermes" in parts[:-1]
+    if not _is_hermes_config_basename(parts[-1]):
+        return False
+    return hermes_home or ".hermes" in parts[:-1]
 
 
 def _command_reads_secret_bearing_file(command: str | None) -> bool:
