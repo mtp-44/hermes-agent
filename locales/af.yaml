@@ -7,6 +7,8 @@ approval:
   choose_short:    "      [o]eenmalig  |  [s]sessie  |  [d]weier"
   prompt_long:     "      Keuse [o/s/a/D]: "
   prompt_short:    "      Keuse [o/s/D]: "
+  choose_once_only: "      [o]eenmalig  |  [d]weier"
+  prompt_once_only: "      Keuse [o/D]: "
   timeout:         "      ⏱ Tyd verstreke - opdrag word geweier"
   allowed_once:    "      ✓ Eenmalig toegelaat"
   allowed_session: "      ✓ Vir hierdie sessie toegelaat"

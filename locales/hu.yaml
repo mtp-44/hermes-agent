@@ -7,6 +7,8 @@ approval:
   choose_short:    "      [o]egyszer  |  [s]munkamenet  |  [d]elutasít"
   prompt_long:     "      Választás [o/s/a/D]: "
   prompt_short:    "      Választás [o/s/D]: "
+  choose_once_only: "      [o]egyszer  |  [d]elutasít"
+  prompt_once_only: "      Választás [o/D]: "
   timeout:         "      ⏱ Időtúllépés - parancs elutasítva"
   allowed_once:    "      ✓ Egyszer engedélyezve"
   allowed_session: "      ✓ Engedélyezve ehhez a munkamenethez"

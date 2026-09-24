@@ -2282,16 +2282,24 @@ def save_permanent_allowlist(patterns: set):
 def prompt_dangerous_approval(command: str, description: str,
                               timeout_seconds: int | None = None,
                               allow_permanent: bool = True,
-                              approval_callback=None) -> str:
+                              approval_callback=None,
+                              *, allow_session: bool = True) -> str:
     """Prompt the user to approve a dangerous command (CLI only).
 
     Args:
         allow_permanent: When False, hide the [a]lways option (used when
             tirith warnings are present, since broad permanent allowlisting
             is inappropriate for content-level security findings).
+        allow_session: When False, hide the [s]ession option too: the
+            caller grants one operation and re-asks next time (the
+            protected agent-instruction gate in ``tools/file_tools.py``).
+            Offering a scope the caller discards makes every later write
+            re-prompt and reads as a broken gate. Only once/deny remain.
         approval_callback: Optional callback registered by the CLI for
             prompt_toolkit integration. Signature:
-            (command, description, *, allow_permanent=True) -> str.
+            (command, description, *, allow_permanent=True,
+            allow_session=True) -> str. ``allow_session`` is only passed
+            when False, so legacy callbacks keep working by default.
 
     Returns: 'once', 'session', 'always', or 'deny'
     """
@@ -2306,10 +2314,15 @@ def prompt_dangerous_approval(command: str, description: str,
     display_command = redact_sensitive_text(command)
     display_description = redact_sensitive_text(description)
 
+    once_only = not allow_session
+
     if approval_callback is not None:
         try:
+            callback_kwargs = {"allow_permanent": allow_permanent}
+            if once_only:
+                callback_kwargs["allow_session"] = False
             return approval_callback(display_command, display_description,
-                                     allow_permanent=allow_permanent)
+                                     **callback_kwargs)
         except Exception as e:
             logger.error("Approval callback failed: %s", e, exc_info=True)
             return "deny"
@@ -2351,7 +2364,9 @@ def prompt_dangerous_approval(command: str, description: str,
             print(f"  {t('approval.dangerous_header', description=display_description)}")
             print(f"      {display_command}")
             print()
-            if allow_permanent:
+            if once_only:
+                print(t("approval.choose_once_only"))
+            elif allow_permanent:
                 print(t("approval.choose_long"))
             else:
                 print(t("approval.choose_short"))
@@ -2362,7 +2377,10 @@ def prompt_dangerous_approval(command: str, description: str,
 
             def get_input():
                 try:
-                    prompt = t("approval.prompt_long") if allow_permanent else t("approval.prompt_short")
+                    if once_only:
+                        prompt = t("approval.prompt_once_only")
+                    else:
+                        prompt = t("approval.prompt_long") if allow_permanent else t("approval.prompt_short")
                     result["choice"] = input(prompt).strip().lower()
                 except (EOFError, OSError):
                     result["choice"] = ""
@@ -2379,6 +2397,11 @@ def prompt_dangerous_approval(command: str, description: str,
             if choice in {'o', 'once'}:
                 print(t("approval.allowed_once"))
                 return "once"
+            elif once_only:
+                # No scope beyond this one operation is on offer; anything
+                # but an explicit "once" is a denial.
+                print(t("approval.denied"))
+                return "deny"
             elif choice in {'s', 'session'}:
                 print(t("approval.allowed_session"))
                 return "session"

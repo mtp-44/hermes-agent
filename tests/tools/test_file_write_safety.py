@@ -456,6 +456,19 @@ class TestProtectedInstructionFiles:
         self._write(target, "second")
         assert len(approvals["calls"]) == 2
 
+    def test_cli_prompt_is_told_no_scope_persists(self, tmp_path, approvals):
+        """The prompt must not advertise a scope this gate discards.
+
+        Since nothing is persisted, a rendered "session"/"always" option
+        re-prompts on the very next write and reads as a broken gate
+        (upstream 165d1849e2).
+        """
+        approvals["answer"] = "once"
+        self._write(tmp_path / "SOUL.md")
+        call = approvals["calls"][0]
+        assert call["allow_session"] is False
+        assert call["allow_permanent"] is False
+
     def test_regular_file_never_prompts(self, tmp_path, approvals):
         res = self._write(tmp_path / "notes.md", "hello")
         assert not res.get("error"), res

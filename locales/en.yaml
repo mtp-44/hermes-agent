@@ -17,6 +17,8 @@ approval:
   choose_short:    "      [o]nce  |  [s]ession  |  [d]eny"
   prompt_long:     "      Choice [o/s/a/D]: "
   prompt_short:    "      Choice [o/s/D]: "
+  choose_once_only: "      [o]nce  |  [d]eny"
+  prompt_once_only: "      Choice [o/D]: "
   timeout:         "      ⏱ Timeout - denying command"
   allowed_once:    "      ✓ Allowed once"
   allowed_session: "      ✓ Allowed for this session"
