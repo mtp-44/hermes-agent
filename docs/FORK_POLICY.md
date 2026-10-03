@@ -33,6 +33,16 @@
 
 Upstream pulls under policy 1 (security fixes only). Newest first.
 
+### 2026-10-03 (later) — `sec/p4-2026-10-03`: signed-URL redaction, global-flag regex
+
+Two fixes ported by hand (`cf94e3eea3`: GCS and Azure SAS signatures redacted
+as URL credentials; `eb8d21f482`: linear global-flag fragments in the seven
+hermes/docker/podman rules, no decision changed) and three triaged
+(`45079e6330` tirith cold scan, `6c3aae398a` at-rest modes under the 0701
+hatch, `e57fa350cb` an approval feature). Digest at 0 undecided. Both gates
+pass. Full account: ADR
+[`HA-0012`](decisions/0012-security-p4-redact-approval-2026-10-03.md).
+
 ### 2026-10-03 — `sec/p3-2026-10-03`: SimpleX allowlist by contactId only
 
 One upstream fix ported by hand (`4670467534`: the allowlist no longer matches
