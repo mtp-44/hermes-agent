@@ -33,6 +33,15 @@
 
 Upstream pulls under policy 1 (security fixes only). Newest first.
 
+### 2026-10-03 — `sec/p3-2026-10-03`: SimpleX allowlist by contactId only
+
+One upstream fix ported by hand (`4670467534`: the allowlist no longer matches
+the attacker-controlled display name) and one triaged as cosmetic
+(`df1b647b42`: a spurious tirith first-download warning). Digest back at 0
+undecided. Both policy-1 gates pass. Live gateway picks it up at its next
+restart; SimpleX is not enabled here. Full account: ADR
+[`HA-0011`](decisions/0011-security-p3-simplex-allowlist-2026-10-03.md).
+
 ### 2026-09-24 (night) — `sec/p2-2026-09-24`: HA-0008's P2 batch
 
 This is the rest of the approval/redaction triage:

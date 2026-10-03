@@ -124,3 +124,5 @@ c5e841ab0e behaviour choice, not taken: would cut Telegram/Signal/PWA approval w
 ba0f5839d4 not applicable: fixes the lowercase env-assignment regex from 8563fe3435, which P1 deliberately did not take (no value-shape gating here; it would mask `api_key = config.get(...)`)
 # 2026-09-24 P2 port (HA-0010)
 b90dbac1d6 behaviour subset taken locally in 73e493f9b3 (interpreter -c/eval widening); the full ~570-line execution-bearing-option rework, which pulls in d41f621071/98bf8b2073/d127fb2197, is not taken
+# 2026-10-03 (HA-0011)
+df1b647b42 cosmetic, not a vulnerability: silences a spurious "tirith enabled but not available" CLI warning while tirith's first background download runs; this deployment runs tirith_fail_open with tirith installed, so the warning cannot mislead a security decision here. Re-evaluate if tirith is reinstalled from scratch.
