@@ -271,6 +271,15 @@ _CREDENTIAL_FILES = (
 # /etc/sudoers on macOS but bypasses a plain "/etc/" pattern check. Match
 # both forms. Inspired by Claude Code 2.1.113's "dangerous path protection".
 _MACOS_PRIVATE_SYSTEM_PATH = r'/private/(?:etc|var|tmp|home)/'
+# Global flags before a subcommand, each with an optional value. Every flag has one parse ('-' plus
+# its possessive remainder, so '--x' and '--x=v' never split two ways) and a value cannot itself be a
+# flag, so a long run that never reaches the subcommand fails in linear time instead of holding the
+# GIL for minutes (upstream #129281, ported as eb8d21f482). Whole groups still backtrack to expose
+# the target flag or verb.
+_GLOBAL_FLAGS = r'(?:-\S++(?:\s++(?!-\S)\S++)?\s++)*'
+# Same grammar for the docker/podman rules, which have always taken a separate value only after exactly
+# one whitespace character; keeping that means this fix changes no approval decision.
+_CONTAINER_GLOBAL_FLAGS = r'(?:-\S++(?:\s(?!-\S)\S++)?\s++)*'
 # System-config paths that should trigger approval for any write/edit,
 # collapsing /etc, its macOS /private/etc mirror, and /etc/sudoers.d/ into
 # one shared fragment so new DANGEROUS_PATTERNS stay consistent.
@@ -706,7 +715,7 @@ DANGEROUS_PATTERNS = [
     # terminates all running agents mid-work.  Allow global flags between
     # `hermes` and `gateway` (e.g. `hermes -p ade gateway restart`) so a
     # profile flag can't slip the agent past the guard.
-    (r'\bhermes\s+(?:-{1,2}\S+(?:\s+\S+)?\s+)*gateway\s+(stop|restart)\b', "stop/restart hermes gateway (kills running agents)"),
+    (r'\bhermes\s+' + _GLOBAL_FLAGS + r'gateway\s+(stop|restart)\b', "stop/restart hermes gateway (kills running agents)"),
     (r'\bhermes\s+update\b', "hermes update (restarts gateway, kills running agents)"),
     # Docker container lifecycle — any user with docker.sock mounted (a common
     # Docker Compose pattern) gives the agent the ability to restart/stop/kill
@@ -726,15 +735,15 @@ DANGEROUS_PATTERNS = [
     # Inspired by Claude Code 2.1.214, which added permission prompts for
     # docker/podman commands carrying daemon-redirect flags (--url,
     # --connection, --identity, remote mode).
-    (r'\bdocker\s+(?:-{1,2}\S+(?:[=\s]\S+)?\s+)*(?:-h|--host)[=\s]+\S+',
+    (r'\bdocker\s+' + _CONTAINER_GLOBAL_FLAGS + r'(?:-h|--host)[=\s]+\S+',
      "docker with remote daemon redirect (-H/--host)"),
-    (r'\bdocker\s+(?:-{1,2}\S+(?:[=\s]\S+)?\s+)*(?:-c|--context)[=\s]+\S+',
+    (r'\bdocker\s+' + _CONTAINER_GLOBAL_FLAGS + r'(?:-c|--context)[=\s]+\S+',
      "docker with daemon redirect (--context: alternate daemon)"),
     (r'\bdocker\s+context\s+use\b',
      "docker context use (switches default daemon for future commands)"),
-    (r'\bpodman\s+(?:-{1,2}\S+(?:[=\s]\S+)?\s+)*(?:--url|--connection|--identity)[=\s]+\S+',
+    (r'\bpodman\s+' + _CONTAINER_GLOBAL_FLAGS + r'(?:--url|--connection|--identity)[=\s]+\S+',
      "podman with remote daemon redirect (--url/--connection/--identity)"),
-    (r'\bpodman\s+(?:-{1,2}\S+(?:[=\s]\S+)?\s+)*(?:-r\b|--remote\b)',
+    (r'\bpodman\s+' + _CONTAINER_GLOBAL_FLAGS + r'(?:-r\b|--remote\b)',
      "podman remote mode (-r/--remote: remote daemon)"),
     (r'\b(?:docker_host|docker_context|container_host|container_connection)=\S+',
      "docker/podman daemon redirect via environment (DOCKER_HOST/CONTAINER_HOST)"),
@@ -743,9 +752,9 @@ DANGEROUS_PATTERNS = [
     # and the legacy hyphenated `docker-compose` binary, so a flag can't slip
     # a lifecycle command past the guard — same treatment as the `hermes ...
     # gateway` pattern above.
-    (r'\bdocker(?:-compose|\s+compose)\s+(?:-{1,2}\S+(?:[=\s]\S+)?\s+)*(restart|stop|kill|down)\b',
+    (r'\bdocker(?:-compose|\s+compose)\s+' + _CONTAINER_GLOBAL_FLAGS + r'(restart|stop|kill|down)\b',
      "docker compose restart/stop/kill/down (container lifecycle)"),
-    (r'\bdocker\s+(?:-{1,2}\S+(?:[=\s]\S+)?\s+)*(restart|stop|kill)\b',
+    (r'\bdocker\s+' + _CONTAINER_GLOBAL_FLAGS + r'(restart|stop|kill)\b',
      "docker restart/stop/kill (container lifecycle)"),
     # Gateway protection: never start gateway outside systemd management
     (r'gateway\s+run\b.*(&\s*$|&\s*;|\bdisown\b|\bsetsid\b)', "start gateway outside systemd (use 'systemctl --user restart hermes-gateway')"),
