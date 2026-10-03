@@ -1991,6 +1991,18 @@ class TestRedactCdpUrl:
         assert "aaa-secret" not in out
         assert "bbb-secret" not in out
 
+    def test_masks_signed_url_signatures(self):
+        """GCS V4 signed URLs and Azure SAS tokens count as URL credentials,
+        like X-Amz-Signature (upstream cf94e3eea3, HA-0012)."""
+        for url in (
+            "https://storage.example/v1?X-Goog-Signature=goog-secret-sig&view=1",
+            "https://blob.example/v1?sv=2024-11-04&sig=azure-secret-sig",
+        ):
+            out = redact_cdp_url(url)
+            assert "secret-sig" not in out, out
+            assert "=***" in out
+            assert "view=1" in out or "sv=2024-11-04" in out
+
     def test_masks_userinfo_password(self):
         url = "wss://user:p4ssw0rd@cdp.example/devtools/browser/x"
         out = redact_cdp_url(url)
