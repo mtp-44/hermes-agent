@@ -21,9 +21,11 @@
         <key>HOME</key>
         <string>/Users/mh</string>
         <key>OLLAMA_KEEP_ALIVE</key>
-        <string>-1</string>
+        <string>10m</string>
+        <key>OLLAMA_MAX_LOADED_MODELS</key>
+        <string>3</string>
         <key>OLLAMA_CONTEXT_LENGTH</key>
-        <string>131072</string>
+        <string>65536</string>
         <key>OLLAMA_FLASH_ATTENTION</key>
         <string>1</string>
         <key>OLLAMA_KV_CACHE_TYPE</key>

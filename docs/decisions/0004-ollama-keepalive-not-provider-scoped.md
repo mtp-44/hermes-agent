@@ -4,7 +4,7 @@ date: 2026-08-19
 repo: hermes-agent
 status: active
 tags: [fork-policy, providers, config, mistral, ollama, no-core-patch]
-verdict: "Two upstream facts, both found the hard way, and a ruling that **no core patch was made**. (1) `model.ollama_keep_alive` is **not provider-scoped**: `agent/agent_init.py:1844-1853` reads it from the top-level `model` block with no endpoint check and `agent/transports/chat_completions.py:447,567` put it into `extra_body` unconditionally, so *every* provider receives a `keep_alive` field in the request body. Ollama accepts it, OpenAI Codex tolerates it, and **Mistral rejects it with HTTP 422 `extra_forbidden`** — proven by issuing the identical request twice with that field as the only variable. It cannot be scoped in config, because Hermes supports per-`custom_providers` overrides for `context_length` only (`agent_init.py:1550-1570`), and it cannot be fixed from a plugin, because `pre_api_request` is an observability hook that receives a sanitised copy and cannot mutate `api_kwargs`. (2) **`mistral` is not in `CANONICAL_PROVIDERS`** (38 entries, none Mistral) and is absent from `_build_provider_choices`'s static fallback, so `--provider mistral` resolves to no endpoint and `list_authenticated_providers` returns no Mistral row even with a valid key present — `\"mistral\"` appearing in `models.py`'s `_MODELS_DEV_PREFERRED` is a *catalog source* list, not provider registration. The route that works is a `custom_providers` entry, giving slug `custom:mistral` (`providers.custom_provider_slug`), with `runtime_provider._host_derived_api_key` deriving `MISTRAL_API_KEY` from the `api.mistral.ai` hostname so no key is written into `config.yaml`. **Ruling: neither was patched in core.** `docs/FORK_POLICY.md` policy 2 says no load-bearing logic in core paths and policy 3 says swap-don't-debug; a one-line endpoint gate in `chat_completions.py` would have been correct and tiny, and was still refused, because it would attach to every future security sync. The keep-alive pin moved *out* of Hermes instead — see `BS-0002` — and Mistral was wired as a custom provider rather than by adding a canonical one. What future work should take from this: **a config key named for one vendor is not evidence that it is scoped to that vendor**, and the next non-Ollama provider added here will hit the same 422 unless the pin stays out of the request path."
+verdict: "Two facts, both found the hard way, and a ruling that **no core patch was made**. (Corrected 2026-10-06: fact 1 is about a **fork-only** key, not upstream behaviour; see Correction.) (1) `model.ollama_keep_alive` is **not provider-scoped**: `agent/agent_init.py:1844-1853` reads it from the top-level `model` block with no endpoint check and `agent/transports/chat_completions.py:447,567` put it into `extra_body` unconditionally, so *every* provider receives a `keep_alive` field in the request body. Ollama accepts it, OpenAI Codex tolerates it, and **Mistral rejects it with HTTP 422 `extra_forbidden`** — proven by issuing the identical request twice with that field as the only variable. It cannot be scoped in config, because Hermes supports per-`custom_providers` overrides for `context_length` only (`agent_init.py:1550-1570`), and it cannot be fixed from a plugin, because `pre_api_request` is an observability hook that receives a sanitised copy and cannot mutate `api_kwargs`. (2) **`mistral` is not in `CANONICAL_PROVIDERS`** (38 entries, none Mistral) and is absent from `_build_provider_choices`'s static fallback, so `--provider mistral` resolves to no endpoint and `list_authenticated_providers` returns no Mistral row even with a valid key present — `\"mistral\"` appearing in `models.py`'s `_MODELS_DEV_PREFERRED` is a *catalog source* list, not provider registration. The route that works is a `custom_providers` entry, giving slug `custom:mistral` (`providers.custom_provider_slug`), with `runtime_provider._host_derived_api_key` deriving `MISTRAL_API_KEY` from the `api.mistral.ai` hostname so no key is written into `config.yaml`. **Ruling: neither was patched in core.** `docs/FORK_POLICY.md` policy 2 says no load-bearing logic in core paths and policy 3 says swap-don't-debug; a one-line endpoint gate in `chat_completions.py` would have been correct and tiny, and was still refused, because it would attach to every future security sync. The keep-alive pin moved *out* of Hermes instead — see `BS-0002` — and Mistral was wired as a custom provider rather than by adding a canonical one. What future work should take from this: **a config key named for one vendor is not evidence that it is scoped to that vendor**, and the next non-Ollama provider added here will hit the same 422 unless the pin stays out of the request path."
 ---
 
 # `ollama_keep_alive` is global, and `mistral` is not a canonical provider
@@ -61,3 +61,21 @@ despite being the smaller and more obviously correct change.
 - Revisiting means either upstream gating these params by endpoint — the right home
   for the fix, and worth checking on the next security pull — or accepting a core
   patch and the sync cost that comes with it.
+
+## Correction (2026-10-06)
+
+Fact 1 was recorded as upstream behaviour. It is not: `model.ollama_keep_alive`
+is the fork's own feature, Mark's `3b8d44052a` (2026-05-07), carried as
+`b58cde8d4f`. It is absent from the 2026-07-02 pin `88bd1c01e1` and from
+`reference/main` @ `32859234d4`. So "revisiting means upstream gating these
+params" does not apply to it. Upstream never sends the field, and moving to
+upstream drops it. The fork-side fix, if ever wanted, is deleting the
+feature, not gating it.
+
+The `ollama_num_ctx` consequence does concern an upstream key, which was
+present at the pin. Upstream now applies it only when `is_local_endpoint(base_url)`
+(`agent/agent_init.py:2080` in `reference/main`); the transport path was
+not re-checked. Fact 2 (`mistral` not canonical) is unaffected.
+
+Found by the 2026-10-06 fork-vs-upstream inventory
+(`/Users/mh/ai/notes/hermes-assessment-2026-10-06/INVENTORY.md`).

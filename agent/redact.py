@@ -470,9 +470,13 @@ _SECRET_HEADER_RE = re.compile(
 )
 
 # Telegram bot tokens: bot<digits>:<token> or <digits>:<token>,
-# where token part is restricted to [-A-Za-z0-9_] and length >= 30
+# where token part is restricted to [-A-Za-z0-9_] and length >= 30. The
+# lookbehind anchors the id at the start of its digit run: without it, a long
+# run of digits with no ":<token>" after it (a Unity/YAML ``_typelessdata`` blob
+# in a 2 MB PR diff, hex/decimal dumps) retried the greedy ``\d{8,}`` from every
+# digit — quadratic, one core at 100% for hours while holding the GIL.
 _TELEGRAM_RE = re.compile(
-    r"(bot)?(\d{8,}):([-A-Za-z0-9_]{30,})",
+    r"(?<!\d)(bot)?(\d{8,}):([-A-Za-z0-9_]{30,})",
 )
 
 # Private key blocks: -----BEGIN RSA PRIVATE KEY----- ... -----END RSA PRIVATE KEY-----
