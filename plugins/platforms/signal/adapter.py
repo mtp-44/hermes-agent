@@ -444,6 +444,14 @@ class SignalAdapter(BasePlatformAdapter):
         if is_group and not self._group_allowed(group_id):
             return
         chat_id = f"group:{group_id}" if is_group else sender
+        # A reaction is a platform event, never an agent turn. It is handled after the group allowlist
+        # (a group this adapter does not serve emits nothing) but before the mention gate and the
+        # contentless drop, neither of which a reaction can pass.
+        if isinstance(data_message.get("reaction"), dict):
+            await self._emit_reaction_event(
+                data_message["reaction"], chat_id=chat_id, group_info=group_info if is_group else None, sender=sender,
+                sender_name=sender_name, sender_uuid=sender_uuid)
+            return
         text = data_message.get("message", "")
         if text and (mentions := data_message.get("mentions", [])):
             text = _render_mentions(text, mentions)
@@ -493,6 +501,45 @@ class SignalAdapter(BasePlatformAdapter):
         )
         logger.debug("Signal: message from %s in %s: %s", redact_phone(sender), chat_id[:20], (text or "")[:50])
         await self.handle_message(event)
+
+    async def _emit_reaction_event(
+        self, reaction: dict, *, chat_id: str, group_info: Optional[dict], sender: str, sender_name: str,
+        sender_uuid: str) -> None:
+        """Publish a signal-cli ``dataMessage.reaction`` as a ``gateway_platform_event`` ``reaction``
+        (hooks.md contract): ``message_id`` is the reacted-to message's sent timestamp, ``emojis`` is
+        empty for a removal. The runner authorizes the reactor (the source) before plugin dispatch.
+        No-op without a handler or a subscriber; a malformed reaction is dropped; never raises."""
+        handler = getattr(self, "_platform_event_handler", None)
+        if handler is None:
+            return
+        try:
+            from hermes_cli.lifecycle import has_hook
+            if not has_hook("gateway_platform_event"):
+                return
+            target_ts = reaction.get("targetSentTimestamp") or reaction.get("targetTimestamp")
+            emoji = reaction.get("emoji")
+            removed = bool(reaction.get("isRemove") or reaction.get("remove"))
+            if isinstance(target_ts, bool) or not isinstance(target_ts, (int, str)) or not str(target_ts).strip():
+                return
+            if not removed and not (isinstance(emoji, str) and emoji):
+                return
+            message_id = str(target_ts).strip()
+            event = {
+                "platform": "signal",
+                "event_type": "reaction",
+                "payload": {
+                    "emojis": [] if removed else [emoji[:64]], "custom_emoji_ids": [], "removed": removed,
+                    "chat_id": chat_id, "message_id": message_id, "thread_id": None,
+                    "is_own_message": message_id in self._sent_message_timestamps},
+            }
+            is_group = group_info is not None
+            source = self.build_source(
+                chat_id=chat_id, chat_name=group_info.get("groupName") if is_group else sender_name,
+                chat_type="group" if is_group else "dm", user_id=sender, user_name=sender_name or sender,
+                user_id_alt=sender_uuid or None, chat_id_alt=group_info.get("groupId") if is_group else None)
+            await handler(event, source)
+        except Exception:
+            logger.debug("Signal: gateway_platform_event reaction dispatch failed", exc_info=True)
 
     def _group_allowed(self, group_id: str) -> bool:
         """Group policy from SIGNAL_GROUP_ALLOWED_USERS: unset → groups disabled; IDs → only those
