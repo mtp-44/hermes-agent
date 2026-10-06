@@ -7,12 +7,12 @@
 
     <key>ProgramArguments</key>
     <array>
-        <string>/Users/mh/ai/agents/hermes-agent/.venv/bin/python</string>
-        <string>/Users/mh/ai/agents/hermes-agent/scripts/hermes_health_monitor.py</string>
+        <string>/Users/mh/ai/hermes-agent/.venv/bin/python</string>
+        <string>/Users/mh/ai/hermes-agent/scripts/hermes_health_monitor.py</string>
     </array>
 
     <key>WorkingDirectory</key>
-    <string>/Users/mh/ai/agents/hermes-agent</string>
+    <string>/Users/mh/ai/hermes-agent</string>
 
     <key>EnvironmentVariables</key>
     <dict>

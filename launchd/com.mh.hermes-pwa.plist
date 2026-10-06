@@ -25,7 +25,7 @@
 
     <key>ProgramArguments</key>
     <array>
-        <string>/Users/mh/ai/agents/hermes-agent/.venv/bin/python</string>
+        <string>/Users/mh/ai/hermes-agent/.venv/bin/python</string>
         <string>-m</string>
         <string>hermes_cli.main</string>
         <string>dashboard</string>
@@ -38,7 +38,7 @@
     </array>
 
     <key>WorkingDirectory</key>
-    <string>/Users/mh/ai/agents/hermes-agent</string>
+    <string>/Users/mh/ai/hermes-agent</string>
 
     <key>EnvironmentVariables</key>
     <dict>
@@ -47,7 +47,7 @@
         <key>HOME</key>
         <string>/Users/mh</string>
         <key>HERMES_WEB_DIST</key>
-        <string>/Users/mh/ai/agents/hermes-agent-pwa-releases/current</string>
+        <string>/Users/mh/ai/hermes-agent-pwa-releases/current</string>
         <key>HERMES_DASHBOARD_PUBLIC_URL</key>
         <string>https://mini-mh.tailbd0650.ts.net</string>
         <key>HERMES_DASHBOARD_BASIC_AUTH_TTL_SECONDS</key>
