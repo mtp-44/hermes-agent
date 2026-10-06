@@ -367,29 +367,6 @@ async def capture_meeting_note(
     )
 
 
-def _message_text(message: dict[str, Any]) -> str:
-    content = message.get("content")
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts: list[str] = []
-        for item in content:
-            if isinstance(item, dict):
-                text = item.get("text")
-                if isinstance(text, str) and text.strip():
-                    parts.append(text.strip())
-        return "\n".join(parts)
-    return ""
-
-
-def _normalize_line(text: str, *, limit: int = 280) -> str:
-    clean = " ".join(redact_sensitive_text(text).split())
-    clean = re.sub(r"^/[\w.-]+\s*", "", clean)
-    if len(clean) > limit:
-        clean = clean[: limit - 3].rstrip() + "..."
-    return clean
-
-
 def _normalize_capture_content(text: str) -> str:
     lowered = redact_sensitive_text(text).lower().strip()
     lowered = re.sub(r"[^\w\s]", " ", lowered)
@@ -457,107 +434,6 @@ def _build_hermes_capture_metadata(
     if extra:
         metadata.update(extra)
     return {key: value for key, value in metadata.items() if value is not None}
-
-
-def distill_session_transcript(messages: list[dict[str, Any]]) -> dict[str, Any] | None:
-    """Create a small deterministic session summary from transcript messages."""
-    conversational = []
-    for message in messages:
-        role = str(message.get("role") or "")
-        if role not in {"user", "assistant"}:
-            continue
-        text = _normalize_line(_message_text(message))
-        if not text:
-            continue
-        conversational.append({"role": role, "text": text})
-
-    if len(conversational) < 2:
-        return None
-
-    user_points: list[str] = []
-    assistant_points: list[str] = []
-    seen = set()
-
-    for item in conversational:
-        text = item["text"]
-        key = (item["role"], text.lower())
-        if key in seen:
-            continue
-        seen.add(key)
-        if item["role"] == "user" and len(user_points) < 4:
-            user_points.append(text)
-        elif item["role"] == "assistant":
-            assistant_points.append(text)
-
-    recent_assistant = assistant_points[-3:]
-    first_user = next((item["text"] for item in conversational if item["role"] == "user"), "")
-    last_user = next((item["text"] for item in reversed(conversational) if item["role"] == "user"), "")
-
-    lines = ["Session summary"]
-    if first_user:
-        lines.append(f"Started with: {first_user}")
-    if last_user and last_user != first_user:
-        lines.append(f"Ended with: {last_user}")
-    if user_points:
-        lines.append("Key user points:")
-        lines.extend(f"- {point}" for point in user_points)
-    if recent_assistant:
-        lines.append("Key outcomes:")
-        lines.extend(f"- {point}" for point in recent_assistant)
-
-    return {
-        "content": "\n".join(lines).strip(),
-        "message_count": len(conversational),
-        "user_turns": sum(1 for item in conversational if item["role"] == "user"),
-        "assistant_turns": sum(1 for item in conversational if item["role"] == "assistant"),
-    }
-
-
-async def save_session_summary(
-    *,
-    session_id: str,
-    source: Any,
-    messages: list[dict[str, Any]],
-    reason: str,
-) -> dict[str, Any] | None:
-    """Distill and persist a session summary to Openbrain."""
-    summary = distill_session_transcript(messages)
-    if summary is None:
-        return None
-
-    summary_source = type("SummarySource", (), {})()
-    summary_source.platform = getattr(source, "platform", None)
-    summary_source.chat_id = getattr(source, "chat_id", None)
-    summary_source.user_id = getattr(source, "user_id", None)
-    summary_source.thread_id = getattr(source, "thread_id", None)
-    summary_source.session_id = session_id
-    metadata = _build_hermes_capture_metadata(
-        record_type="session_summary",
-        content=summary["content"],
-        source=summary_source,
-        source_id=session_id,
-        semantic_key=f"hermes:session_summary:{session_id}",
-        extra={
-            "session_id": session_id,
-            "session_finalize_reason": reason,
-            "message_count": summary["message_count"],
-            "user_turns": summary["user_turns"],
-            "assistant_turns": summary["assistant_turns"],
-        },
-    )
-    payload = await call_open_brain_tool(
-        "capture_thought",
-        {
-            "content": summary["content"],
-            "metadata": metadata,
-        },
-    )
-    return {
-        "record_id": payload.get("id"),
-        "content": summary["content"],
-        "message_count": summary["message_count"],
-        "deduplicated": bool(payload.get("deduplicated")),
-    }
 
 
 def _brief_excerpt(text: str, *, limit: int = 220) -> str:
