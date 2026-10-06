@@ -106,9 +106,13 @@ def _redirect_uri(request: Request) -> str:
 
 
 def _client_ip(request: Request) -> str:
-    fwd = request.headers.get("x-forwarded-for", "")
-    if fwd:
-        return fwd.split(",")[0].strip()
+    """ASGI peer address for rate limits and the auth audit.
+
+    Never parse client-supplied ``X-Forwarded-For`` here: direct clients can
+    spoof it. Trusted-proxy normalization belongs to the server — uvicorn's
+    ``proxy_headers`` rewrites ``request.client`` only for peers in
+    ``forwarded_allow_ips`` (loopback by default, i.e. ``tailscale serve``).
+    """
     return request.client.host if request.client else ""
 
 
@@ -423,8 +427,8 @@ def _validate_post_login_target(raw: str) -> str:
 # password we verify locally, so it's a credential-stuffing target. A
 # simple in-process sliding-window limiter per client IP raises the cost
 # of online guessing without any external dependency. It is intentionally
-# best-effort: process-local (resets on restart), and behind a trusting
-# proxy the IP is the proxy's unless X-Forwarded-For is set — which is why
+# best-effort: process-local (resets on restart), and keyed on the ASGI peer
+# (never a client-supplied X-Forwarded-For) — which is why
 # this is defence-in-depth on top of the provider's own constant-time
 # verify, not the only line of defence.
 

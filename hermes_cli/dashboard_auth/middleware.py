@@ -91,9 +91,13 @@ def _path_is_public(path: str) -> bool:
 
 
 def _client_ip(request: Request) -> str:
-    fwd = request.headers.get("x-forwarded-for", "")
-    if fwd:
-        return fwd.split(",")[0].strip()
+    """ASGI peer address for rate limits and the auth audit.
+
+    Never parse client-supplied ``X-Forwarded-For`` here: direct clients can
+    spoof it. Trusted-proxy normalization belongs to the server — uvicorn's
+    ``proxy_headers`` rewrites ``request.client`` only for peers in
+    ``forwarded_allow_ips`` (loopback by default, i.e. ``tailscale serve``).
+    """
     return request.client.host if request.client else ""
 
 
