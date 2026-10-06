@@ -160,6 +160,18 @@ def _looks_like_e164_number(value: str) -> bool:
     return bool(value) and value.startswith("+") and value[1:].isdigit() and 7 <= len(value) - 1 <= 15
 
 
+def _redact_signal_chat_id(chat_id: str) -> str:
+    """Log-safe Signal chat id: a direct chat's E.164 number is phone-redacted, group and service
+    ids are shortened. Done at the call site, not only by the process-wide log formatter, so
+    embedders with their own handlers never get the number (``chat_id[:20]`` kept all of it)."""
+    value = str(chat_id or "")
+    if value.startswith("group:"):
+        return f"group:{value[6:14]}…" if len(value) > 14 else value
+    if _looks_like_e164_number(value):
+        return redact_phone(value)
+    return f"{value[:8]}…{value[-4:]}" if len(value) > 12 else value
+
+
 def check_signal_requirements() -> bool:
     """Check if Signal runtime dependencies are available."""
     return True
@@ -491,7 +503,8 @@ class SignalAdapter(BasePlatformAdapter):
             reply_to_author_name=quote_data.get("authorName") or quote_data.get("authorProfileName"),
             reply_to_is_own_message=self._quote_references_own_message(reply_to_id, reply_to_author),
         )
-        logger.debug("Signal: message from %s in %s: %s", redact_phone(sender), chat_id[:20], (text or "")[:50])
+        logger.debug("Signal: message from %s in %s: %s", redact_phone(sender), _redact_signal_chat_id(chat_id),
+                     (text or "")[:50])
         await self.handle_message(event)
 
     def _group_allowed(self, group_id: str) -> bool:
@@ -719,7 +732,7 @@ class SignalAdapter(BasePlatformAdapter):
             elif text_styles:
                 params["textStyles"] = text_styles
             logger.info("[Signal] Sending response chunk %d/%d (%d chars) to %s", idx, len(chunks), len(plain_text),
-                        chat_id)
+                        _redact_signal_chat_id(chat_id))
             last_result, err = await self._rpc_send(params, "RPC send failed")
             if err:
                 return err
@@ -786,7 +799,7 @@ class SignalAdapter(BasePlatformAdapter):
             return SendResult(success=False, error="no images to send")
         scheduler = get_scheduler()
         logger.info("Signal send_multiple_images: received %d image(s) for %s — scheduler state: %s", len(images),
-                    chat_id[:30], scheduler.state())
+                    _redact_signal_chat_id(chat_id), scheduler.state())
         await self._stop_typing_indicator(chat_id)
         attachments: list[str] = []
         skipped = {"download": 0, "missing": 0, "oversize": 0}
@@ -937,7 +950,7 @@ class SignalAdapter(BasePlatformAdapter):
             "account": self.account, "emoji": emoji, "targetAuthor": target_author,
             "targetTimestamp": target_timestamp})
         if not ok:
-            logger.debug("Signal: sendReaction failed (chat=%s, emoji=%s)", chat_id[:20], emoji)
+            logger.debug("Signal: sendReaction failed (chat=%s, emoji=%s)", _redact_signal_chat_id(chat_id), emoji)
         return ok
 
     async def remove_reaction(self, chat_id: str, target_author: str, target_timestamp: int) -> bool:

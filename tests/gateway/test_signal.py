@@ -1,6 +1,7 @@
 """Tests for Signal messenger platform adapter."""
 import asyncio
 import base64
+import logging
 import pytest
 from pathlib import Path
 from unittest.mock import MagicMock, patch, AsyncMock
@@ -640,6 +641,42 @@ class TestSignalSendDocumentViaHelper:
 # Signal streaming edit capability / message_id behavior
 # ---------------------------------------------------------------------------
 
+
+
+class TestSignalChatIdLogRedaction:
+    """Adapter log lines must not carry a direct chat's phone number (or a full group / service id)
+    verbatim: ``chat_id[:20]`` keeps a whole E.164 number, and the send path logged it untruncated
+    at INFO. Redacted at the call site so embedders with their own log handlers are covered too."""
+
+    NUMBER = "+15557654321"
+
+    def test_helper_bounds_every_id_shape(self):
+        from plugins.platforms.signal.adapter import _redact_signal_chat_id
+
+        redacted = _redact_signal_chat_id(self.NUMBER)
+        assert self.NUMBER not in redacted and "****" in redacted and redacted.endswith("4321")
+        assert _redact_signal_chat_id("group:abcdefghijklmnop") == "group:abcdefgh…"
+        service_id = "11111111-2222-3333-4444-555555555555"
+        redacted = _redact_signal_chat_id(service_id)
+        assert service_id not in redacted and redacted.endswith("5555")
+        assert _redact_signal_chat_id("short") == "short"
+
+    @pytest.mark.asyncio
+    async def test_send_and_reaction_logs_do_not_carry_the_number(self, monkeypatch, caplog):
+        adapter = _make_signal_adapter(monkeypatch)
+        adapter._stop_typing_indicator = AsyncMock()
+
+        async def mock_rpc(method, params, rpc_id=None, **kwargs):
+            return None if method == "sendReaction" else {"timestamp": 1712345678000}
+
+        adapter._rpc = mock_rpc
+        with caplog.at_level(logging.DEBUG, logger="plugins.platforms.signal.adapter"):
+            await adapter.send(chat_id=self.NUMBER, content="hello")
+            await adapter.send_reaction(self.NUMBER, "👍", self.NUMBER, 1712345678000)
+        messages = [r.getMessage() for r in caplog.records]
+        assert any("Sending response" in m for m in messages)
+        assert any("sendReaction failed" in m for m in messages)
+        assert not any(self.NUMBER in m for m in messages), messages
 
 
 class TestSignalSendReturnsMessageId:
