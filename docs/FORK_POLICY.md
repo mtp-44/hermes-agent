@@ -33,6 +33,15 @@
 
 Upstream pulls under policy 1 (security fixes only). Newest first.
 
+### 2026-10-06 (later) — `sec/p6-2026-10-06`: dashboard XFF, four approval triages
+
+One fix ported by hand (`fb5bba80dc`: the dashboard's login throttle and auth
+audit use the ASGI peer, not a client-supplied `X-Forwarded-For`, fixed in all
+three of the fork's `_client_ip` copies) and four triaged (`2b525ced84`,
+`ef1faa4cf8`, `762f419fe8`, `0df1837e81`: classic-CLI approval-prompt fixes
+that fail closed here today or have no observer). Digest at 0 undecided. Full
+account: ADR [`HA-0014`](decisions/0014-security-p6-dashboard-xff-2026-10-06.md).
+
 ### 2026-10-06 — `sec/p5-2026-10-06`: Telegram-token ReDoS the digest missed
 
 One fix ported by hand (`70f79c8cde`: a `(?<!\d)` lookbehind makes
