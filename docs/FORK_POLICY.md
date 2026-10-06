@@ -33,6 +33,15 @@
 
 Upstream pulls under policy 1 (security fixes only). Newest first.
 
+### 2026-10-06 — `sec/p5-2026-10-06`: Telegram-token ReDoS the digest missed
+
+One fix ported by hand (`70f79c8cde`: a `(?<!\d)` lookbehind makes
+`_TELEGRAM_RE` linear; 40k digits went from 3.01 s to 0.000 s). The digest
+never listed it, because its subject is `fix(agent)` and the filter reads
+type and scope only. The branch also syncs the repo's stale plist copies and
+corrects `HA-0004`. Five new 2026-10-05 commits are undecided. Full account:
+ADR [`HA-0013`](decisions/0013-security-p5-telegram-redos-2026-10-06.md).
+
 ### 2026-10-03 (later) — `sec/p4-2026-10-03`: signed-URL redaction, global-flag regex
 
 Two fixes ported by hand (`cf94e3eea3`: GCS and Azure SAS signatures redacted
