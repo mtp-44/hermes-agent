@@ -12,11 +12,24 @@ else by conventional-commit type.
 A commit counts as security when its type is `security`/`sec`, when its scope
 names `security` (`fix(security): …`, `ci(security): …`) or one of the
 security-gate scopes in SECURITY_SCOPES (`fix(approval): …`, `fix(redact): …`),
-or when its subject cites a GHSA or CVE id. Until 2026-09-24 only the `security`
-type counted, which reported 11 of ~50 (see
+or when its subject or body cites a GHSA or CVE id. Until 2026-09-24 only the
+`security` type counted, which reported 11 of ~50 (see
 docs/decisions/0006-security-sync-2026-09-24.md); the gate scopes were added the
 same day after `feat(approvals)` deny rules and the IMDS approval flag turned up
 outside the report.
+
+Type and scope still missed fixes filed under an ordinary scope:
+`fix(agent): anchor the Telegram token regex … (ReDoS)` was live on the fork
+for two weeks unreported (HA-0013), and 2026-10-06 counted ~110 more since the
+pin. So a behaviour-changing commit (SECURITY_VOCAB_TYPES) also counts when its
+subject uses security vocabulary (SECURITY_VOCAB_RE: ReDoS, TOCTOU, SSRF,
+traversal, redaction, a secret or env leak, a guard bypass, …), minus the
+NOT_SECURITY_RE shapes that reuse those words for something else (catalog pins,
+resource leaks). Measured on main..reference/main at 2026-10-06: 8 of the 9
+known misses caught, about three in four new hits genuinely security-relevant,
+about 40 a month. The vocabulary is a net, not a guarantee: a subject that
+names no security idea (`stop mixed platform bundles from re-exposing blocked
+tools`) still gets through.
 
 Security commits are dropped from the report once handled:
 - landed: one of our own commits carries a `(cherry picked from commit <sha>)`
@@ -59,6 +72,34 @@ SECURITY_SCOPES = SECURITY_WORDS | {"approval", "approvals", "redact", "redactio
 # Types whose commits change no behaviour, so a `security` scope on them is a
 # test or doc about security rather than a fix (e.g. `test(security): …`).
 NON_FIX_TYPES = {"refactor", "test", "tests", "docs", "doc", "style", "perf"}
+# Types that change behaviour, the only ones the vocabulary applies to. `perf`
+# is here although NON_FIX_TYPES excludes it from the scope rule: a ReDoS fix is
+# often filed as `perf(…)`, and the vocabulary names the security idea itself.
+SECURITY_VOCAB_TYPES = {"fix", "feat", "perf", "hardened", "harden", "hardening"}
+_SECRET_NOUNS = (
+    r"(?:secret|token|credential|api[ _-]?key|password|key material|cookie|session id"
+    r"|env(?:ironment)?|HERMES_SESSION\w*)s?"
+)
+_GUARD_NOUNS = (
+    r"(?:guard|gate|approval|allowlist|deny[- ]?(?:list|rule)|scanner|sandbox|policy"
+    r"|check|filter|redact\w*|confirmation|consent|auth\w*)"
+)
+SECURITY_VOCAB_RE = re.compile(
+    r"redos|toctou|\bssrf\b|\bxss\b|\bcsrf\b|\brce\b|remote code|code execution"
+    r"|path[- ]traversal|directory traversal|traversal-shaped|exfil\w*|privilege escalation"
+    r"|symlink-safe|world-readable|owner-only|\bredact\w*|unredact|spoof\w*|hijack\w*|smuggl\w*"
+    rf"|\bleak\w*\W+(?:[\w-]+\W+){{0,4}}{_SECRET_NOUNS}|{_SECRET_NOUNS}\W+(?:[\w-]+\W+){{0,3}}leak"
+    rf"|{_GUARD_NOUNS}\W+(?:[\w-]+\W+){{0,4}}bypass|bypass\w*\W+(?:[\w-]+\W+){{0,3}}{_GUARD_NOUNS}"
+    r"|\bclose[sd]?\W+(?:[\w-]+\W+){0,5}(?:bypass|hole|loophole)",
+    re.IGNORECASE,
+)
+# Subjects that reuse the vocabulary for something else: plugin-catalog pins of
+# products named like it (bot-forge, Afterforge) and resource leaks.
+NOT_SECURITY_RE = re.compile(
+    r"plugin-catalog|^catalog:|bot-forge|afterforge|memory leak"
+    r"|leaked (?:daemon|process|coroutine|connection|fd|file descriptor|thread|socket)",
+    re.IGNORECASE,
+)
 
 
 def run(*args: str) -> str:
@@ -72,7 +113,7 @@ def commit_type(subject: str) -> str:
     return match.group("type").lower() if match else "other"
 
 
-def is_security(subject: str) -> bool:
+def is_security(subject: str, body: str = "") -> bool:
     if ADVISORY_RE.search(subject):
         return True
     match = TYPE_RE.match(subject)
@@ -82,10 +123,20 @@ def is_security(subject: str) -> bool:
     if ctype in SECURITY_WORDS:
         return True
     if ctype in NON_FIX_TYPES:
-        return False
+        return ctype == "perf" and _names_security(subject)
     scope = match.group("scope") or ""
     tokens = {tok.lower() for tok in re.split(r"[,/\s]+", scope) if tok}
-    return bool(tokens & SECURITY_SCOPES)
+    if tokens & SECURITY_SCOPES:
+        return True
+    # An advisory cited only in the body: a follow-up fix or a dependency bump
+    # (`chore(deps): refresh … lockfile` naming its GHSA below the subject).
+    if body and ADVISORY_RE.search(body):
+        return True
+    return ctype in SECURITY_VOCAB_TYPES and _names_security(subject)
+
+
+def _names_security(subject: str) -> bool:
+    return bool(SECURITY_VOCAB_RE.search(subject)) and not NOT_SECURITY_RE.search(subject)
 
 
 def landed_shas(bodies: str) -> set[str]:
@@ -111,21 +162,24 @@ def matches_any(sha: str, prefixes: set[str] | dict[str, str]) -> bool:
     return any(sha.startswith(p) or p.startswith(sha) for p in prefixes)
 
 
-LOG_FORMAT = "%x00%H%x09%cs%x09%s"
+# The body sits between \x1f and \x1e so its own newlines cannot be mistaken
+# for the --name-only file list that follows it.
+LOG_FORMAT = "%x00%H%x09%cs%x09%s%x1f%b%x1e"
 
 
-def parse_log(log: str) -> list[tuple[str, str, str, list[str]]]:
+def parse_log(log: str) -> list[tuple[str, str, str, str, list[str]]]:
     """Parse `git log --name-only --pretty=format:<LOG_FORMAT>` output into
-    (sha, commit date, subject, files)."""
+    (sha, commit date, subject, body, files)."""
     commits = []
     for record in log.split("\x00"):
-        lines = record.strip("\n").splitlines()
-        if not lines:
+        if not record.strip("\n"):
             continue
-        sha, _, rest = lines[0].partition("\t")
+        head, _, files_part = record.partition("\x1e")
+        first, _, body = head.partition("\x1f")
+        sha, _, rest = first.strip("\n").partition("\t")
         day, _, subject = rest.partition("\t")
-        files = [line for line in lines[1:] if line.strip()]
-        commits.append((sha, day, subject, files))
+        files = [line for line in files_part.splitlines() if line.strip()]
+        commits.append((sha, day, subject, body.strip(), files))
     return commits
 
 
@@ -171,8 +225,8 @@ def main() -> int:
     delta_risk: list[tuple[str, str, list[str]]] = []
     type_counts: Counter[str] = Counter()
 
-    for sha, day, subject, files in commits:
-        if is_security(subject):
+    for sha, day, subject, body, files in commits:
+        if is_security(subject, body):
             if matches_any(sha, landed):
                 landed_count += 1
             elif matches_any(sha, triaged):
