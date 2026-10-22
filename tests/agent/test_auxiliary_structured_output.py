@@ -8,17 +8,22 @@ capability rejection already seen in this process) never pays the guaranteed-fai
 """
 import asyncio
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
+from agent import auxiliary_error_policy as aux_errors
 from agent import auxiliary_structured_output as structured_output
 from agent.auxiliary_client import (
     _build_call_kwargs,
     _call_fallback_candidate_async,
     _call_fallback_candidate_sync,
     _is_structured_output_rejection,
+    _should_retry_same_provider,
+    async_call_llm,
+    call_llm,
 )
+from agent.error_classifier import FailoverReason, classify_api_error, is_structured_output_unavailable
 
 _JSON_SCHEMA = {"type": "json_schema", "json_schema": {"name": "t", "strict": True, "schema": {"type": "object"}}}
 _DEEPSEEK_400 = ("Error code: 400 - {'error': {'message': 'This response_format type is unavailable now', "
@@ -139,3 +144,65 @@ def test_rejection_memo_is_per_model_and_ignores_schema_validation_errors():
     after = _build_call_kwargs("openai", "gpt-5-mini", messages,
                                extra_body={"response_format": dict(_JSON_SCHEMA)}, base_url="https://api.openai.com/v1")
     assert after["extra_body"]["response_format"] == _JSON_SCHEMA  # ... but never feeds the memo
+
+
+_OLLAMA_MLX_501 = ("Error code: 501 - {'error': {'message': 'structured output is unavailable', "
+                   "'type': 'api_error', 'param': None, 'code': None}}")
+
+
+class _Rejects501(Exception):
+    status_code = 501
+
+
+def test_ollama_mlx_501_is_a_structured_output_rejection_not_a_transient_blip():
+    """Ollama's MLX engine without its grammar library refuses ``response_format`` with a 501; that is a
+    capability refusal, so it gets the strip-and-retry rung, not same-provider retries of the same request."""
+    def failure(exc):
+        return aux_errors.Failure(exc, aux_errors.classify_attempt(exc, "custom"))
+
+    rejection = _Rejects501(_OLLAMA_MLX_501)
+    verdict = classify_api_error(rejection)
+    assert (verdict.reason, verdict.retryable) == (FailoverReason.format_error, False)
+    assert is_structured_output_unavailable(rejection)
+    assert not _should_retry_same_provider("title_generation", failure(rejection), "")
+
+    # Any other 501 is still an outage: retried on the same provider, never stripped.
+    outage = _Rejects501("Error code: 501 - Not Implemented")
+    assert classify_api_error(outage).reason is FailoverReason.server_error
+    assert not is_structured_output_unavailable(outage)
+    assert _should_retry_same_provider("title_generation", failure(outage), "")
+
+
+@pytest.mark.parametrize("async_mode", [False, True])
+def test_ollama_mlx_501_retries_once_without_response_format_and_is_remembered(async_mode):
+    """First call: one rejected request, one retry without the field. Second call to the same endpoint and
+    model: no guaranteed-fail request at all."""
+    base_url = "http://127.0.0.1:11434/v1"
+    model = "qwen3.6:35b-mlx"
+    client = MagicMock(base_url=base_url)
+    sent = []
+
+    def create(**kwargs):
+        sent.append("response_format" in (kwargs.get("extra_body") or {}))
+        if sent[-1]:
+            raise _Rejects501(_OLLAMA_MLX_501)
+        return _ok_response()
+
+    async def acreate(**kwargs):
+        return create(**kwargs)
+
+    client.chat.completions.create.side_effect = acreate if async_mode else create
+    request = dict(task="title_generation", messages=[{"role": "user", "content": "Reply with JSON only"}],
+                   extra_body={"response_format": dict(_JSON_SCHEMA)})
+    with (
+        patch("agent.auxiliary_client._resolve_task_provider_model",
+              return_value=("custom", model, base_url, None, None)),
+        patch("agent.auxiliary_client._get_cached_client", return_value=(client, model)),
+        patch("agent.auxiliary_client._validate_llm_response", side_effect=lambda resp, _task, **_kw: resp),
+        patch("agent.auxiliary_client._TRANSIENT_RETRY_BACKOFF_BASE", 0.0),
+    ):
+        for _ in range(2):
+            result = asyncio.run(async_call_llm(**request)) if async_mode else call_llm(**request)
+            assert result.choices[0].message.content == '{"title": "x"}'
+
+    assert sent == [True, False, False]

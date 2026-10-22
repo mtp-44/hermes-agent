@@ -505,6 +505,10 @@ _SERVER_DISCONNECT_PATTERNS = (
 # Other premature-close wording (aux-ladder phrasings): a transport retry, never an overflow guess.
 _PREMATURE_CLOSE_PATTERNS = ("connection reset", "response ended prematurely", "remoteprotocolerror", "localprotocolerror")
 
+# Ollama's MLX engine built without its grammar library refuses any ``response_format`` with a 501:
+# a capability refusal behind a 5xx status, which fails the same way on every retry.
+_STRUCTURED_OUTPUT_UNAVAILABLE_PATTERNS = ("structured output is unavailable",)
+
 # Deterministic cert failures (proxy, missing CA, expired/self-signed) — fail
 # fast. Checked BEFORE _SSL_TRANSIENT_PATTERNS: these also contain "[SSL:".
 _SSL_CERT_VERIFY_PATTERNS = (
@@ -715,6 +719,7 @@ _OVERFLOW_AS_5XX_RULES = (
     (_EMPTY_PROVIDER_RESPONSE_PATTERNS, _V_SERVER_ERROR), (_MEMORY_CEILING_PATTERNS, _V_OVERLOADED),
     (_CONTEXT_OVERFLOW_PATTERNS, _V_CONTEXT_OVERFLOW),
 )
+_STRUCTURED_OUTPUT_UNAVAILABLE_RULES = ((_STRUCTURED_OUTPUT_UNAVAILABLE_PATTERNS, _V_FORMAT_ERROR),)
 
 # 404: Nous API surfaces credit depletion as a paid model vanishing from the
 # Free Tier (billing, not missing model); policy block before model_not_found.
@@ -1459,6 +1464,7 @@ _STATUS_HANDLERS: dict[int, Callable[[_Ctx], Verdict]] = {
     403: _status_403, 404: _status_404, 408: lambda c: _V_TIMEOUT, 413: lambda c: _V_PAYLOAD_TOO_LARGE,
     422: lambda c: _classify_image_tool_422(c),
     429: _status_429, 500: _status_5xx, 502: _status_5xx,
+    501: lambda c: _first_match(c.msg, _STRUCTURED_OUTPUT_UNAVAILABLE_RULES) or _V_SERVER_ERROR,
     503: lambda c: _first_match(c.msg, _OVERFLOW_AS_5XX_RULES) or _V_OVERLOADED,
     529: lambda c: _first_match(c.msg, _OVERFLOW_AS_5XX_RULES) or _V_OVERLOADED,
 }
@@ -1669,6 +1675,13 @@ def _status_code_from_body(body: Any) -> Optional[int]:
         (c for c in candidates if isinstance(c, int) and not isinstance(c, bool) and 400 <= c < 600),
         None,
     )
+
+
+def is_structured_output_unavailable(error: Exception) -> bool:
+    """The 501 handler's structured-output table, for the auxiliary strip rung, which matches the raw
+    error without a second classify_api_error call."""
+    return _extract_status_code(error) == 501 and _first_match(
+        str(error).lower(), _STRUCTURED_OUTPUT_UNAVAILABLE_RULES) is not None
 
 
 def _extract_status_code(error: Exception) -> Optional[int]:

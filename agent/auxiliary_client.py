@@ -28,10 +28,8 @@ from agent.local_prompt_progress import (
     PromptReadingClock, current_prompt_reading_hook, prompt_progress, prompt_reading_hook, with_prompt_progress)
 from agent import auxiliary_call_outcome, auxiliary_error_policy as aux_errors
 from agent.error_classifier import (
-    FailoverReason,
-    UNSUPPORTED_PARAM_MARKERS,
-    is_reasoning_field_rejection,
-    is_reasoning_required_rejection,
+    FailoverReason, UNSUPPORTED_PARAM_MARKERS, is_reasoning_field_rejection, is_reasoning_required_rejection,
+    is_structured_output_unavailable,
 )
 from agent.errors import InvalidProviderResponseError
 from agent.auxiliary_fallback_recovery import reapply_repairs
@@ -7491,9 +7489,9 @@ def _parameter_rungs(client: Any, max_tokens: Optional[int]) -> tuple:
     return (
         (lambda exc: _is_unsupported_parameter_error(exc, "temperature"), _without_temperature,
          "provider rejected temperature; retrying without it", remember_temperature_rejection),
-        (_is_structured_output_rejection, _without_structured_output_format,
-         "provider rejected the structured-output format field; retrying without it "
-         "(schema enforcement degrades to prompt compliance)", remember_structured_output_rejection),
+        (lambda exc: _is_structured_output_rejection(exc) or is_structured_output_unavailable(exc),
+         _without_structured_output_format, "provider rejected the structured-output format field; retrying "
+         "without it (schema enforcement degrades to prompt compliance)", remember_structured_output_rejection),
         # A chat-only model on an OpenAI-compatible relay rejects the profile's thinking-off encoding
         # (top-level ``reasoning_effort: none``), and strict-schema gateways reject the generic
         # ``extra_body.reasoning`` fallback outright (#109774); the caller only wanted "no thinking",
